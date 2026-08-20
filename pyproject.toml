@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "larp-bot"
+version = "1.0.0"
+description = "Shared Telegram/VK LARP registration bot for Yandex Cloud"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "boto3==1.43.76",
+  "httpx==0.28.1",
+  "openpyxl==3.1.5",
+  "pydantic==2.13.4",
+  "ydb==3.31.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==2.3.1",
+  "pip-audit==2.10.1",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.16.4",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "RUF"]
+ignore = ["RUF001", "S101", "S105", "S608"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["larp_bot"]
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["ydb.*", "boto3.*", "botocore.*", "openpyxl.*"]
+ignore_missing_imports = true

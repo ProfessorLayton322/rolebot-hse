@@ -1,0 +1,140 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: production-terraform
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_yandex_cloud_id: ${{ vars.YC_CLOUD_ID }}
+      TF_VAR_yandex_folder_id: ${{ vars.YC_FOLDER_ID }}
+      TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_cloudflare_workers_subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.9"
+          terraform_wrapper: false
+      - name: Test application
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install -e '.[dev]'
+          ruff format --check .
+          ruff check .
+          mypy
+          pytest
+          python scripts/check_storage_constraint.py
+          bash scripts/check_telegram_isolation.sh
+      - name: Build deterministic Function package
+        run: bash scripts/build_function.sh
+      - name: Build and test Workers
+        run: |
+          npm ci && npm test && npm run typecheck && npm run build
+          cd ../telegram-egress
+          npm ci && npm test && npm run typecheck && npm run build
+        working-directory: cloudflare/telegram-ingress
+      - name: Exchange GitHub OIDC token for Yandex IAM token
+        env:
+          YC_WIF_AUDIENCE: ${{ vars.YC_WIF_AUDIENCE }}
+          YC_DEPLOY_SERVICE_ACCOUNT_ID: ${{ vars.YC_DEPLOY_SERVICE_ACCOUNT_ID }}
+        run: |
+          oidc_token="$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${YC_WIF_AUDIENCE}" | jq -r .value)"
+          yc_token="$(curl --fail --silent --show-error https://auth.yandex.cloud/oauth/token \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:token-exchange' \
+            --data-urlencode 'requested_token_type=urn:ietf:params:oauth:token-type:access_token' \
+            --data-urlencode "audience=${YC_DEPLOY_SERVICE_ACCOUNT_ID}" \
+            --data-urlencode "subject_token=${oidc_token}" \
+            --data-urlencode 'subject_token_type=urn:ietf:params:oauth:token-type:id_token' | jq -r .access_token)"
+          echo "::add-mask::${yc_token}"
+          echo "YC_TOKEN=${yc_token}" >>"${GITHUB_ENV}"
+      - name: Install Yandex CLI
+        run: curl --fail --silent --show-error https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "${RUNNER_TEMP}/yc" -n
+      - name: Terraform apply
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="key=larp-bot/production.tfstate"
+          terraform plan -input=false -lock-timeout=5m -out=production.tfplan
+          terraform apply -input=false -lock-timeout=5m production.tfplan
+      - name: Read Terraform outputs
+        id: outputs
+        working-directory: infra/terraform
+        run: |
+          ymq_access_key_id="$(terraform output -raw ymq_access_key_id)"
+          ymq_secret_access_key="$(terraform output -raw ymq_secret_access_key)"
+          echo "::add-mask::${ymq_access_key_id}"
+          echo "::add-mask::${ymq_secret_access_key}"
+          {
+            echo "YMQ_ACCESS_KEY_ID=${ymq_access_key_id}"
+            echo "YMQ_SECRET_ACCESS_KEY=${ymq_secret_access_key}"
+          } >>"${GITHUB_ENV}"
+          {
+            echo "lockbox_secret_id=$(terraform output -raw lockbox_secret_id)"
+            echo "yandex_gateway_url=$(terraform output -raw yandex_gateway_url)"
+            echo "telegram_ingress_url=$(terraform output -raw telegram_ingress_url)"
+            echo "vk_callback_url=$(terraform output -raw vk_callback_url)"
+          } >>"${GITHUB_OUTPUT}"
+      - name: Install latest runtime values in Lockbox
+        env:
+          LOCKBOX_SECRET_ID: ${{ steps.outputs.outputs.lockbox_secret_id }}
+          YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
+          VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          TG_ADMIN_IDS: ${{ secrets.TG_ADMIN_IDS }}
+          VK_ADMIN_IDS: ${{ secrets.VK_ADMIN_IDS }}
+          PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
+          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
+          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
+        run: |
+          export PATH="${RUNNER_TEMP}/yc/bin:${PATH}"
+          yc config set token "${YC_TOKEN}"
+          bash scripts/update_runtime_secrets.sh
+      - name: Inject Cloudflare Worker secrets
+        env:
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
+          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
+          YANDEX_GATEWAY_URL: ${{ steps.outputs.outputs.yandex_gateway_url }}
+          INGRESS_WORKER_NAME: larp-bot-telegram-ingress
+          EGRESS_WORKER_NAME: larp-bot-telegram-egress
+        run: bash scripts/update_cloudflare_secrets.sh
+      - name: Configure Telegram webhook
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          TELEGRAM_INGRESS_URL: ${{ steps.outputs.outputs.telegram_ingress_url }}
+        run: bash scripts/configure_telegram_webhook.sh
+      - name: Smoke test
+        env:
+          VK_CALLBACK_URL: ${{ steps.outputs.outputs.vk_callback_url }}
+        run: bash scripts/smoke_test.sh
+      - name: Deployment endpoints
+        run: |
+          echo "Telegram ingress: ${{ steps.outputs.outputs.telegram_ingress_url }}"
+          echo "VK callback: ${{ steps.outputs.outputs.vk_callback_url }}"
