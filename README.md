@@ -58,7 +58,7 @@ stateDiagram-v2
     Cancelled --> Confirmed: CONFIRM / keep or replace old wish
 ```
 
-`ENLIST` asks only whom the player wants to play with. A new row is `Ожидается` with an empty character cell. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` in one local workbook mutation and one replacement upload. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
+`ENLIST` asks only whom the player wants to play with. The prompt explicitly offers `Пропустить`; stale event-selection callbacks are rejected instead of being stored as player text. A new row is `Ожидается` with an empty character cell. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` in one local workbook mutation and one replacement upload. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
 
 The same user has a different deterministic participant key for every event. Every event has a different workbook, therefore:
 
@@ -89,10 +89,13 @@ Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once
 Visible columns:
 
 ```text
+№
 Имя
+Предыдущий опыт в LARP
+Готовность к кроссполу
 С кем хочу играть
 Пожелания по персонажу
-Статус
+Текущий статус
 ```
 
 Hidden technical columns:
@@ -105,9 +108,9 @@ updated_at
 
 Hidden columns are not treated as a privacy control. The participant key is `base64url(HMAC-SHA256(secret, platform:user_id:event_id))`; raw Telegram/VK IDs never enter a public workbook. User text beginning with `=`, `+`, `-`, or `@` is prefixed with the established spreadsheet apostrophe escape to prevent formula execution.
 
-The public workbook intentionally exposes display name, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, and credentials never enter it. Operators must disclose to players that character wishes are public under this model.
+The public workbook intentionally exposes row number, display name, prior LARP experience, readiness for cross-gender play, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, and credentials never enter it. Operators must disclose to players that these profile and registration fields are public under this model. Existing workbooks with the previous header layout are migrated during their next ordered mutation.
 
-Malformed XLSX is never replaced by an empty file. The command remains retryable and logs identify the event without participant data.
+Malformed XLSX is never replaced by an empty file. Yandex Disk download redirects are followed before parsing the workbook. The command remains retryable and logs identify the event without participant data.
 
 ## FIFO ordering and failure behavior
 

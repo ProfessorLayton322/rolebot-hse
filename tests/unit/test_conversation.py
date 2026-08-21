@@ -93,7 +93,29 @@ async def test_enlist_never_asks_character_wishes(disk_store: MemoryDiskStore, e
     assert queued.operation is Operation.ENLIST
     assert isinstance(queued.payload, EnlistPayload)
     assert not hasattr(queued.payload, "character_wish")
+    assert queued.payload.larp_experience is True
+    assert queued.payload.crossplay is True
     assert responses[-1].deferred
+
+
+@pytest.mark.asyncio
+async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event)
+    await engine.handle(inbound(1, ENLIST))
+    prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
+    assert "нажмите «пропустить»" in prompt.text.casefold()
+    assert any(button.value == "enlist:wish-play:skip" for button in prompt.buttons)
+
+    stale = await engine.handle(inbound(3, f"select:enlist:{event.event_id}", callback=True))
+    assert "текущую клавиатуру" in stale.text
+    assert not publisher.commands
+
+    await engine.handle(inbound(4, "enlist:wish-play:skip", callback=True))
+    await engine.handle(inbound(5, "enlist:confirm", callback=True))
+    assert isinstance(publisher.commands[-1].payload, EnlistPayload)
+    assert publisher.commands[-1].payload.wish_play == "Без пожеланий"
 
 
 @pytest.mark.asyncio
@@ -195,14 +217,31 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         participant_key=enlist.participant_key,
         display_name=enlist.payload.display_name,
         wish_play=enlist.payload.wish_play,
+        larp_experience=enlist.payload.larp_experience,
+        crossplay=enlist.payload.crossplay,
     )
     await engine.handle(vk(14, CONFIRM))
     prompt = await engine.handle(vk(15, f"select:confirm:{event.event_id}", callback=True))
     assert "пожелания" in prompt.text.casefold()
     await engine.handle(vk(16, "Doctor"))
-    assert publisher.commands[-1].operation is Operation.CONFIRM
+    confirmation = publisher.commands[-1]
+    assert confirmation.operation is Operation.CONFIRM
+    assert confirmation.participant_key is not None
+    assert hasattr(confirmation.payload, "character_wish")
+    await tables.confirm(
+        event,
+        operation_id=confirmation.operation_id,
+        participant_key=confirmation.participant_key,
+        character_wish=confirmation.payload.character_wish,
+    )
 
-    menu = await engine.handle(vk(17, ADMIN))
+    await engine.handle(vk(17, CHARACTER))
+    edit_prompt = await engine.handle(vk(18, f"select:character:{event.event_id}", callback=True))
+    assert "Отправьте новый вариант" in edit_prompt.text
+    await engine.handle(vk(19, "Medic"))
+    assert publisher.commands[-1].operation is Operation.UPDATE_CHARACTER_WISH
+
+    menu = await engine.handle(vk(20, ADMIN))
     assert "Администрирование" in menu.text
 
 

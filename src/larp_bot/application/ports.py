@@ -54,6 +54,8 @@ class RegistrationTableRepository(Protocol):
         participant_key: str,
         display_name: str,
         wish_play: str,
+        larp_experience: bool | None = None,
+        crossplay: bool | None = None,
     ) -> bool: ...
 
     async def confirm(

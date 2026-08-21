@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import httpx
 import pytest
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
-from larp_bot.adapters.yandex_disk.repository import ALL_HEADERS, YandexDiskRegistrationRepository
+from larp_bot.adapters.yandex_disk.repository import (
+    ALL_HEADERS,
+    LEGACY_HEADERS,
+    YandexDiskRegistrationRepository,
+    YandexDiskRestClient,
+)
 from larp_bot.application.services import OperationNotAllowed
 from larp_bot.domain.models import AttendanceStatus, Event
 from tests.conftest import MemoryDiskStore
@@ -26,14 +32,18 @@ async def test_workbook_schema_has_no_negative_co_player_column(disk_store: Memo
         headers = tuple(cell.value for cell in workbook.active[1])
         assert headers == ALL_HEADERS
         assert headers == (
+            "№",
             "Имя",
+            "Предыдущий опыт в LARP",
+            "Готовность к кроссполу",
             "С кем хочу играть",
             "Пожелания по персонажу",
-            "Статус",
+            "Текущий статус",
             "participant_key",
             "last_operation_id",
             "updated_at",
         )
+        assert all(workbook.active.column_dimensions[column].hidden for column in ("H", "I", "J"))
     finally:
         workbook.close()
 
@@ -47,11 +57,87 @@ async def test_enlist_starts_blank_and_waiting(disk_store: MemoryDiskStore, even
         participant_key="a" * 43,
         display_name="Иван Иванов",
         wish_play="С Алисой",
+        larp_experience=True,
+        crossplay=False,
     )
     registration = await repository.find_registration(event, "a" * 43)
     assert registration is not None
     assert registration.character_wish == ""
     assert registration.attendance_status is AttendanceStatus.WAITING
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert tuple(workbook.active.cell(2, column).value for column in range(1, 8)) == (
+            1,
+            "Иван Иванов",
+            "Да",
+            "Нет",
+            "С Алисой",
+            None,
+            AttendanceStatus.WAITING.value,
+        )
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_workbook_is_migrated_by_next_mutation(disk_store: MemoryDiskStore, event: Event) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(LEGACY_HEADERS)
+    sheet.append(("Иван", "Алиса", "", "Ожидается", "a" * 43, "old-op", "2026-08-21T00:00:00+00:00"))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    disk_store.files[event.disk_resource_path] = output.getvalue()
+    repository = YandexDiskRegistrationRepository(disk_store)
+
+    await repository.enlist(
+        event,
+        operation_id="new-op",
+        participant_key="a" * 43,
+        display_name="Иван",
+        wish_play="Боб",
+        larp_experience=False,
+        crossplay=True,
+    )
+
+    migrated = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert tuple(cell.value for cell in migrated.active[1]) == ALL_HEADERS
+        assert tuple(migrated.active.cell(2, column).value for column in range(1, 8)) == (
+            1,
+            "Иван",
+            "Нет",
+            "Да",
+            "Боб",
+            None,
+            "Ожидается",
+        )
+    finally:
+        migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_yandex_disk_download_follows_transfer_redirect() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.host == "cloud-api.yandex.net":
+            return httpx.Response(200, json={"href": "https://downloader.disk.yandex.ru/file"})
+        if request.url.host == "downloader.disk.yandex.ru":
+            return httpx.Response(302, headers={"Location": "https://storage.yandex.net/file"})
+        return httpx.Response(200, content=b"workbook")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        disk = YandexDiskRestClient("token", client)
+        assert await disk.download("disk:/larp-bot/events/event.xlsx") == b"workbook"
+
+    assert [httpx.URL(url).host for url in requests] == [
+        "cloud-api.yandex.net",
+        "downloader.disk.yandex.ru",
+        "storage.yandex.net",
+    ]
 
 
 @pytest.mark.asyncio

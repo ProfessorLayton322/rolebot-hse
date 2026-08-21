@@ -81,7 +81,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     registrations = RegistrationService(events, tables, publisher, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
     administration = EventAdministrationService(events, tables)
     conversation = ConversationEngine(users, events, registrations, administration, lockbox)
-    mutations = OrderedMutationService(events, tables)
+    mutations = OrderedMutationService(events, tables, users)
     worker = OrderedWorker(
         consumer,
         mutations,
