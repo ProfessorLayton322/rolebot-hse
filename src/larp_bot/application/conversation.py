@@ -211,7 +211,7 @@ class ConversationEngine:
             except ValueError as exc:
                 return BotResponse(text=f"❌ {exc}. Попробуйте ещё раз:")
             user.dialog_state = "PROFILE_CROSSPLAY"
-            return BotResponse(text="Готовы ли вы кроссплею?", buttons=yes_no_buttons())
+            return BotResponse(text="Готовы ли вы кроссполу?", buttons=yes_no_buttons())
         boolean_states = {
             "PROFILE_CROSSPLAY": ("crossplay", "PROFILE_EXPERIENCE", "Играли ли вы в LARP до этого?"),
             "PROFILE_EXPERIENCE": (
