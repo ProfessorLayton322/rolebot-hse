@@ -21,7 +21,7 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 
-from .ports import EventRepository, OrderedCommandPublisher, RegistrationTableRepository
+from .ports import EventRepository, OrderedCommandPublisher, RegistrationTableRepository, UserRepository
 
 LOGGER = logging.getLogger("larp_bot.application.services")
 
@@ -172,9 +172,15 @@ class EventAdministrationService:
 class OrderedMutationService:
     """Authoritative worker-time validation and workbook mutation."""
 
-    def __init__(self, events: EventRepository, tables: RegistrationTableRepository) -> None:
+    def __init__(
+        self,
+        events: EventRepository,
+        tables: RegistrationTableRepository,
+        users: UserRepository | None = None,
+    ) -> None:
         self.events = events
         self.tables = tables
+        self.users = users
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         event = await self.events.get(command.event_id)
@@ -196,12 +202,21 @@ class OrderedMutationService:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")
             assert isinstance(command.payload, EnlistPayload)
+            larp_experience = command.payload.larp_experience
+            crossplay = command.payload.crossplay
+            if (larp_experience is None or crossplay is None) and self.users is not None:
+                user = await self.users.get(command.platform, command.platform_user_id)
+                if user is not None:
+                    larp_experience = user.larp_experience
+                    crossplay = user.crossplay
             await self.tables.enlist(
                 event,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
                 display_name=command.payload.display_name,
                 wish_play=command.payload.wish_play,
+                larp_experience=larp_experience,
+                crossplay=crossplay,
             )
             return "Заявка на игру записана"
 

@@ -37,6 +37,8 @@ BACK = "⬅️ Назад"
 CANCEL_DIALOG = "Отмена"
 NO_WISHES = "Без пожеланий"
 KEEP = "Оставить без изменений"
+SKIP = "Пропустить"
+NO_CO_PLAYER_WISH = "Без пожеланий"
 
 
 def yes_no_buttons() -> list[Button]:
@@ -358,7 +360,17 @@ class ConversationEngine:
                 return BotResponse(text="Регистрация на эту игру уже закрыта.")
             user.dialog_context = {"event_id": event_id, "event_name": event.name}
             user.dialog_state = "ENLIST_WISH_PLAY"
-            return BotResponse(text="С кем бы вы ХОТЕЛИ играть?")
+            return BotResponse(
+                text=(
+                    "С кем бы вы ХОТЕЛИ играть?\n\n"
+                    "Нажмите «Пропустить» на клавиатуре или отправьте сообщением, "
+                    "с кем вы хотите играть."
+                ),
+                buttons=[
+                    Button(label=SKIP, value="enlist:wish-play:skip"),
+                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                ],
+            )
         if flow in {"admin-close", "admin-delete"}:
             return await self._admin_select(user, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
@@ -416,7 +428,18 @@ class ConversationEngine:
         if not value:
             return BotResponse(text="Введите ответ текстом.")
         if user.dialog_state == "ENLIST_WISH_PLAY":
-            user.dialog_context["wish_play"] = value[:2000]
+            if message.callback is not None and value != "enlist:wish-play:skip":
+                return BotResponse(
+                    text=(
+                        "Используйте текущую клавиатуру: нажмите «Пропустить» или "
+                        "отправьте сообщением, с кем вы хотите играть."
+                    ),
+                    buttons=[
+                        Button(label=SKIP, value="enlist:wish-play:skip"),
+                        Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                    ],
+                )
+            user.dialog_context["wish_play"] = NO_CO_PLAYER_WISH if value == "enlist:wish-play:skip" else value[:2000]
             user.dialog_state = "ENLIST_CONFIRM"
             return BotResponse(
                 text=(
@@ -442,6 +465,8 @@ class ConversationEngine:
                 payload=EnlistPayload(
                     display_name=user.full_name or "",
                     wish_play=str(context["wish_play"]),
+                    larp_experience=user.larp_experience,
+                    crossplay=user.crossplay,
                 ),
                 reply_context=ReplyContext(
                     chat_id=message.chat_id,

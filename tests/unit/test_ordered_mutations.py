@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
+from openpyxl import load_workbook
 
-from larp_bot.adapters.memory import MemoryEventRepository
+from larp_bot.adapters.memory import MemoryEventRepository, MemoryUserRepository
 from larp_bot.adapters.yandex_disk.repository import YandexDiskRegistrationRepository
 from larp_bot.application.services import EventNotFound, OperationNotAllowed, OrderedMutationService
 from larp_bot.domain.models import (
@@ -16,6 +18,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    TelegramUser,
 )
 from tests.conftest import MemoryDiskStore
 
@@ -36,6 +39,34 @@ def command(
         participant_key=(None if operation in {Operation.CLOSE_EVENT, Operation.DELETE_EVENT} else key),
         payload=payload,
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_enlist_command_backfills_profile_columns(disk_store: MemoryDiskStore, event: Event) -> None:
+    tables = YandexDiskRegistrationRepository(disk_store)
+    await tables.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="Player",
+            vk_url="https://vk.com/player",
+            crossplay=False,
+            larp_experience=True,
+            needs_pass=False,
+        )
+    )
+    mutations = OrderedMutationService(events, tables, users)
+
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A")))
+
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert workbook.active["C2"].value == "Да"
+        assert workbook.active["D2"].value == "Нет"
+    finally:
+        workbook.close()
 
 
 @pytest.mark.asyncio

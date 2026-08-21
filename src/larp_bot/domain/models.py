@@ -169,6 +169,10 @@ class Registration(StrictModel):
 class EnlistPayload(StrictModel):
     display_name: str = Field(min_length=2, max_length=300)
     wish_play: str = Field(min_length=1, max_length=2000)
+    # Optional defaults keep commands already persisted by the previous schema
+    # readable while the worker is being rolled forward.
+    larp_experience: bool | None = None
+    crossplay: bool | None = None
 
 
 class CharacterWishPayload(StrictModel):
