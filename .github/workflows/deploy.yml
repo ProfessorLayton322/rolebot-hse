@@ -105,8 +105,8 @@ jobs:
           VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
           VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
           VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
-          TG_ADMIN_IDS: ${{ secrets.TG_ADMIN_IDS }}
-          VK_ADMIN_IDS: ${{ secrets.VK_ADMIN_IDS }}
+          TG_ADMIN_IDS: ${{ vars.TG_ADMIN_IDS }}
+          VK_ADMIN_IDS: ${{ vars.VK_ADMIN_IDS }}
           PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
           CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
           YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}

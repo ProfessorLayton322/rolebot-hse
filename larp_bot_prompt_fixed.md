@@ -1286,6 +1286,11 @@ VK_ADMIN_IDS
 
 Store each as JSON arrays of numeric IDs.
 
+Treat these two lists as public configuration, not secrets. Their GitHub
+source of truth must be ordinary Actions repository variables. Deployment may
+copy them into the shared Lockbox payload used for dynamic runtime
+configuration.
+
 Example:
 
 ```json
@@ -2253,7 +2258,7 @@ Never recreate the event implicitly.
 
 ---
 
-# 58. Secrets in Yandex Lockbox
+# 58. Runtime values in Yandex Lockbox
 
 At minimum:
 
@@ -2269,6 +2274,10 @@ PARTICIPANT_KEY_HMAC_SECRET
 CF_TO_YANDEX_HMAC_SECRET
 YANDEX_TO_CF_EGRESS_HMAC_SECRET
 ```
+
+`TG_ADMIN_IDS` and `VK_ADMIN_IDS` are public configuration sourced from GitHub
+Actions variables. The other values in this list are protected configuration
+or secrets.
 
 Possibly additional derived configuration as required.
 
