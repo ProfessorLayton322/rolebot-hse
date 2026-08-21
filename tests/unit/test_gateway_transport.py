@@ -4,13 +4,14 @@ import json
 import time
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from larp_bot.adapters.memory import MemoryDeferredTransport
 from larp_bot.domain.models import BotResponse, Button
 from larp_bot.domain.security import sign_request
-from larp_bot.functions.gateway.handler import _telegram, _verify_cloudflare, _vk
+from larp_bot.functions.gateway.handler import _telegram, _verify_cloudflare, _vk, async_handler
 
 
 class FakeLockbox:
@@ -139,3 +140,22 @@ async def test_vk_confirmation_and_authentication() -> None:
         app,
     )
     assert bad_secret["statusCode"] == 403
+
+
+@pytest.mark.asyncio
+async def test_obviously_unauthenticated_vk_request_does_not_initialize_container() -> None:
+    event = {
+        "httpMethod": "POST",
+        "path": "/webhooks/vk",
+        "headers": {"Content-Type": "application/json"},
+        "body": "{}",
+        "isBase64Encoded": False,
+    }
+    with patch(
+        "larp_bot.functions.gateway.handler._container_instance",
+        new_callable=AsyncMock,
+    ) as container_instance:
+        result = await async_handler(event, SimpleNamespace(token={}))
+
+    assert result["statusCode"] == 403
+    container_instance.assert_not_awaited()

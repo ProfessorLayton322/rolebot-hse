@@ -153,8 +153,26 @@ async def _vk(body: bytes, app: AppContainer) -> dict[str, Any]:
     return _response(200, "ok")
 
 
+def _reject_obviously_unauthenticated_vk(body: bytes) -> dict[str, Any] | None:
+    """Reject requests that cannot possibly satisfy the VK callback contract.
+
+    This check deliberately uses only the presence and shape of the credentials.
+    Their values are still verified against Lockbox by ``_vk``. Keeping this
+    preflight independent of the application container lets the public endpoint
+    reject malformed traffic even while downstream services are starting.
+    """
+    try:
+        event = json.loads(body)
+    except json.JSONDecodeError:
+        return _response(400, {"error": "invalid JSON"})
+    if not isinstance(event, dict):
+        return _response(400, {"error": "invalid event"})
+    if not isinstance(event.get("secret"), str) or type(event.get("group_id")) is not int:
+        return _response(403, {"error": "invalid VK callback authentication"})
+    return None
+
+
 async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    app = await _container_instance(context)
     try:
         body = _body(event)
         if len(body) > 256 * 1024:
@@ -164,8 +182,13 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             return _response(405, {"error": "method not allowed"})
         path = str(event.get("path", ""))
         if path.endswith("/telegram"):
+            app = await _container_instance(context)
             return await _telegram(event, body, app)
         if path.endswith("/vk"):
+            rejected = _reject_obviously_unauthenticated_vk(body)
+            if rejected is not None:
+                return rejected
+            app = await _container_instance(context)
             return await _vk(body, app)
         return _response(404, {"error": "not found"})
     except PermissionError as exc:
