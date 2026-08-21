@@ -53,8 +53,11 @@ class YdbExecutor:
             # The dialog FSM, update deduplication and event transitions all need
             # strong reads. Serializable transactions deliberately trade a little
             # latency for deterministic behavior across warm Function instances.
+            # The table SDK silently ignores parameters bound to raw YQL text;
+            # binding is supported only for a prepared DataQuery.
+            prepared = session.prepare(yql)
             result = session.transaction(ydb.SerializableReadWrite()).execute(
-                yql,
+                prepared,
                 params or {},
                 commit_tx=True,
             )
@@ -73,7 +76,7 @@ class YdbExecutor:
                 f"SELECT last_delivery_operation_id FROM `{table}` "
                 f"WHERE {id_column} = $user_id;"
             )
-            rows = _rows(transaction.execute(select, {"$user_id": user_id}))
+            rows = _rows(transaction.execute(session.prepare(select), {"$user_id": user_id}))
             previous = rows[0].get("last_delivery_operation_id") if rows else None
             if previous == operation_id:
                 transaction.commit()
@@ -84,7 +87,7 @@ class YdbExecutor:
                 f"WHERE {id_column} = $user_id;"
             )
             transaction.execute(
-                update,
+                session.prepare(update),
                 {"$user_id": user_id, "$operation_id": operation_id},
                 commit_tx=True,
             )
