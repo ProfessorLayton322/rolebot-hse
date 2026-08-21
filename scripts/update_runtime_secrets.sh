@@ -2,6 +2,7 @@
 set -euo pipefail
 
 : "${LOCKBOX_SECRET_ID:?LOCKBOX_SECRET_ID is required}"
+: "${YC_TOKEN:?YC_TOKEN is required}"
 : "${YANDEX_DISK_TOKEN:?YANDEX_DISK_TOKEN is required}"
 : "${VK_ACCESS_TOKEN:?VK_ACCESS_TOKEN is required}"
 : "${VK_CALLBACK_SECRET:?VK_CALLBACK_SECRET is required}"
@@ -45,20 +46,60 @@ jq -n \
   --arg egress "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
   --arg ymq_id "${YMQ_ACCESS_KEY_ID}" \
   --arg ymq_secret "${YMQ_SECRET_ACCESS_KEY}" \
-  '[
-    {key:"YANDEX_DISK_TOKEN", text_value:$disk},
-    {key:"VK_ACCESS_TOKEN", text_value:$vk_token},
-    {key:"VK_CALLBACK_SECRET", text_value:$vk_secret},
-    {key:"VK_CONFIRMATION_STRING", text_value:$vk_confirmation},
-    {key:"VK_GROUP_ID", text_value:$vk_group},
-    {key:"TG_ADMIN_IDS", text_value:$tg_admins},
-    {key:"VK_ADMIN_IDS", text_value:$vk_admins},
-    {key:"PARTICIPANT_KEY_HMAC_SECRET", text_value:$participant},
-    {key:"CF_TO_YANDEX_HMAC_SECRET", text_value:$ingress},
-    {key:"YANDEX_TO_CF_EGRESS_HMAC_SECRET", text_value:$egress},
-    {key:"YMQ_ACCESS_KEY_ID", text_value:$ymq_id},
-    {key:"YMQ_SECRET_ACCESS_KEY", text_value:$ymq_secret}
-  ]' >"${payload_file}"
+  '{payloadEntries: [
+    {key:"YANDEX_DISK_TOKEN", textValue:$disk},
+    {key:"VK_ACCESS_TOKEN", textValue:$vk_token},
+    {key:"VK_CALLBACK_SECRET", textValue:$vk_secret},
+    {key:"VK_CONFIRMATION_STRING", textValue:$vk_confirmation},
+    {key:"VK_GROUP_ID", textValue:$vk_group},
+    {key:"TG_ADMIN_IDS", textValue:$tg_admins},
+    {key:"VK_ADMIN_IDS", textValue:$vk_admins},
+    {key:"PARTICIPANT_KEY_HMAC_SECRET", textValue:$participant},
+    {key:"CF_TO_YANDEX_HMAC_SECRET", textValue:$ingress},
+    {key:"YANDEX_TO_CF_EGRESS_HMAC_SECRET", textValue:$egress},
+    {key:"YMQ_ACCESS_KEY_ID", textValue:$ymq_id},
+    {key:"YMQ_SECRET_ACCESS_KEY", textValue:$ymq_secret}
+  ]}' >"${payload_file}"
 
-yc lockbox secret add-version "${LOCKBOX_SECRET_ID}" --payload - <"${payload_file}" >/dev/null
-echo "A new Lockbox version was installed"
+if ! operation_response="$(curl --fail-with-body --silent --show-error \
+  --request POST \
+  --header "Authorization: Bearer ${YC_TOKEN}" \
+  --header 'Content-Type: application/json' \
+  --data-binary "@${payload_file}" \
+  "https://lockbox.api.cloud.yandex.net/lockbox/v1/secrets/${LOCKBOX_SECRET_ID}:addVersion")"; then
+  echo "::error::Lockbox rejected the new runtime-secret version" >&2
+  exit 1
+fi
+
+if ! operation_id="$(printf '%s' "${operation_response}" | jq -er \
+  '.id | select(type == "string" and length > 0)' 2>/dev/null)"; then
+  echo "::error::Lockbox returned no operation ID" >&2
+  exit 1
+fi
+
+for ((attempt = 1; attempt <= 30; attempt++)); do
+  if [[ "$(printf '%s' "${operation_response}" | jq -r '.done // false')" == "true" ]]; then
+    if operation_error="$(printf '%s' "${operation_response}" | jq -er \
+      '.error.message | select(type == "string" and length > 0)' 2>/dev/null)"; then
+      operation_error="${operation_error//$'\n'/ }"
+      echo "::error::Lockbox version operation failed: ${operation_error}" >&2
+      exit 1
+    fi
+    echo "A new Lockbox version was installed"
+    exit 0
+  fi
+
+  if ((attempt == 30)); then
+    break
+  fi
+  sleep 2
+  if ! operation_response="$(curl --fail-with-body --silent --show-error \
+    --header "Authorization: Bearer ${YC_TOKEN}" \
+    "https://operation.api.cloud.yandex.net/operations/${operation_id}")"; then
+    echo "::error::Could not read Lockbox operation ${operation_id}" >&2
+    exit 1
+  fi
+done
+
+echo "::error::Timed out waiting for Lockbox operation ${operation_id}" >&2
+exit 1

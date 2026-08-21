@@ -65,8 +65,6 @@ jobs:
           YC_WIF_AUDIENCE: ${{ vars.YC_WIF_AUDIENCE }}
           YC_DEPLOY_SERVICE_ACCOUNT_ID: ${{ vars.YC_DEPLOY_SERVICE_ACCOUNT_ID }}
         run: bash scripts/exchange_yandex_oidc_token.sh
-      - name: Install Yandex CLI
-        run: curl --fail --silent --show-error https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i "${RUNNER_TEMP}/yc" -n
       - name: Terraform apply
         working-directory: infra/terraform
         run: |
@@ -104,10 +102,7 @@ jobs:
           PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
           CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
           YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
-        run: |
-          export PATH="${RUNNER_TEMP}/yc/bin:${PATH}"
-          yc config set token "${YC_TOKEN}"
-          bash scripts/update_runtime_secrets.sh
+        run: bash scripts/update_runtime_secrets.sh
       - name: Inject Cloudflare Worker secrets
         env:
           TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
