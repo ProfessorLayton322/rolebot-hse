@@ -30,8 +30,8 @@ def _rows(result_sets: Sequence[Any]) -> list[dict[str, Any]]:
 class YdbExecutor:
     """Small synchronous-SDK bridge; Cloud Functions reuse the driver on warm starts."""
 
-    def __init__(self, endpoint: str, database: str) -> None:
-        credentials = ydb.iam.MetadataUrlCredentials()
+    def __init__(self, endpoint: str, database: str, *, iam_token: str | None = None) -> None:
+        credentials = ydb.AccessTokenCredentials(iam_token) if iam_token else ydb.iam.MetadataUrlCredentials()
         self.driver = ydb.Driver(endpoint=endpoint, database=database, credentials=credentials)
         self.driver.wait(timeout=10, fail_fast=True)
         self.pool = ydb.SessionPool(self.driver, size=10)
