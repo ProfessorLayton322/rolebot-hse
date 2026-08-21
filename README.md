@@ -207,7 +207,7 @@ Terraform creates separate gateway, ordered-worker, kick-trigger, API-Gateway, a
 | kick trigger | `ymq.reader`, invokes only ordered worker |
 | API Gateway | invokes only gateway Function |
 
-Runtime Functions do not receive `admin` or `editor`. The deployment identity needs service-specific infrastructure administration and IAM-binding permissions; scope it to the production folder.
+Runtime Functions do not receive `admin` or `editor`. The deployment identity needs service-specific infrastructure administration, IAM-binding permissions, and read access to the private Function-package bucket; scope it to the production folder.
 
 ## Local development
 
@@ -269,8 +269,8 @@ These names are exhaustive for the supplied workflows:
 | Secret | Where used / how to obtain |
 |---|---|
 | `CLOUDFLARE_API_TOKEN` | Cloudflare token with Account Workers Scripts edit/deploy and account read permissions |
-| `TF_STATE_ACCESS_KEY_ID` | Static S3 access-key ID for the pre-created private Yandex Object Storage Terraform-state bucket |
-| `TF_STATE_SECRET_ACCESS_KEY` | Matching S3 secret key |
+| `TF_STATE_ACCESS_KEY_ID` | Static S3 access-key ID for the pre-created private Yandex Object Storage bucket; used for Terraform state and Function-package uploads |
+| `TF_STATE_SECRET_ACCESS_KEY` | Matching S3 secret key; it must be allowed to read and write the Function-package object prefix |
 | `TG_BOT_TOKEN` | BotFather token; installed only in telegram-egress and used by deployment to call `setWebhook` |
 | `TG_WEBHOOK_SECRET` | Random webhook secret using only `A-Z a-z 0-9 _ -`; installed in ingress and passed to `setWebhook` |
 | `YANDEX_DISK_TOKEN` | OAuth token for the dedicated Disk account/folder |
@@ -301,7 +301,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `YC_DEPLOY_SERVICE_ACCOUNT_ID` | Deployment SA linked to the GitHub subject |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
-| `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name |
+| `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 
@@ -345,7 +345,7 @@ YANDEX_TO_CF_EGRESS_HMAC_SECRET
 
 1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Cloudflare account, and active Yandex billing folder.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
-3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Lockbox, Logging, and Smart Web Security. Do not reuse a runtime account.
+3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Lockbox, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
 4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the nine GitHub Variables above.
 5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, three YDB tables, and public Worker endpoints.
@@ -410,6 +410,10 @@ Run manually only after building artifacts:
 bash scripts/build_function.sh
 (cd cloudflare/telegram-ingress && npm ci && npm run build)
 (cd cloudflare/telegram-egress && npm ci && npm run build)
+
+export YC_STORAGE_ACCESS_KEY="$AWS_ACCESS_KEY_ID"
+export YC_STORAGE_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
+export TF_VAR_function_package_bucket="$TF_STATE_BUCKET"
 
 cd infra/terraform
 terraform init \

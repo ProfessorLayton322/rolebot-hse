@@ -20,10 +20,13 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
+      YC_STORAGE_ACCESS_KEY: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+      YC_STORAGE_SECRET_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TF_VAR_yandex_cloud_id: ${{ vars.YC_CLOUD_ID }}
       TF_VAR_yandex_folder_id: ${{ vars.YC_FOLDER_ID }}
+      TF_VAR_function_package_bucket: ${{ vars.TF_STATE_BUCKET }}
       TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TF_VAR_cloudflare_workers_subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
     steps:

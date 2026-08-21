@@ -23,6 +23,11 @@ variable "function_zip_path" {
   default     = "../../dist/function-package.zip"
 }
 
+variable "function_package_bucket" {
+  type        = string
+  description = "Existing private Object Storage bucket used for the Function deployment package."
+}
+
 variable "cloudflare_account_id" {
   type = string
 }

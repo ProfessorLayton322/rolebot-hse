@@ -1,4 +1,6 @@
 locals {
+  function_package_hash = filesha256(var.function_zip_path)
+
   function_environment = {
     YDB_ENDPOINT              = yandex_ydb_database_serverless.application.ydb_api_endpoint
     YDB_DATABASE              = yandex_ydb_database_serverless.application.database_path
@@ -13,6 +15,17 @@ locals {
   }
 }
 
+# Function packages above the inline API limit must be uploaded through Object
+# Storage. A stable object key plus source_hash updates the object in place,
+# while user_hash makes Terraform create new Function versions when it changes.
+resource "yandex_storage_object" "function_package" {
+  bucket       = var.function_package_bucket
+  key          = "${var.project_name}/functions/function-package.zip"
+  source       = var.function_zip_path
+  source_hash  = local.function_package_hash
+  content_type = "application/zip"
+}
+
 resource "yandex_function" "gateway" {
   name               = "${var.project_name}-gateway"
   description        = "Shared Telegram and VK application gateway"
@@ -25,15 +38,17 @@ resource "yandex_function" "gateway" {
   service_account_id = yandex_iam_service_account.gateway.id
   environment        = local.function_environment
   tags               = ["production"]
-  user_hash          = filesha256(var.function_zip_path)
+  user_hash          = local.function_package_hash
 
   metadata_options {
     gce_http_endpoint    = 1
     aws_v1_http_endpoint = 2
   }
 
-  content {
-    zip_filename = var.function_zip_path
+  package {
+    bucket_name = yandex_storage_object.function_package.bucket
+    object_name = yandex_storage_object.function_package.key
+    sha_256     = local.function_package_hash
   }
 
   log_options {
@@ -56,15 +71,17 @@ resource "yandex_function" "ordered_worker" {
     WORKER_MAX_SECONDS = "40"
   })
   tags      = ["production"]
-  user_hash = filesha256(var.function_zip_path)
+  user_hash = local.function_package_hash
 
   metadata_options {
     gce_http_endpoint    = 1
     aws_v1_http_endpoint = 2
   }
 
-  content {
-    zip_filename = var.function_zip_path
+  package {
+    bucket_name = yandex_storage_object.function_package.bucket
+    object_name = yandex_storage_object.function_package.key
+    sha_256     = local.function_package_hash
   }
 
   log_options {
