@@ -14,6 +14,7 @@ required=(
   VK_CALLBACK_SECRET
   VK_CONFIRMATION_STRING
   VK_GROUP_ID
+  VK_ACCESS_TOKEN
   VK_ADMIN_IDS
 )
 for name in "${required[@]}"; do
@@ -199,8 +200,9 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 assert payload.get("ok") is True, payload
 PY
 
-# VK authentication, confirmation and a real admin update are all separate
-# checks so the smoke test catches callback drift as well as application stalls.
+# VK authentication, confirmation and real delivered admin messages are all
+# separate checks so the smoke test catches callback drift, application stalls,
+# and VK API failures after the callback has been accepted.
 status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
@@ -222,26 +224,110 @@ status="$(curl --silent --show-error --output "${response_file}" --write-out '%{
 test "${status}" = "200" || unexpected_response "VK confirmation probe" "${status}"
 test "$(cat "${response_file}")" = "${VK_CONFIRMATION_STRING}" || unexpected_response "VK confirmation probe" "${status}"
 
-vk_event_id="smoke-vk-${GITHUB_RUN_ID:-manual}-${RANDOM}"
-vk_message_body="$(python3 -c '
+vk_latest_message_id() {
+  local history_status
+  history_status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+    --request POST \
+    --data-urlencode "access_token=${VK_ACCESS_TOKEN}" \
+    --data-urlencode 'v=5.199' \
+    --data-urlencode "peer_id=${vk_admin_id}" \
+    --data-urlencode 'count=20' \
+    'https://api.vk.com/method/messages.getHistory')"
+  test "${history_status}" = "200" || unexpected_response "VK message history" "${history_status}"
+  python3 - "${response_file}" <<'PY'
 import json
 import sys
 
-event_id, group_id, secret, admin_id = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+assert "error" not in payload, payload["error"]
+items = payload.get("response", {}).get("items", [])
+print(max((item.get("id", 0) for item in items), default=0))
+PY
+}
+
+vk_assert_outgoing_after() {
+  local previous_id="$1"
+  local expected_text="$2"
+  local attempt history_status
+  for attempt in 1 2 3 4 5; do
+    history_status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+      --request POST \
+      --data-urlencode "access_token=${VK_ACCESS_TOKEN}" \
+      --data-urlencode 'v=5.199' \
+      --data-urlencode "peer_id=${vk_admin_id}" \
+      --data-urlencode 'count=20' \
+      'https://api.vk.com/method/messages.getHistory')"
+    test "${history_status}" = "200" || unexpected_response "VK message history" "${history_status}"
+    if python3 - "${response_file}" "${previous_id}" "${VK_GROUP_ID}" "${expected_text}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    payload = json.load(stream)
+assert "error" not in payload, payload["error"]
+previous_id, group_id = map(int, sys.argv[2:4])
+expected = sys.argv[4]
+items = payload.get("response", {}).get("items", [])
+matches = [
+    item
+    for item in items
+    if item.get("id", 0) > previous_id
+    and item.get("out") == 1
+    and item.get("from_id") == -group_id
+    and expected in item.get("text", "")
+]
+raise SystemExit(0 if matches else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "::error::VK did not deliver the expected bot response to the configured administrator" >&2
+  exit 1
+}
+
+vk_message_body() {
+  python3 -c '
+import json
+import sys
+
+event_id, group_id, secret, admin_id, text = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5]
 print(json.dumps({
     "type": "message_new",
     "event_id": event_id,
     "group_id": group_id,
     "secret": secret,
-    "object": {"message": {"from_id": admin_id, "peer_id": admin_id, "text": "/start"}},
+    "object": {"message": {"from_id": admin_id, "peer_id": admin_id, "text": text}},
 }, ensure_ascii=False, separators=(",", ":")))
-' "${vk_event_id}" "${VK_GROUP_ID}" "${VK_CALLBACK_SECRET}" "${vk_admin_id}")"
+' "$1" "${VK_GROUP_ID}" "${VK_CALLBACK_SECRET}" "${vk_admin_id}" "$2"
+}
+
+vk_before_start="$(vk_latest_message_id)"
+vk_event_id="smoke-vk-start-${GITHUB_RUN_ID:-manual}-${RANDOM}"
+vk_body="$(vk_message_body "${vk_event_id}" "/start")"
 status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
-  --data "${vk_message_body}" \
+  --data "${vk_body}" \
   "${VK_CALLBACK_URL}")"
-test "${status}" = "200" || unexpected_response "VK live admin update" "${status}"
-test "$(cat "${response_file}")" = "ok" || unexpected_response "VK live admin update" "${status}"
+test "${status}" = "200" || unexpected_response "VK live /start update" "${status}"
+test "$(cat "${response_file}")" = "ok" || unexpected_response "VK live /start update" "${status}"
+vk_assert_outgoing_after "${vk_before_start}" "Привет! Этот бот поможет зарегистрироваться"
+
+# Selecting the admin entry as plain text works both with VK keyboards enabled
+# and with the API error-912 fallback, and proves that VK_ADMIN_IDS is active.
+vk_before_admin="$(vk_latest_message_id)"
+vk_event_id="smoke-vk-admin-${GITHUB_RUN_ID:-manual}-${RANDOM}"
+vk_body="$(vk_message_body "${vk_event_id}" "🛠 Администрирование")"
+status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data "${vk_body}" \
+  "${VK_CALLBACK_URL}")"
+test "${status}" = "200" || unexpected_response "VK live admin authorization" "${status}"
+test "$(cat "${response_file}")" = "ok" || unexpected_response "VK live admin authorization" "${status}"
+vk_assert_outgoing_after "${vk_before_admin}" "🛠 Администрирование"
 
 echo "Telegram and VK live smoke tests passed"

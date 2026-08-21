@@ -4,6 +4,7 @@ import hashlib
 import json
 import time
 from collections.abc import Sequence
+from typing import cast
 
 import httpx
 
@@ -63,6 +64,7 @@ class CloudflareTelegramEgress:
 
 class VkApiTransport:
     API = "https://api.vk.com/method/messages.send"
+    CHATBOT_FEATURE_DISABLED = 912
 
     def __init__(
         self,
@@ -73,6 +75,32 @@ class VkApiTransport:
         self.access_token = access_token
         self.api_version = api_version
         self.client = client or httpx.AsyncClient(timeout=10.0)
+
+    async def _post(self, data: dict[str, str | int]) -> dict[str, object]:
+        response = await self.client.post(self.API, data=data)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("VK API returned a non-object response")
+        return cast(dict[str, object], payload)
+
+    @staticmethod
+    def _api_error(payload: dict[str, object]) -> tuple[object, str] | None:
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return None
+        code = error.get("error_code", "unknown")
+        message = error.get("error_msg", "unknown error")
+        return code, str(message)
+
+    @staticmethod
+    def _text_keyboard(text: str, buttons: Sequence[Button]) -> str:
+        lines = [text, "", "Доступные команды (отправьте нужную строку сообщением):"]
+        for button in buttons:
+            lines.append(f"• {button.label}")
+            if button.value != button.label:
+                lines.append(f"  Команда: {button.value}")
+        return "\n".join(lines)
 
     async def send(
         self,
@@ -106,7 +134,7 @@ class VkApiTransport:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-        data = {
+        data: dict[str, str | int] = {
             "access_token": self.access_token,
             "v": self.api_version,
             "peer_id": user_id,
@@ -115,14 +143,19 @@ class VkApiTransport:
         }
         if keyboard is not None:
             data["keyboard"] = keyboard
-        response = await self.client.post(
-            self.API,
-            data=data,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if "error" in payload:
-            raise RuntimeError(f"VK API error code {payload['error'].get('error_code', 'unknown')}")
+        payload = await self._post(data)
+        error = self._api_error(payload)
+        if error is not None and error[0] == self.CHATBOT_FEATURE_DISABLED and keyboard is not None:
+            # Community message tokens can send text but cannot enable the VK
+            # "Chat bot feature" setting. Keep the bot usable until an owner
+            # enables it in the community UI: retry without the keyboard and
+            # expose the exact callback values as text commands.
+            data.pop("keyboard")
+            data["message"] = self._text_keyboard(text, buttons)
+            payload = await self._post(data)
+            error = self._api_error(payload)
+        if error is not None:
+            raise RuntimeError(f"VK API error code {error[0]}: {error[1]}")
 
 
 class MultiplexedDeferredTransport:
