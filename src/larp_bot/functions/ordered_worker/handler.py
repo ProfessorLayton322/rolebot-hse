@@ -6,6 +6,9 @@ from typing import Any
 from larp_bot.functions.bootstrap import AppContainer, build_container, iam_token_from_context
 
 _container: AppContainer | None = None
+# The cached container includes async transports. Reuse one event loop for the
+# lifetime of the warm worker process so their connections remain valid.
+_runner = asyncio.Runner()
 
 
 async def _run(context: Any) -> dict[str, int]:
@@ -20,4 +23,4 @@ async def _run(context: Any) -> dict[str, int]:
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, int]:
     del event
-    return asyncio.run(_run(context))
+    return _runner.run(_run(context))
