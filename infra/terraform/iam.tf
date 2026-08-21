@@ -54,6 +54,18 @@ resource "yandex_resourcemanager_folder_iam_member" "runtime" {
   member    = "serviceAccount:${each.value.member}"
 }
 
+# IAM bindings are eventually consistent. Queue creation authenticates with
+# the newly issued ymq_client static key, so wait until its writer permission
+# has had time to propagate before making the first SQS-compatible API call.
+resource "time_sleep" "ymq_writer_ready" {
+  depends_on      = [yandex_resourcemanager_folder_iam_member.runtime["ymq_writer"]]
+  create_duration = "60s"
+
+  triggers = {
+    binding_id = yandex_resourcemanager_folder_iam_member.runtime["ymq_writer"].id
+  }
+}
+
 resource "yandex_function_iam_member" "gateway_from_api_gateway" {
   function_id = yandex_function.gateway.id
   role        = "functions.functionInvoker"
