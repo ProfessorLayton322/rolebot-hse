@@ -42,10 +42,9 @@ Preserve these existing profile fields:
   - email;
   - Russian citizenship yes/no.
 
-Preserve these event-registration preference fields:
+Preserve this event-registration preference field:
 
 - people the player wants to play with;
-- people the player does not want to play with.
 
 ## CRITICAL CHANGE FROM THE OLD BOT
 
@@ -383,7 +382,6 @@ Suggested visible columns:
 ```text
 Имя
 С кем хочу играть
-С кем не хочу играть
 Пожелания по персонажу
 Статус
 ```
@@ -570,7 +568,6 @@ Character-wish editing MUST NOT:
 
 - change another game's character wishes;
 - change `С кем хочу играть`;
-- change `С кем не хочу играть`;
 - change the user's profile;
 - implicitly cancel attendance;
 - implicitly reopen a closed game.
@@ -607,13 +604,13 @@ New registration:
 
 If an existing `Отменено` participant enlists again for an OPEN game:
 
-- update per-game enlistment preferences;
+- update the per-game wanted co-player preference;
 - move status to `Ожидается`;
 - preserve old character wishes unless explicitly changed later.
 
-If an already `Подтверждено` participant uses the enlistment flow merely to update co-player preferences:
+If an already `Подтверждено` participant uses the enlistment flow merely to update the wanted co-player preference:
 
-- update those preferences;
+- update that preference;
 - DO NOT downgrade them to `Ожидается`;
 - preserve character wishes.
 
@@ -639,7 +636,7 @@ Do NOT physically delete the participant row.
 
 Preserve:
 
-- co-player preferences;
+- wanted co-player preference;
 - character wishes.
 
 This allows later restoration/reconfirmation without destroying information.
@@ -750,15 +747,9 @@ Then:
 С кем бы вы ХОТЕЛИ играть?
 ```
 
-4. ask:
-
-```text
-С кем бы вы НЕ ХОТЕЛИ играть?
-```
-
-5. show summary;
-6. enqueue ENLIST;
-7. notify user once the ordered mutation succeeds.
+4. show summary;
+5. enqueue ENLIST;
+6. notify user once the ordered mutation succeeds.
 
 **STOP HERE.**
 
@@ -1025,7 +1016,6 @@ ENLIST payload contains:
 
 ```text
 wish_play
-dont_wish_play
 ```
 
 but MUST NOT require `character_wish`.
@@ -1182,26 +1172,24 @@ If absent:
 - create row;
 - write profile display name;
 - write per-game `wish_play`;
-- write per-game `dont_wish_play`;
 - leave character wish blank;
 - status `Ожидается`.
 
 If existing and currently `Ожидается`:
 
 - update `wish_play`;
-- update `dont_wish_play`;
 - preserve character wish;
 - preserve `Ожидается`.
 
 If existing and currently `Подтверждено`:
 
-- update enlistment preferences;
+- update `wish_play`;
 - preserve character wish;
 - preserve `Подтверждено`.
 
 If existing and currently `Отменено`, and event is OPEN:
 
-- update enlistment preferences;
+- update `wish_play`;
 - preserve previous character wish;
 - status -> `Ожидается`.
 
@@ -2081,7 +2069,6 @@ Registration(
     participant_key=...,
     display_name=...,
     wish_play=...,
-    dont_wish_play=...,
     character_wish=...,
     attendance_status=...,
 )
@@ -2165,7 +2152,6 @@ At minimum:
 
 - display name;
 - wanted co-players;
-- unwanted co-players;
 - character wishes;
 - attendance status.
 
@@ -2770,7 +2756,7 @@ Test editing one game's wish cannot modify another game's workbook.
 - incomplete profile cannot enlist;
 - ENLIST creates one row;
 - duplicate/repeated ENLIST updates same row;
-- confirmed participant updating enlist preferences remains confirmed;
+- confirmed participant updating `wish_play` remains confirmed;
 - CANCEL changes only status as required.
 
 ---
@@ -3220,7 +3206,7 @@ Do NOT:
 - treat character wishes as global user profile data;
 - copy one game's character wishes to another game;
 - erase character wishes on cancellation;
-- erase character wishes when co-player preferences are edited;
+- erase character wishes when `wish_play` is edited;
 - change attendance status when merely editing character wishes;
 - mutate character wishes outside the event FIFO command stream;
 - use Telegram polling in production;

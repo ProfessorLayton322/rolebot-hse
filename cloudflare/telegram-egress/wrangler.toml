@@ -1,0 +1,10 @@
+name = "larp-bot-telegram-egress"
+main = "src/index.ts"
+compatibility_date = "2026-08-20"
+
+[secrets]
+required = ["TG_BOT_TOKEN", "YANDEX_TO_CF_EGRESS_HMAC_SECRET"]
+
+[vars]
+MAX_BODY_BYTES = "32768"
+TIMESTAMP_WINDOW_SECONDS = "60"

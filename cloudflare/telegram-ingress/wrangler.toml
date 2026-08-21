@@ -1,0 +1,15 @@
+name = "larp-bot-telegram-ingress"
+main = "src/index.ts"
+compatibility_date = "2026-08-20"
+
+[secrets]
+required = [
+  "TG_WEBHOOK_SECRET",
+  "CF_TO_YANDEX_HMAC_SECRET",
+  "YANDEX_GATEWAY_URL"
+]
+
+[vars]
+BACKEND_INLINE_CUTOFF_MS = "1500"
+INGRESS_HARD_DEADLINE_MS = "2500"
+MAX_BODY_BYTES = "262144"
