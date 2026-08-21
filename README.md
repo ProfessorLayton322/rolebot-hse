@@ -254,11 +254,13 @@ Create protected `production` and `production-plan` environments. Configure a Ya
 ```text
 issuer:   https://token.actions.githubusercontent.com
 jwks:     https://token.actions.githubusercontent.com/.well-known/jwks
-audience: a repository-specific value such as https://github.com/<owner>
-subject:  repo:<owner>/<repo>:ref:refs/heads/main
+audience: https://github.com/ProfessorLayton322
+subjects:
+  repo:ProfessorLayton322@78860133/rolebot-hse@1341141222:environment:production
+  repo:ProfessorLayton322@78860133/rolebot-hse@1341141222:environment:production-plan
 ```
 
-Link it to a dedicated deployment service account. The workflows exchange GitHub's short-lived OIDC token at `https://auth.yandex.cloud/oauth/token`; no Yandex authorized-key JSON is needed in GitHub.
+This repository was created after GitHub enabled immutable OIDC subjects for new repositories, so the owner and repository IDs are required. An old username that merely redirects on github.com will not match the OIDC claim. Link both exact subjects to the dedicated deployment service account. If GitHub OIDC customization is changed later, the exchange step prints the exact subject that must be linked. The workflows exchange GitHub's short-lived OIDC token at `https://auth.yandex.cloud/oauth/token`; no Yandex authorized-key JSON is needed in GitHub.
 
 ### Required GitHub Secrets
 
@@ -295,7 +297,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 |---|---|
 | `YC_CLOUD_ID` | Production Yandex cloud ID |
 | `YC_FOLDER_ID` | Production folder ID |
-| `YC_WIF_AUDIENCE` | Audience configured on the Yandex workload identity federation |
+| `YC_WIF_AUDIENCE` | Audience configured on the Yandex workload identity federation; must match exactly |
 | `YC_DEPLOY_SERVICE_ACCOUNT_ID` | Deployment SA linked to the GitHub subject |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
@@ -344,7 +346,7 @@ YANDEX_TO_CF_EGRESS_HMAC_SECRET
 1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Cloudflare account, and active Yandex billing folder.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Lockbox, Logging, and Smart Web Security. Do not reuse a runtime account.
-4. Create the GitHub OIDC workload identity federation and federated credential for the exact repository/main-branch subject. Add the nine GitHub Variables above.
+4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the nine GitHub Variables above.
 5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, three YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, adds a Lockbox version, injects Worker secrets, calls Telegram `setWebhook`, and performs an unauthenticated-rejection smoke test.
