@@ -15,6 +15,20 @@ set -euo pipefail
 : "${YMQ_ACCESS_KEY_ID:?YMQ_ACCESS_KEY_ID is required}"
 : "${YMQ_SECRET_ACCESS_KEY:?YMQ_SECRET_ACCESS_KEY is required}"
 
+validate_admin_ids() {
+  local variable_name="$1"
+  local raw_value="$2"
+  if ! printf '%s' "${raw_value}" | jq -e \
+    'type == "array" and all(.[]; type == "number" and floor == . and . > 0)' \
+    >/dev/null; then
+    echo "${variable_name} must be a JSON array of positive numeric user IDs, for example [12345678]" >&2
+    return 1
+  fi
+}
+
+validate_admin_ids "TG_ADMIN_IDS" "${TG_ADMIN_IDS}"
+validate_admin_ids "VK_ADMIN_IDS" "${VK_ADMIN_IDS}"
+
 payload_file="$(mktemp)"
 trap 'rm -f "${payload_file}"' EXIT
 chmod 600 "${payload_file}"
@@ -48,4 +62,3 @@ jq -n \
 
 yc lockbox payload add-version "${LOCKBOX_SECRET_ID}" --payload-file "${payload_file}" >/dev/null
 echo "A new Lockbox version was installed"
-

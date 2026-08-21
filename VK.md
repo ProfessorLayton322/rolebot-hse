@@ -14,9 +14,9 @@
 | `VK_ACCESS_TOKEN` | Ключ доступа сообщества | Да |
 | `VK_CALLBACK_SECRET` | Генерируется самостоятельно | Да |
 | `VK_CONFIRMATION_STRING` | Показывается в настройках Callback API | Да |
-| `VK_ADMIN_IDS` | Числовые ID личных страниц администраторов бота | Условно да |
+| `VK_ADMIN_IDS` | Числовые ID личных страниц администраторов бота | Нет, публичная конфигурация |
 
-Все пять значений добавляются в GitHub environment `production`. В `production-plan` они не нужны.
+Первые четыре значения добавляются в GitHub environment `production`. `VK_ADMIN_IDS` добавляется как обычная GitHub Actions Variable, а не как Secret. В `production-plan` отдельная копия не нужна.
 
 ## 1. Включить сообщения сообщества
 
@@ -82,6 +82,8 @@ VK_ACCESS_TOKEN=<ключ доступа сообщества>
 
 Определите числовые ID личных страниц пользователей, которым разрешено администрировать игры через VK.
 
+В списке нужно хранить стабильные числовые ID, даже если пользователь использует короткий адрес вроде `https://vk.ru/foobar`. Короткий адрес — изменяемый псевдоним, поэтому использовать строку `foobar` для авторизации нельзя.
+
 Если адрес личной страницы администратора выглядит так:
 
 ```text
@@ -89,6 +91,31 @@ https://vk.com/id87654321
 ```
 
 его числовой ID — `87654321`.
+
+Если адрес содержит псевдоним, преобразуйте его в числовой ID через VK API. Команда ниже принимает как полный URL, так и просто имя `foobar`, не выводит токен на экран и печатает только найденный ID:
+
+```bash
+read -rp "VK URL или короткое имя: " VK_PROFILE_VALUE
+VK_SCREEN_NAME="${VK_PROFILE_VALUE%/}"
+VK_SCREEN_NAME="${VK_SCREEN_NAME##*/}"
+read -rsp "VK access token: " VK_LOOKUP_TOKEN
+echo
+curl --fail --silent --show-error --get \
+  "https://api.vk.com/method/users.get" \
+  --data-urlencode "user_ids=${VK_SCREEN_NAME}" \
+  --data-urlencode "access_token=${VK_LOOKUP_TOKEN}" \
+  --data-urlencode "v=5.199" \
+  | jq -er '.response[0].id'
+unset VK_LOOKUP_TOKEN
+```
+
+Например, для `https://vk.ru/foobar` команда может вывести:
+
+```text
+87654321
+```
+
+Именно это число нужно добавить в `VK_ADMIN_IDS`. Приложение сравнивает список с числовым `from_id`, который VK присылает в событии `message_new`; псевдоним профиля в событии не используется.
 
 Для одного администратора значение выглядит так:
 
@@ -152,18 +179,17 @@ VK_CONFIRMATION_STRING=abc12345
 
 ## 7. Что передать ответственному за развёртывание
 
-Передайте следующие значения через защищённое хранилище секретов. Предпочтительный вариант — самостоятельно добавить их в GitHub:
+Четыре защищённых значения предпочтительно самостоятельно добавить в GitHub:
 
 **Repository → Settings → Environments → production → Environment secrets**
 
-Шаблон комплекта:
+Шаблон секретов:
 
 ```text
 VK_GROUP_ID=123456789
 VK_ACCESS_TOKEN=<ключ сообщества>
 VK_CALLBACK_SECRET=<сгенерированный секрет>
 VK_CONFIRMATION_STRING=<код подтверждения VK>
-VK_ADMIN_IDS=[87654321]
 ```
 
 При создании GitHub Secrets:
@@ -173,6 +199,17 @@ VK_ADMIN_IDS=[87654321]
 - внешние кавычки добавлять не нужно;
 - не добавляйте эти значения в `production-plan`;
 - не записывайте реальные значения в этот файл или другие файлы репозитория.
+
+Список администраторов добавьте отдельно как публичную переменную:
+
+**Repository → Settings → Secrets and variables → Actions → Variables → New repository variable**
+
+```text
+Name:  VK_ADMIN_IDS
+Value: [87654321]
+```
+
+`VK_ADMIN_IDS` намеренно не является секретом. Его можно свободно редактировать в настройках Actions; после изменения нужно повторно запустить **Deploy production**.
 
 ## 8. Получить адрес Callback API после развёртывания
 

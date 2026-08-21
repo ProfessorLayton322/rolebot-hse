@@ -276,8 +276,6 @@ These names are exhaustive for the supplied workflows:
 | `VK_CALLBACK_SECRET` | Random secret configured identically in VK Callback API |
 | `VK_CONFIRMATION_STRING` | VK's server-confirmation string |
 | `VK_GROUP_ID` | Numeric community ID; treated as protected configuration |
-| `TG_ADMIN_IDS` | JSON numeric array, e.g. `[12345678]` |
-| `VK_ADMIN_IDS` | JSON numeric array, e.g. `[87654321]` |
 | `PARTICIPANT_KEY_HMAC_SECRET` | At least 32 random bytes, high-entropy; rotation changes lookup keys and requires a migration |
 | `CF_TO_YANDEX_HMAC_SECRET` | At least 32 random bytes; identical in ingress and Lockbox |
 | `YANDEX_TO_CF_EGRESS_HMAC_SECRET` | At least 32 random bytes; identical in Lockbox and egress |
@@ -302,6 +300,8 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name |
+| `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
+| `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 
 ### Lockbox entries
 
@@ -344,8 +344,8 @@ YANDEX_TO_CF_EGRESS_HMAC_SECRET
 1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Cloudflare account, and active Yandex billing folder.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Lockbox, Logging, and Smart Web Security. Do not reuse a runtime account.
-4. Create the GitHub OIDC workload identity federation and federated credential for the exact repository/main-branch subject. Add the seven GitHub Variables above.
-5. Add all fifteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
+4. Create the GitHub OIDC workload identity federation and federated credential for the exact repository/main-branch subject. Add the nine GitHub Variables above.
+5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, three YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, adds a Lockbox version, injects Worker secrets, calls Telegram `setWebhook`, and performs an unauthenticated-rejection smoke test.
 8. In VK community settings, add the emitted `vk_callback_url`, set the same callback secret, select the current API version, confirm the server using `VK_CONFIRMATION_STRING`, and enable message events.
@@ -373,7 +373,7 @@ Use the Terraform `vk_callback_url`, numeric `VK_GROUP_ID`, matching `VK_CALLBAC
 
 ## Admin management
 
-Update `TG_ADMIN_IDS` or `VK_ADMIN_IDS` in the GitHub production environment and rerun `deploy.yml`, or add a new Lockbox payload version manually with the same complete entry set. Values must be JSON arrays of numeric platform IDs—not usernames. Warm Functions refresh within 60 seconds. No build, Terraform change, or Function redeploy is required for a manual Lockbox version change.
+Update the public GitHub Actions repository variable `TG_ADMIN_IDS` or `VK_ADMIN_IDS` and rerun `deploy.yml`, or add a new Lockbox payload version manually with the same complete entry set. Values must be JSON arrays of stable numeric platform IDs—not usernames. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. Warm Functions refresh within 60 seconds. No build, Terraform change, or Function redeploy is required for a manual Lockbox version change.
 
 Every create/close/delete request rechecks the latest admin set. Deletion requires the exact case-sensitive game name after trimming outer whitespace. Admin listing is oldest-first with exactly ten entries per page.
 
