@@ -12,6 +12,18 @@ resource "yandex_ydb_database_serverless" "application" {
   }
 }
 
+# The control-plane operation may complete before a new serverless database is
+# discoverable through its data-plane endpoint. Without this one-time wait the
+# YDB table provider treats the transient DatabaseNotFound response as fatal.
+resource "time_sleep" "ydb_ready" {
+  depends_on      = [yandex_ydb_database_serverless.application]
+  create_duration = "90s"
+
+  triggers = {
+    database_id = yandex_ydb_database_serverless.application.id
+  }
+}
+
 locals {
   common_user_columns = [
     { name = "full_name", type = "Utf8", not_null = false },
@@ -52,6 +64,8 @@ resource "yandex_ydb_table" "tg_users" {
     }
   }
   primary_key = ["tg_id"]
+
+  depends_on = [time_sleep.ydb_ready]
 }
 
 resource "yandex_ydb_table" "vk_users" {
@@ -76,6 +90,8 @@ resource "yandex_ydb_table" "vk_users" {
     }
   }
   primary_key = ["vk_id"]
+
+  depends_on = [time_sleep.ydb_ready]
 }
 
 resource "yandex_ydb_table" "events" {
@@ -118,4 +134,6 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   primary_key = ["event_id"]
+
+  depends_on = [time_sleep.ydb_ready]
 }

@@ -8,6 +8,8 @@ resource "yandex_message_queue" "registration_commands" {
   max_message_size            = 262144
   access_key                  = yandex_iam_service_account_static_access_key.ymq_client.access_key
   secret_key                  = yandex_iam_service_account_static_access_key.ymq_client.secret_key
+
+  depends_on = [time_sleep.ymq_writer_ready]
 }
 
 resource "yandex_message_queue" "worker_kicks" {
@@ -18,6 +20,8 @@ resource "yandex_message_queue" "worker_kicks" {
   max_message_size           = 16384
   access_key                 = yandex_iam_service_account_static_access_key.ymq_client.access_key
   secret_key                 = yandex_iam_service_account_static_access_key.ymq_client.secret_key
+
+  depends_on = [time_sleep.ymq_writer_ready]
 }
 
 # Deliberately attached ONLY to the standard kick queue. Yandex's native trigger
