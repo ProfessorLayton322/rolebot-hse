@@ -4,9 +4,13 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from typing import Any
 
+import httpx
+
+from larp_bot.adapters.lockbox import LockboxConfigProvider
 from larp_bot.adapters.telegram import parse_telegram_update, telegram_inline_payload
 from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.domain.models import Platform
@@ -153,6 +157,31 @@ async def _vk(body: bytes, app: AppContainer) -> dict[str, Any]:
     return _response(200, "ok")
 
 
+async def _vk_confirmation_from_lockbox(
+    event: dict[str, Any],
+    lockbox: LockboxConfigProvider,
+) -> dict[str, Any]:
+    expected_secret = await lockbox.get_secret("VK_CALLBACK_SECRET")
+    expected_group = int(await lockbox.get_secret("VK_GROUP_ID"))
+    if event.get("secret") != expected_secret or event.get("group_id") != expected_group:
+        return _response(403, {"error": "invalid VK callback authentication"})
+    confirmation = await lockbox.get_secret("VK_CONFIRMATION_STRING")
+    return _response(200, confirmation)
+
+
+async def _vk_confirmation(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    secret_id = os.getenv("LOCKBOX_SECRET_ID")
+    if not secret_id:
+        raise RuntimeError("LOCKBOX_SECRET_ID is required")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        lockbox = LockboxConfigProvider(
+            secret_id,
+            client=client,
+            iam_token=iam_token_from_context(context),
+        )
+        return await _vk_confirmation_from_lockbox(event, lockbox)
+
+
 def _reject_obviously_unauthenticated_vk(body: bytes) -> dict[str, Any] | None:
     """Reject requests that cannot possibly satisfy the VK callback contract.
 
@@ -188,6 +217,9 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             rejected = _reject_obviously_unauthenticated_vk(body)
             if rejected is not None:
                 return rejected
+            vk_event: dict[str, Any] = json.loads(body)
+            if vk_event.get("type") == "confirmation":
+                return await _vk_confirmation(vk_event, context)
             app = await _container_instance(context)
             return await _vk(body, app)
         return _response(404, {"error": "not found"})
