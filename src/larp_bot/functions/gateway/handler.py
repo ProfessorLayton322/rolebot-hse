@@ -19,6 +19,10 @@ from larp_bot.functions.bootstrap import AppContainer, build_container, iam_toke
 
 LOGGER = logging.getLogger("larp_bot.gateway")
 _container: AppContainer | None = None
+# AppContainer owns async HTTP clients and their keep-alive connections. A
+# persistent Runner keeps those resources on the same event loop for every
+# invocation handled by a warm Function process.
+_runner = asyncio.Runner()
 
 
 def _response(status: int, body: str | dict[str, Any]) -> dict[str, Any]:
@@ -232,4 +236,4 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    return asyncio.run(async_handler(event, context))
+    return _runner.run(async_handler(event, context))
