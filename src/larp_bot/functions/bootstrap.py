@@ -62,7 +62,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
             "YMQ_SECRET_ACCESS_KEY",
         )
     }
-    db = YdbExecutor(settings.ydb_endpoint, settings.ydb_database)
+    db = YdbExecutor(settings.ydb_endpoint, settings.ydb_database, iam_token=iam_token)
     users = YdbUserRepository(db)
     events = YdbEventRepository(db)
     tables = YandexDiskRegistrationRepository(YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"]))
