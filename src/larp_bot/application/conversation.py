@@ -417,16 +417,12 @@ class ConversationEngine:
             return BotResponse(text="Введите ответ текстом.")
         if user.dialog_state == "ENLIST_WISH_PLAY":
             user.dialog_context["wish_play"] = value[:2000]
-            user.dialog_state = "ENLIST_DONT_WISH"
-            return BotResponse(text="С кем бы вы НЕ ХОТЕЛИ играть?")
-        if user.dialog_state == "ENLIST_DONT_WISH":
-            user.dialog_context["dont_wish_play"] = value[:2000]
             user.dialog_state = "ENLIST_CONFIRM"
             return BotResponse(
                 text=(
                     f"Игра: «{user.dialog_context['event_name']}»\n\n"
-                    f"Хочу играть: {user.dialog_context['wish_play']}\n"
-                    f"Не хочу играть: {value}\n\nПодтвердить запись?"
+                    f"Хочу играть: {user.dialog_context['wish_play']}\n\n"
+                    "Подтвердить запись?"
                 ),
                 buttons=[
                     Button(label="Подтвердить", value="enlist:confirm"),
@@ -446,7 +442,6 @@ class ConversationEngine:
                 payload=EnlistPayload(
                     display_name=user.full_name or "",
                     wish_play=str(context["wish_play"]),
-                    dont_wish_play=str(context["dont_wish_play"]),
                 ),
                 reply_context=ReplyContext(
                     chat_id=message.chat_id,

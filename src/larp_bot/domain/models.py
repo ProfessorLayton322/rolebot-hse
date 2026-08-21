@@ -160,7 +160,6 @@ class Registration(StrictModel):
     participant_key: str = Field(min_length=43, max_length=64)
     display_name: str
     wish_play: str
-    dont_wish_play: str
     character_wish: str = ""
     attendance_status: AttendanceStatus = AttendanceStatus.WAITING
     last_operation_id: str = ""
@@ -170,7 +169,6 @@ class Registration(StrictModel):
 class EnlistPayload(StrictModel):
     display_name: str = Field(min_length=2, max_length=300)
     wish_play: str = Field(min_length=1, max_length=2000)
-    dont_wish_play: str = Field(min_length=1, max_length=2000)
 
 
 class CharacterWishPayload(StrictModel):

@@ -202,7 +202,6 @@ class OrderedMutationService:
                 participant_key=command.participant_key,
                 display_name=command.payload.display_name,
                 wish_play=command.payload.wish_play,
-                dont_wish_play=command.payload.dont_wish_play,
             )
             return "Заявка на игру записана"
 

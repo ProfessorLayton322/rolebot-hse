@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-import pytest
+from io import BytesIO
 
-from larp_bot.adapters.yandex_disk.repository import YandexDiskRegistrationRepository
+import pytest
+from openpyxl import load_workbook
+
+from larp_bot.adapters.yandex_disk.repository import ALL_HEADERS, YandexDiskRegistrationRepository
 from larp_bot.application.services import OperationNotAllowed
 from larp_bot.domain.models import AttendanceStatus, Event
 from tests.conftest import MemoryDiskStore
@@ -16,6 +19,26 @@ async def initialized(store: MemoryDiskStore, event: Event) -> YandexDiskRegistr
 
 
 @pytest.mark.asyncio
+async def test_workbook_schema_has_no_negative_co_player_column(disk_store: MemoryDiskStore, event: Event) -> None:
+    await initialized(disk_store, event)
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        headers = tuple(cell.value for cell in workbook.active[1])
+        assert headers == ALL_HEADERS
+        assert headers == (
+            "Имя",
+            "С кем хочу играть",
+            "Пожелания по персонажу",
+            "Статус",
+            "participant_key",
+            "last_operation_id",
+            "updated_at",
+        )
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
 async def test_enlist_starts_blank_and_waiting(disk_store: MemoryDiskStore, event: Event) -> None:
     repository = await initialized(disk_store, event)
     await repository.enlist(
@@ -24,7 +47,6 @@ async def test_enlist_starts_blank_and_waiting(disk_store: MemoryDiskStore, even
         participant_key="a" * 43,
         display_name="Иван Иванов",
         wish_play="С Алисой",
-        dont_wish_play="Без конфликтов",
     )
     registration = await repository.find_registration(event, "a" * 43)
     assert registration is not None
@@ -57,7 +79,6 @@ async def test_character_wishes_are_isolated_per_event(disk_store: MemoryDiskSto
             participant_key=key,
             display_name="Player",
             wish_play="Anyone",
-            dont_wish_play="Nobody",
         )
     await repository.confirm(event_a, operation_id="confirm-a", participant_key=key_a, character_wish="Doctor")
     await repository.confirm(event_b, operation_id="confirm-b", participant_key=key_b, character_wish="Soldier")
@@ -78,7 +99,6 @@ async def test_confirm_is_atomic_and_edits_preserve_status(disk_store: MemoryDis
         participant_key=key,
         display_name="Player",
         wish_play="Anyone",
-        dont_wish_play="Nobody",
     )
     await repository.confirm(event, operation_id="two", participant_key=key, character_wish="Doctor")
     confirmed = await repository.find_registration(event, key)
@@ -103,7 +123,6 @@ async def test_explicit_no_wishes_is_distinct_from_initial_blank(disk_store: Mem
         participant_key=key,
         display_name="Player",
         wish_play="A",
-        dont_wish_play="B",
     )
     waiting = await repository.find_registration(event, key)
     assert waiting is not None and waiting.character_wish == ""
@@ -131,7 +150,6 @@ async def test_cancel_and_second_enlist_preserve_character_wish(disk_store: Memo
         participant_key=key,
         display_name="Player",
         wish_play="A",
-        dont_wish_play="B",
     )
     await repository.confirm(event, operation_id="two", participant_key=key, character_wish="Doctor")
     await repository.cancel(event, operation_id="three", participant_key=key)
@@ -145,7 +163,6 @@ async def test_cancel_and_second_enlist_preserve_character_wish(disk_store: Memo
         participant_key=key,
         display_name="Player",
         wish_play="New A",
-        dont_wish_play="New B",
     )
     restored = await repository.find_registration(event, key)
     assert restored is not None
@@ -165,7 +182,6 @@ async def test_second_enlist_keeps_confirmed_status_and_character_wish(
         participant_key=key,
         display_name="Player",
         wish_play="A",
-        dont_wish_play="B",
     )
     await repository.confirm(event, operation_id="two", participant_key=key, character_wish="Doctor")
     await repository.enlist(
@@ -174,7 +190,6 @@ async def test_second_enlist_keeps_confirmed_status_and_character_wish(
         participant_key=key,
         display_name="Player",
         wish_play="New A",
-        dont_wish_play="New B",
     )
     registration = await repository.find_registration(event, key)
     assert registration is not None
@@ -191,7 +206,6 @@ async def test_duplicate_operation_does_not_upload_twice(disk_store: MemoryDiskS
         participant_key="a" * 43,
         display_name="Player",
         wish_play="A",
-        dont_wish_play="B",
     )
     assert await repository.enlist(event, **arguments)
     assert not await repository.enlist(event, **arguments)
@@ -207,7 +221,6 @@ async def test_formula_injection_is_neutralized_and_round_trips(disk_store: Memo
         participant_key="a" * 43,
         display_name='=HYPERLINK("bad")',
         wish_play="+SUM(1,2)",
-        dont_wish_play="@evil",
     )
     registration = await repository.find_registration(event, "a" * 43)
     assert registration is not None
@@ -226,7 +239,6 @@ async def test_waiting_user_cannot_edit_before_confirmation(disk_store: MemoryDi
         participant_key=key,
         display_name="Player",
         wish_play="A",
-        dont_wish_play="B",
     )
     with pytest.raises(OperationNotAllowed):
         await repository.update_character_wish(event, operation_id="two", participant_key=key, character_wish="Doctor")

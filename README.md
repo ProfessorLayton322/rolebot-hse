@@ -58,7 +58,7 @@ stateDiagram-v2
     Cancelled --> Confirmed: CONFIRM / keep or replace old wish
 ```
 
-`ENLIST` asks only whom the player wants and does not want to play with. A new row is `Ожидается` with an empty character cell. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` in one local workbook mutation and one replacement upload. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
+`ENLIST` asks only whom the player wants to play with. A new row is `Ожидается` with an empty character cell. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` in one local workbook mutation and one replacement upload. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
 
 The same user has a different deterministic participant key for every event. Every event has a different workbook, therefore:
 
@@ -66,7 +66,7 @@ The same user has a different deterministic participant key for every event. Eve
 Game A registration.character_wish != Game B registration.character_wish
 ```
 
-Editing a wish changes only the character cell, technical operation ID, and timestamp. Cancelling changes only status. Re-enlisting after cancellation updates co-player preferences, returns to `Ожидается`, and preserves the old wish. A confirmed user updating co-player preferences stays confirmed.
+Editing a wish changes only the character cell, technical operation ID, and timestamp. Cancelling changes only status. Re-enlisting after cancellation updates the wanted co-player preference, returns to `Ожидается`, and preserves the old wish. A confirmed user updating that preference stays confirmed.
 
 ## Storage
 
@@ -91,7 +91,6 @@ Visible columns:
 ```text
 Имя
 С кем хочу играть
-С кем не хочу играть
 Пожелания по персонажу
 Статус
 ```
@@ -106,7 +105,7 @@ updated_at
 
 Hidden columns are not treated as a privacy control. The participant key is `base64url(HMAC-SHA256(secret, platform:user_id:event_id))`; raw Telegram/VK IDs never enter a public workbook. User text beginning with `=`, `+`, `-`, or `@` is prefixed with the established spreadsheet apostrophe escape to prevent formula execution.
 
-The public workbook intentionally exposes display name, co-player preferences, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, and credentials never enter it. Operators must disclose to players that character wishes are public under this model.
+The public workbook intentionally exposes display name, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, and credentials never enter it. Operators must disclose to players that character wishes are public under this model.
 
 Malformed XLSX is never replaced by an empty file. The command remains retryable and logs identify the event without participant data.
 
@@ -450,7 +449,7 @@ Search Yandex Logging by operation/event ID. Cloudflare logs should contain requ
 
 **Registration list is slow:** this is expected. With no YDB registration index, each page scans at most ten event workbooks with concurrency three. Add pagination; do not add a fourth YDB table.
 
-**Workbook is malformed:** restore a known-good XLSX with the exact eight headers at the same Disk resource path. Never create a new published resource, or its public URL will change.
+**Workbook is malformed:** restore a known-good XLSX with the exact seven headers at the same Disk resource path. Never create a new published resource, or its public URL will change.
 
 **Terraform cannot read YMQ:** verify the generated YMQ-client key in state and its `ymq.reader`/`ymq.writer` roles. State must remain private because the YMQ provider requires an SQS-compatible static key.
 

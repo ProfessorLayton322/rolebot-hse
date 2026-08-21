@@ -54,7 +54,6 @@ class RegistrationTableRepository(Protocol):
         participant_key: str,
         display_name: str,
         wish_play: str,
-        dont_wish_play: str,
     ) -> bool: ...
 
     async def confirm(

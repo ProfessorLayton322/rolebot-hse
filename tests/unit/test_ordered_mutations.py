@@ -45,7 +45,7 @@ async def test_fifo_sequence_has_required_final_state(disk_store: MemoryDiskStor
     events = MemoryEventRepository([event])
     mutations = OrderedMutationService(events, tables)
     sequence = [
-        command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A", dont_wish_play="B")),
+        command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A")),
         command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A")),
         command(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="B")),
         command(event, Operation.CANCEL, EmptyPayload()),
@@ -65,7 +65,7 @@ async def test_fifo_character_update_preserves_confirmed_state(disk_store: Memor
     events = MemoryEventRepository([event])
     mutations = OrderedMutationService(events, tables)
     for item in (
-        command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A", dont_wish_play="B")),
+        command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A")),
         command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A")),
         command(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="B")),
     ):
@@ -84,16 +84,14 @@ async def test_close_orders_enlist_rejection_but_allows_existing_confirmation(
     await tables.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     mutations = OrderedMutationService(events, tables)
-    await mutations.apply(
-        command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X", dont_wish_play="Y"))
-    )
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CLOSE_EVENT, EmptyPayload()))
     with pytest.raises(OperationNotAllowed):
         await mutations.apply(
             command(
                 event,
                 Operation.ENLIST,
-                EnlistPayload(display_name="User B", wish_play="X", dont_wish_play="Y"),
+                EnlistPayload(display_name="User B", wish_play="X"),
                 key="b" * 43,
             )
         )
@@ -114,9 +112,7 @@ async def test_delete_prevents_later_character_update(disk_store: MemoryDiskStor
     await tables.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     mutations = OrderedMutationService(events, tables)
-    await mutations.apply(
-        command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X", dont_wish_play="Y"))
-    )
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
     await mutations.apply(command(event, Operation.DELETE_EVENT, EmptyPayload()))
     with pytest.raises(EventNotFound):

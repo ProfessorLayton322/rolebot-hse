@@ -76,7 +76,7 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=1))
     envelopes = [
-        queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A", dont_wish_play="B"), 1),
+        queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A"), 1),
         queued(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A"), 2),
         queued(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="B"), 3),
         queued(event, Operation.CANCEL, EmptyPayload(), 4),
@@ -105,9 +105,7 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     await tables.create_event_workbook(event.disk_resource_path)
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=1))
-    consumer = FakeConsumer(
-        [queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A", dont_wish_play="B"), 1)]
-    )
+    consumer = FakeConsumer([queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A"), 1)])
     worker = OrderedWorker(
         consumer,
         OrderedMutationService(MemoryEventRepository([event]), tables),

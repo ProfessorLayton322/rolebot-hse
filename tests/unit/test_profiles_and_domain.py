@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from larp_bot.domain.models import TelegramUser, VkUser
+from larp_bot.domain.models import EnlistPayload, Registration, TelegramUser, VkUser
 
 
 @pytest.mark.parametrize("value", [None, "", "-"])
@@ -39,3 +39,9 @@ def test_character_wish_cannot_be_reintroduced_on_user_models() -> None:
     assert "character_wish" not in VkUser.model_fields
     with pytest.raises(ValidationError):
         TelegramUser(tg_id=1, character_wish="global")
+
+
+def test_negative_co_player_preference_is_absent_from_domain_models() -> None:
+    forbidden_field = "dont" + "_wish_play"
+    assert forbidden_field not in EnlistPayload.model_fields
+    assert forbidden_field not in Registration.model_fields

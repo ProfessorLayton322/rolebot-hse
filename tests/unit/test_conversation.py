@@ -84,10 +84,10 @@ async def test_enlist_never_asks_character_wishes(disk_store: MemoryDiskStore, e
     responses = [await engine.handle(inbound(1, ENLIST))]
     responses.append(await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True)))
     responses.append(await engine.handle(inbound(3, "Алиса")))
-    responses.append(await engine.handle(inbound(4, "Боб")))
-    responses.append(await engine.handle(inbound(5, "enlist:confirm", callback=True)))
+    responses.append(await engine.handle(inbound(4, "enlist:confirm", callback=True)))
     prompts_before_enqueue = " ".join(response.text.casefold() for response in responses[:-1])
     assert "пожелания по персонажу" not in prompts_before_enqueue
+    assert "не хотел" not in prompts_before_enqueue
     assert len(publisher.commands) == 1
     queued = publisher.commands[0]
     assert queued.operation is Operation.ENLIST
@@ -102,8 +102,7 @@ async def test_duplicate_update_does_not_enqueue_twice(disk_store: MemoryDiskSto
     await engine.handle(inbound(1, ENLIST))
     await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
     await engine.handle(inbound(3, "Алиса"))
-    await engine.handle(inbound(4, "Боб"))
-    final = inbound(5, "enlist:confirm", callback=True)
+    final = inbound(4, "enlist:confirm", callback=True)
     await engine.handle(final)
     duplicate = await engine.handle(final)
     assert duplicate.silent
@@ -120,7 +119,6 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
         participant_key=key,
         display_name="Иван Иванов",
         wish_play="Алиса",
-        dont_wish_play="Боб",
     )
     listing = await engine.handle(inbound(1, CONFIRM))
     assert any(button.value == f"select:confirm:{event.event_id}" for button in listing.buttons)
@@ -142,7 +140,6 @@ async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
         participant_key=key,
         display_name="Иван",
         wish_play="A",
-        dont_wish_play="B",
     )
     await tables.confirm(event, operation_id="confirm", participant_key=key, character_wish="Doctor")
     await tables.cancel(event, operation_id="cancel", participant_key=key)
@@ -187,8 +184,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     await engine.handle(vk(10, ENLIST))
     await engine.handle(vk(11, f"select:enlist:{event.event_id}", callback=True))
     await engine.handle(vk(12, "Алиса"))
-    await engine.handle(vk(13, "Боб"))
-    await engine.handle(vk(14, "enlist:confirm", callback=True))
+    await engine.handle(vk(13, "enlist:confirm", callback=True))
     enlist = publisher.commands[-1]
     assert enlist.operation is Operation.ENLIST
     assert isinstance(enlist.payload, EnlistPayload)
@@ -199,15 +195,14 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         participant_key=enlist.participant_key,
         display_name=enlist.payload.display_name,
         wish_play=enlist.payload.wish_play,
-        dont_wish_play=enlist.payload.dont_wish_play,
     )
-    await engine.handle(vk(15, CONFIRM))
-    prompt = await engine.handle(vk(16, f"select:confirm:{event.event_id}", callback=True))
+    await engine.handle(vk(14, CONFIRM))
+    prompt = await engine.handle(vk(15, f"select:confirm:{event.event_id}", callback=True))
     assert "пожелания" in prompt.text.casefold()
-    await engine.handle(vk(17, "Doctor"))
+    await engine.handle(vk(16, "Doctor"))
     assert publisher.commands[-1].operation is Operation.CONFIRM
 
-    menu = await engine.handle(vk(18, ADMIN))
+    menu = await engine.handle(vk(17, ADMIN))
     assert "Администрирование" in menu.text
 
 
@@ -221,7 +216,6 @@ async def test_waiting_blank_character_menu_routes_to_confirmation(disk_store: M
         participant_key=key,
         display_name="Иван",
         wish_play="A",
-        dont_wish_play="B",
     )
     await engine.handle(inbound(1, CHARACTER))
     response = await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
