@@ -11,7 +11,13 @@ import pytest
 from larp_bot.adapters.memory import MemoryDeferredTransport
 from larp_bot.domain.models import BotResponse, Button
 from larp_bot.domain.security import sign_request
-from larp_bot.functions.gateway.handler import _telegram, _verify_cloudflare, _vk, async_handler
+from larp_bot.functions.gateway.handler import (
+    _telegram,
+    _verify_cloudflare,
+    _vk,
+    _vk_confirmation_from_lockbox,
+    async_handler,
+)
 
 
 class FakeLockbox:
@@ -158,4 +164,41 @@ async def test_obviously_unauthenticated_vk_request_does_not_initialize_containe
         result = await async_handler(event, SimpleNamespace(token={}))
 
     assert result["statusCode"] == 403
+    container_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_vk_confirmation_reads_only_lockbox() -> None:
+    event = {"type": "confirmation", "group_id": 42, "secret": "vk-secret"}
+    result = await _vk_confirmation_from_lockbox(event, FakeLockbox())
+
+    assert result["statusCode"] == 200
+    assert result["body"] == "confirmation-value"
+
+
+@pytest.mark.asyncio
+async def test_vk_confirmation_route_does_not_initialize_container() -> None:
+    event = {
+        "httpMethod": "POST",
+        "path": "/webhooks/vk",
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"type": "confirmation", "group_id": 42, "secret": "vk-secret"}),
+        "isBase64Encoded": False,
+    }
+    confirmation_response = {"statusCode": 200, "headers": {}, "body": "confirmation-value"}
+    with (
+        patch(
+            "larp_bot.functions.gateway.handler._vk_confirmation",
+            new_callable=AsyncMock,
+            return_value=confirmation_response,
+        ) as confirmation,
+        patch(
+            "larp_bot.functions.gateway.handler._container_instance",
+            new_callable=AsyncMock,
+        ) as container_instance,
+    ):
+        result = await async_handler(event, SimpleNamespace(token={}))
+
+    assert result == confirmation_response
+    confirmation.assert_awaited_once()
     container_instance.assert_not_awaited()
