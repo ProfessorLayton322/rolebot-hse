@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import boto3
 
@@ -40,10 +41,16 @@ class AppContainer:
     worker: OrderedWorker
 
 
-async def build_container() -> AppContainer:
+def iam_token_from_context(context: Any) -> str | None:
+    token = getattr(context, "token", None)
+    access_token = token.get("access_token") if isinstance(token, dict) else getattr(token, "access_token", None)
+    return access_token if isinstance(access_token, str) and access_token else None
+
+
+async def build_container(*, iam_token: str | None = None) -> AppContainer:
     settings = Settings.from_env()
     configure_logging(settings.app_log_level)
-    lockbox = LockboxConfigProvider(settings.lockbox_secret_id)
+    lockbox = LockboxConfigProvider(settings.lockbox_secret_id, iam_token=iam_token)
     secrets = {
         key: await lockbox.get_secret(key)
         for key in (

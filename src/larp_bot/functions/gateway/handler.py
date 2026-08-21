@@ -11,7 +11,7 @@ from larp_bot.adapters.telegram import parse_telegram_update, telegram_inline_pa
 from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.domain.models import Platform
 from larp_bot.domain.security import constant_time_valid_signature, sign_request
-from larp_bot.functions.bootstrap import AppContainer, build_container
+from larp_bot.functions.bootstrap import AppContainer, build_container, iam_token_from_context
 
 LOGGER = logging.getLogger("larp_bot.gateway")
 _container: AppContainer | None = None
@@ -38,10 +38,13 @@ def _body(event: dict[str, Any]) -> bytes:
     return base64.b64decode(body) if event.get("isBase64Encoded") else body.encode()
 
 
-async def _container_instance() -> AppContainer:
+async def _container_instance(context: Any) -> AppContainer:
     global _container
+    iam_token = iam_token_from_context(context)
     if _container is None:
-        _container = await build_container()
+        _container = await build_container(iam_token=iam_token)
+    elif iam_token is not None:
+        _container.lockbox.set_iam_token(iam_token)
     return _container
 
 
@@ -151,8 +154,7 @@ async def _vk(body: bytes, app: AppContainer) -> dict[str, Any]:
 
 
 async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    del context
-    app = await _container_instance()
+    app = await _container_instance(context)
     try:
         body = _body(event)
         if len(body) > 256 * 1024:

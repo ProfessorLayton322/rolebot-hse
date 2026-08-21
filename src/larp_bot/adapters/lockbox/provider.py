@@ -20,15 +20,22 @@ class LockboxConfigProvider:
         *,
         client: httpx.AsyncClient | None = None,
         cache_seconds: float = 60.0,
+        iam_token: str | None = None,
     ) -> None:
         self.secret_id = secret_id
         self.client = client or httpx.AsyncClient(timeout=10.0)
         self.cache_seconds = min(cache_seconds, 60.0)
+        self._context_iam_token = iam_token
         self._values: dict[str, str] = {}
         self._expires_at = 0.0
         self._lock = asyncio.Lock()
 
+    def set_iam_token(self, token: str) -> None:
+        self._context_iam_token = token
+
     async def _iam_token(self) -> str:
+        if self._context_iam_token:
+            return self._context_iam_token
         response = await self.client.get(self.METADATA_TOKEN_URL, headers={"Metadata-Flavor": "Google"})
         response.raise_for_status()
         token = response.json().get("access_token")
