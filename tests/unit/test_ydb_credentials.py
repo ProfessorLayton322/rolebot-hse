@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from larp_bot.adapters.ydb.repositories import YdbExecutor
+from larp_bot.adapters.ydb.repositories import YdbExecutor, YdbUserRepository, _dt
+from larp_bot.domain.models import Platform
 
 
 def test_ydb_uses_function_context_token_instead_of_metadata() -> None:
@@ -79,3 +81,41 @@ async def test_delivery_claim_prepares_both_transaction_queries() -> None:
         {"$user_id": 42, "$operation_id": "operation-1"},
         commit_tx=True,
     )
+
+
+def test_ydb_timestamp_microseconds_are_decoded_as_utc() -> None:
+    assert _dt(1_787_336_355_988_401) == datetime(2026, 8, 21, 18, 19, 15, 988401, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_user_repository_decodes_optional_ydb_timestamp() -> None:
+    raw_timestamp = 1_787_336_355_988_401
+    executor = SimpleNamespace(
+        query=AsyncMock(
+            return_value=[
+                {
+                    "tg_id": 42,
+                    "vk_url": None,
+                    "full_name": None,
+                    "crossplay": None,
+                    "larp_experience": None,
+                    "needs_pass": None,
+                    "pass_details_json": None,
+                    "dialog_state": "IDLE",
+                    "dialog_context_json": "{}",
+                    "last_update_id": "update-1",
+                    "last_update_at": raw_timestamp,
+                    "last_delivery_operation_id": None,
+                    "created_at": raw_timestamp,
+                    "updated_at": raw_timestamp,
+                }
+            ]
+        )
+    )
+
+    user = await YdbUserRepository(executor).get(Platform.TELEGRAM, 42)
+
+    assert user is not None
+    assert user.last_update_at == _dt(raw_timestamp)
+    assert user.created_at == _dt(raw_timestamp)
+    assert user.updated_at == _dt(raw_timestamp)
