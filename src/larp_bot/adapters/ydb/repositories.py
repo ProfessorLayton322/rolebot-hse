@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
 import ydb
@@ -114,6 +114,10 @@ def _context(raw: object) -> dict[str, Any]:
 def _dt(value: object) -> datetime:
     if isinstance(value, datetime):
         return value.replace(tzinfo=value.tzinfo or UTC)
+    # The YDB Table SDK represents Timestamp values as integer microseconds
+    # since Unix epoch rather than datetime objects.
+    if type(value) is int:
+        return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=value)
     return datetime.fromisoformat(str(value)).replace(tzinfo=UTC)
 
 
@@ -155,7 +159,7 @@ class YdbUserRepository:
             "dialog_state": row.get("dialog_state") or "IDLE",
             "dialog_context": _context(row.get("dialog_context_json")),
             "last_update_id": row.get("last_update_id"),
-            "last_update_at": row.get("last_update_at"),
+            "last_update_at": _dt(row["last_update_at"]) if row.get("last_update_at") is not None else None,
             "last_delivery_operation_id": row.get("last_delivery_operation_id"),
             "created_at": _dt(row["created_at"]),
             "updated_at": _dt(row["updated_at"]),
