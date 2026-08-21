@@ -2,7 +2,10 @@ locals {
   function_package_hash = filesha256(var.function_zip_path)
 
   function_environment = {
-    YDB_ENDPOINT              = yandex_ydb_database_serverless.application.ydb_api_endpoint
+    # The Python YDB driver requires the TLS scheme. ydb_api_endpoint contains
+    # only host:port; passing it through unchanged makes every driver wait time
+    # out before a real bot update can be handled.
+    YDB_ENDPOINT              = "grpcs://${yandex_ydb_database_serverless.application.ydb_api_endpoint}"
     YDB_DATABASE              = yandex_ydb_database_serverless.application.database_path
     YMQ_ENDPOINT              = "https://message-queue.api.cloud.yandex.net"
     YMQ_FIFO_URL              = yandex_message_queue.registration_commands.id

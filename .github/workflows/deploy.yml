@@ -87,6 +87,7 @@ jobs:
             echo "lockbox_secret_id=$(terraform output -raw lockbox_secret_id)"
             echo "yandex_gateway_url=$(terraform output -raw yandex_gateway_url)"
             echo "telegram_ingress_url=$(terraform output -raw telegram_ingress_url)"
+            echo "telegram_egress_url=$(terraform output -raw telegram_egress_url)"
             echo "vk_callback_url=$(terraform output -raw vk_callback_url)"
           } >>"${GITHUB_OUTPUT}"
       - name: Install latest runtime values in Lockbox
@@ -121,7 +122,19 @@ jobs:
         run: bash scripts/configure_telegram_webhook.sh
       - name: Smoke test
         env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          TG_ADMIN_IDS: ${{ vars.TG_ADMIN_IDS }}
+          TELEGRAM_INGRESS_URL: ${{ steps.outputs.outputs.telegram_ingress_url }}
+          TELEGRAM_EGRESS_URL: ${{ steps.outputs.outputs.telegram_egress_url }}
+          YANDEX_GATEWAY_URL: ${{ steps.outputs.outputs.yandex_gateway_url }}
+          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
+          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
           VK_CALLBACK_URL: ${{ steps.outputs.outputs.vk_callback_url }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          VK_ADMIN_IDS: ${{ vars.VK_ADMIN_IDS }}
         run: bash scripts/smoke_test.sh
       - name: Deployment endpoints
         run: |

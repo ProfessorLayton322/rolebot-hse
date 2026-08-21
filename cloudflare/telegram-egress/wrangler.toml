@@ -1,6 +1,7 @@
 name = "larp-bot-telegram-egress"
 main = "src/index.ts"
 compatibility_date = "2026-08-20"
+workers_dev = true
 
 [secrets]
 required = ["TG_BOT_TOKEN", "YANDEX_TO_CF_EGRESS_HMAC_SECRET"]
