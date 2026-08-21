@@ -45,7 +45,7 @@ jq -n \
   --arg egress "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
   --arg ymq_id "${YMQ_ACCESS_KEY_ID}" \
   --arg ymq_secret "${YMQ_SECRET_ACCESS_KEY}" \
-  '{entries: [
+  '[
     {key:"YANDEX_DISK_TOKEN", text_value:$disk},
     {key:"VK_ACCESS_TOKEN", text_value:$vk_token},
     {key:"VK_CALLBACK_SECRET", text_value:$vk_secret},
@@ -58,7 +58,7 @@ jq -n \
     {key:"YANDEX_TO_CF_EGRESS_HMAC_SECRET", text_value:$egress},
     {key:"YMQ_ACCESS_KEY_ID", text_value:$ymq_id},
     {key:"YMQ_SECRET_ACCESS_KEY", text_value:$ymq_secret}
-  ]}' >"${payload_file}"
+  ]' >"${payload_file}"
 
-yc lockbox payload add-version "${LOCKBOX_SECRET_ID}" --payload-file "${payload_file}" >/dev/null
+yc lockbox secret add-version "${LOCKBOX_SECRET_ID}" --payload - <"${payload_file}" >/dev/null
 echo "A new Lockbox version was installed"
