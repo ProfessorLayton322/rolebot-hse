@@ -14,10 +14,14 @@ jq -n \
   --arg hmac "${CF_TO_YANDEX_HMAC_SECRET}" \
   --arg gateway "${YANDEX_GATEWAY_URL}" \
   '{TG_WEBHOOK_SECRET:$webhook,CF_TO_YANDEX_HMAC_SECRET:$hmac,YANDEX_GATEWAY_URL:$gateway}' \
-  | npx --yes wrangler@4.125.0 secret bulk --name "${INGRESS_WORKER_NAME}"
+  | npx --yes wrangler@4.125.0 secret bulk \
+      --config cloudflare/telegram-ingress/wrangler.toml \
+      --name "${INGRESS_WORKER_NAME}"
 
 jq -n \
   --arg token "${TG_BOT_TOKEN}" \
   --arg hmac "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
   '{TG_BOT_TOKEN:$token,YANDEX_TO_CF_EGRESS_HMAC_SECRET:$hmac}' \
-  | npx --yes wrangler@4.125.0 secret bulk --name "${EGRESS_WORKER_NAME}"
+  | npx --yes wrangler@4.125.0 secret bulk \
+      --config cloudflare/telegram-egress/wrangler.toml \
+      --name "${EGRESS_WORKER_NAME}"

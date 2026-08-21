@@ -32,6 +32,31 @@ def test_cloudflare_workers_are_separate() -> None:
     assert "api.telegram.org" in egress.read_text()
 
 
+def test_runtime_ydb_endpoint_enables_tls() -> None:
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    assert (
+        'YDB_ENDPOINT              = "grpcs://${yandex_ydb_database_serverless.application.ydb_api_endpoint}"'
+        in functions
+    )
+
+
+def test_cloudflare_workers_keep_public_subdomains_enabled() -> None:
+    terraform = (ROOT / "infra/terraform/cloudflare.tf").read_text()
+    assert terraform.count("subdomain = {") == 2
+    # Two primary Worker resources and two dedicated subdomain resources must
+    # agree; otherwise the provider oscillates the public routes back to false.
+    assert terraform.count("enabled          = true") == 4
+    for worker in ("telegram-ingress", "telegram-egress"):
+        config = (ROOT / f"cloudflare/{worker}/wrangler.toml").read_text()
+        assert "workers_dev = true" in config
+
+
+def test_cloudflare_secret_updates_load_worker_configs() -> None:
+    script = (ROOT / "scripts/update_cloudflare_secrets.sh").read_text()
+    assert "--config cloudflare/telegram-ingress/wrangler.toml" in script
+    assert "--config cloudflare/telegram-egress/wrangler.toml" in script
+
+
 def test_admin_page_size_is_ten_in_shared_engine() -> None:
     source = (ROOT / "src/larp_bot/application/conversation.py").read_text()
     assert "self.events.list_page(after=after, limit=10)" in source
