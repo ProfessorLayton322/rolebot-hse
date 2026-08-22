@@ -18,6 +18,11 @@ output "telegram_egress_url" {
   description = "Private signed Telegram egress base URL."
 }
 
+output "runtime_service_account_ids" {
+  value       = jsonencode([yandex_iam_service_account.gateway.id, yandex_iam_service_account.worker.id])
+  description = "Allowed OIDC subjects for the Cloudflare runtime config endpoint."
+}
+
 output "lockbox_secret_id" {
   value = yandex_lockbox_secret.application.id
 }

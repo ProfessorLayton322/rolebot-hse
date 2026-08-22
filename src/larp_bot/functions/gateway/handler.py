@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from larp_bot.adapters.lockbox import LockboxConfigProvider
+from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.telegram import parse_telegram_update, telegram_inline_payload
 from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.domain.models import Platform
@@ -52,7 +52,7 @@ async def _container_instance(context: Any) -> AppContainer:
     if _container is None:
         _container = await build_container(iam_token=iam_token)
     elif iam_token is not None:
-        _container.lockbox.set_iam_token(iam_token)
+        _container.config.set_iam_token(iam_token)
     return _container
 
 
@@ -77,7 +77,7 @@ def _verify_cloudflare(event: dict[str, Any], body: bytes, secret: str, *, now: 
 
 
 async def _telegram(event: dict[str, Any], body: bytes, app: AppContainer) -> dict[str, Any]:
-    secret = await app.lockbox.get_secret("CF_TO_YANDEX_HMAC_SECRET")
+    secret = await app.config.get_secret("CF_TO_YANDEX_HMAC_SECRET")
     request_id, deadline_ms = _verify_cloudflare(event, body, secret)
     try:
         update = json.loads(body)
@@ -130,12 +130,12 @@ async def _vk(body: bytes, app: AppContainer) -> dict[str, Any]:
         return _response(400, {"error": "invalid JSON"})
     if not isinstance(event, dict):
         return _response(400, {"error": "invalid event"})
-    expected_secret = await app.lockbox.get_secret("VK_CALLBACK_SECRET")
-    expected_group = int(await app.lockbox.get_secret("VK_GROUP_ID"))
+    expected_secret = await app.config.get_secret("VK_CALLBACK_SECRET")
+    expected_group = int(await app.config.get_secret("VK_GROUP_ID"))
     if event.get("secret") != expected_secret or event.get("group_id") != expected_group:
         return _response(403, {"error": "invalid VK callback authentication"})
     if event.get("type") == "confirmation":
-        confirmation = await app.lockbox.get_secret("VK_CONFIRMATION_STRING")
+        confirmation = await app.config.get_secret("VK_CONFIRMATION_STRING")
         return _response(200, confirmation)
     if event.get("type") != "message_new":
         return _response(200, "ok")
@@ -161,36 +161,43 @@ async def _vk(body: bytes, app: AppContainer) -> dict[str, Any]:
     return _response(200, "ok")
 
 
-async def _vk_confirmation_from_lockbox(
+async def _vk_confirmation_from_config(
     event: dict[str, Any],
-    lockbox: LockboxConfigProvider,
+    config: RuntimeConfigProvider,
 ) -> dict[str, Any]:
-    expected_secret = await lockbox.get_secret("VK_CALLBACK_SECRET")
-    expected_group = int(await lockbox.get_secret("VK_GROUP_ID"))
+    expected_secret = await config.get_secret("VK_CALLBACK_SECRET")
+    expected_group = int(await config.get_secret("VK_GROUP_ID"))
     if event.get("secret") != expected_secret or event.get("group_id") != expected_group:
         return _response(403, {"error": "invalid VK callback authentication"})
-    confirmation = await lockbox.get_secret("VK_CONFIRMATION_STRING")
+    confirmation = await config.get_secret("VK_CONFIRMATION_STRING")
     return _response(200, confirmation)
 
 
 async def _vk_confirmation(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    secret_id = os.getenv("LOCKBOX_SECRET_ID")
-    if not secret_id:
-        raise RuntimeError("LOCKBOX_SECRET_ID is required")
+    required = {
+        "config_url": "RUNTIME_CONFIG_URL",
+        "audience": "RUNTIME_CONFIG_AUDIENCE",
+        "service_account_id": "RUNTIME_SERVICE_ACCOUNT_ID",
+    }
+    missing = [environment for environment in required.values() if not os.getenv(environment)]
+    if missing:
+        raise RuntimeError(f"missing required runtime config: {', '.join(missing)}")
     async with httpx.AsyncClient(timeout=10.0) as client:
-        lockbox = LockboxConfigProvider(
-            secret_id,
+        config = RuntimeConfigProvider(
+            os.environ[required["config_url"]],
+            os.environ[required["audience"]],
+            os.environ[required["service_account_id"]],
             client=client,
             iam_token=iam_token_from_context(context),
         )
-        return await _vk_confirmation_from_lockbox(event, lockbox)
+        return await _vk_confirmation_from_config(event, config)
 
 
 def _reject_obviously_unauthenticated_vk(body: bytes) -> dict[str, Any] | None:
     """Reject requests that cannot possibly satisfy the VK callback contract.
 
     This check deliberately uses only the presence and shape of the credentials.
-    Their values are still verified against Lockbox by ``_vk``. Keeping this
+    Their values are still verified against the runtime config by ``_vk``. Keeping this
     preflight independent of the application container lets the public endpoint
     reject malformed traffic even while downstream services are starting.
     """

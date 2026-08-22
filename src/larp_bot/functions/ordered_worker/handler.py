@@ -17,7 +17,7 @@ async def _run(context: Any) -> dict[str, int]:
     if _container is None:
         _container = await build_container(iam_token=iam_token)
     elif iam_token is not None:
-        _container.lockbox.set_iam_token(iam_token)
+        _container.config.set_iam_token(iam_token)
     return {"processed": await _container.worker.run()}
 
 

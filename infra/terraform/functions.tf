@@ -1,5 +1,6 @@
 locals {
   function_package_hash = filesha256(var.function_zip_path)
+  runtime_config_url    = "${local.telegram_egress_url}/runtime/config"
 
   function_environment = {
     # The Python YDB driver requires the TLS scheme. ydb_api_endpoint contains
@@ -10,7 +11,8 @@ locals {
     YMQ_ENDPOINT              = "https://message-queue.api.cloud.yandex.net"
     YMQ_FIFO_URL              = yandex_message_queue.registration_commands.id
     YMQ_KICK_URL              = yandex_message_queue.worker_kicks.id
-    LOCKBOX_SECRET_ID         = yandex_lockbox_secret.application.id
+    RUNTIME_CONFIG_URL        = local.runtime_config_url
+    RUNTIME_CONFIG_AUDIENCE   = local.runtime_config_url
     TELEGRAM_EGRESS_URL       = local.telegram_egress_url
     INLINE_SAFETY_MARGIN_MS   = "100"
     WORKBOOK_SCAN_CONCURRENCY = "3"
@@ -39,9 +41,11 @@ resource "yandex_function" "gateway" {
   execution_timeout  = "30"
   concurrency        = 1
   service_account_id = yandex_iam_service_account.gateway.id
-  environment        = local.function_environment
-  tags               = ["production"]
-  user_hash          = local.function_package_hash
+  environment = merge(local.function_environment, {
+    RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.gateway.id
+  })
+  tags      = ["production"]
+  user_hash = local.function_package_hash
 
   metadata_options {
     gce_http_endpoint    = 1
@@ -71,7 +75,8 @@ resource "yandex_function" "ordered_worker" {
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
   environment = merge(local.function_environment, {
-    WORKER_MAX_SECONDS = "40"
+    RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
+    WORKER_MAX_SECONDS         = "40"
   })
   tags      = ["production"]
   user_hash = local.function_package_hash

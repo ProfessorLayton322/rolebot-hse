@@ -416,7 +416,8 @@ Instead derive an opaque deterministic key, for example:
 HMAC(secret, platform + ":" + platform_user_id + ":" + event_id)
 ```
 
-The secret belongs in Yandex Lockbox.
+The secret belongs in an encrypted Cloudflare Worker binding and is returned to
+the Yandex runtime only through the OIDC-protected runtime-config endpoint.
 
 This lets the backend reliably find a participant row without publicly revealing the platform ID.
 
@@ -1281,7 +1282,8 @@ Admin IDs MUST NOT be hard-coded.
 
 Admin IDs MUST NOT be stored in YDB.
 
-Use **Yandex Lockbox**.
+Use encrypted **Cloudflare Worker bindings** exposed to Yandex only through an
+OIDC-authenticated runtime-config endpoint.
 
 Have configuration values:
 
@@ -1294,7 +1296,7 @@ Store each as JSON arrays of numeric IDs.
 
 Treat these two lists as public configuration, not secrets. Their GitHub
 source of truth must be ordinary Actions repository variables. Deployment may
-copy them into the shared Lockbox payload used for dynamic runtime
+copy them into the shared Worker bindings used for dynamic runtime
 configuration.
 
 Example:
@@ -1307,18 +1309,17 @@ Telegram authorization uses numeric Telegram ID.
 
 VK authorization uses numeric VK user ID.
 
-The application must obtain the latest Lockbox configuration dynamically.
+The application must obtain the latest Worker configuration dynamically.
 
 You may cache it in a warm Function process, but cache no longer than approximately 60 seconds.
 
-Do not permanently pin runtime authorization to one Lockbox secret-version ID.
+Do not permanently pin runtime authorization to one Worker version ID.
 
-This allows an operator to change admins through the Yandex Cloud interface without:
+This allows an operator to change admins through GitHub Actions configuration without:
 
 - changing source code;
 - rebuilding;
-- Terraform apply;
-- redeploying.
+- changing Terraform.
 
 Every privileged command must recheck authorization server-side.
 
@@ -2019,7 +2020,7 @@ Validate:
 - configured VK group/community ID;
 - VK callback secret.
 
-Keep the following in Yandex Lockbox:
+Keep the following in encrypted Cloudflare Worker bindings:
 
 - VK access token;
 - callback secret;
@@ -2264,7 +2265,7 @@ Never recreate the event implicitly.
 
 ---
 
-# 58. Runtime values in Yandex Lockbox
+# 58. Runtime values in Cloudflare Worker bindings
 
 At minimum:
 
@@ -2279,6 +2280,8 @@ VK_ADMIN_IDS
 PARTICIPANT_KEY_HMAC_SECRET
 CF_TO_YANDEX_HMAC_SECRET
 YANDEX_TO_CF_EGRESS_HMAC_SECRET
+YMQ_ACCESS_KEY_ID
+YMQ_SECRET_ACCESS_KEY
 ```
 
 `TG_ADMIN_IDS` and `VK_ADMIN_IDS` are public configuration sourced from GitHub
@@ -2312,9 +2315,24 @@ telegram-egress:
 ```text
 TG_BOT_TOKEN
 YANDEX_TO_CF_EGRESS_HMAC_SECRET
+YANDEX_DISK_TOKEN
+VK_ACCESS_TOKEN
+VK_CALLBACK_SECRET
+VK_CONFIRMATION_STRING
+VK_GROUP_ID
+TG_ADMIN_IDS
+VK_ADMIN_IDS
+PARTICIPANT_KEY_HMAC_SECRET
+CF_TO_YANDEX_HMAC_SECRET
+YMQ_ACCESS_KEY_ID
+YMQ_SECRET_ACCESS_KEY
+YANDEX_OIDC_AUDIENCE
+YANDEX_SERVICE_ACCOUNT_IDS
 ```
 
-Treat sensitive values as secret bindings.
+Treat sensitive values as secret bindings. The egress Worker must verify a
+Yandex-signed OIDC ID token's issuer, audience, expiry, signature, and exact
+runtime service-account subject before returning the Yandex runtime subset.
 
 ---
 
@@ -2336,7 +2354,7 @@ Grant only required roles for:
 
 - YDB;
 - Yandex Message Queue;
-- Lockbox payload reading;
+- self-scoped Yandex OIDC ID-token creation;
 - Function invocation;
 - logging;
 - API Gateway integration;
@@ -2434,7 +2452,6 @@ Manage at minimum:
 - API Gateway;
 - Smart Web Security profile;
 - Advanced Rate Limiter profile;
-- Lockbox secret containers/resources;
 - required logging resources.
 
 Do not create a Function Message Queue trigger for the FIFO queue.
@@ -2623,7 +2640,7 @@ Use approximately:
 │       │   ├── ydb/
 │       │   ├── yandex_disk/
 │       │   ├── ymq/
-│       │   └── lockbox/
+│       │   └── runtime_config/
 │       ├── functions/
 │       │   ├── gateway/
 │       │   └── ordered_worker/
@@ -2646,7 +2663,6 @@ Use approximately:
 │       ├── functions.tf
 │       ├── gateway.tf
 │       ├── security.tf
-│       ├── lockbox.tf
 │       ├── cloudflare.tf
 │       └── outputs.tf
 ├── tests/
@@ -3073,7 +3089,7 @@ Include:
 16. VK Callback setup;
 17. Terraform usage;
 18. GitHub Actions setup;
-19. changing admins through Lockbox;
+19. changing admins through GitHub Actions Worker-binding deployment;
 20. secret rotation;
 21. troubleshooting;
 22. rate-limit tuning;
@@ -3317,7 +3333,7 @@ The project is complete only when:
 - FIFO queue is not directly attached to a native Function trigger;
 - standard kick queue wakes the FIFO worker;
 - operations are idempotent;
-- admin lists can be changed through Yandex Lockbox without deployment;
+- admin lists can be changed through GitHub Actions and deployed without source or Terraform changes;
 - admins can create games;
 - admins receive stable public table URLs;
 - admins can close games;
@@ -3348,7 +3364,7 @@ In particular verify current documentation for:
 - Yandex Message Queue FIFO behavior;
 - Yandex Function Message Queue trigger limitations;
 - YDB Terraform resources;
-- Yandex Lockbox;
+- Yandex service-account ID tokens and OIDC verification;
 - API Gateway;
 - Smart Web Security;
 - Advanced Rate Limiter;
@@ -3388,7 +3404,7 @@ Output:
 10. security decisions;
 11. IAM decisions;
 12. GitHub Actions secrets/variables required;
-13. Yandex Lockbox entries required;
+13. OIDC-protected runtime configuration values required;
 14. Cloudflare Worker secrets required;
 15. exact first-deployment steps;
 16. Telegram setup steps;

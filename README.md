@@ -19,7 +19,8 @@ flowchart LR
     TRIGGER --> WORKER[Ordered worker]
     WORKER --> FIFO
     WORKER --> DISK[Yandex Disk XLSX]
-    WORKER --> CFE[Cloudflare telegram-egress]
+    GW --> CFE[Cloudflare telegram-egress + runtime config]
+    WORKER --> CFE
     CFE --> TGAPI[Telegram Bot API]
     WORKER --> VKAPI[VK API]
 
@@ -34,7 +35,7 @@ The boundaries are:
 - `adapters/ydb`: user, event, dialog, and recent-delivery persistence;
 - `adapters/yandex_disk`: all XLSX resource and row operations;
 - `adapters/ymq`: authoritative FIFO publishing, wake-up publishing, and consuming;
-- `adapters/lockbox`: latest-version secrets/admin config, cached for at most 60 seconds;
+- `adapters/runtime_config`: OIDC-authenticated Worker configuration, cached for at most 60 seconds;
 - `functions/gateway` and `functions/ordered_worker`: Yandex entry points;
 - `cloudflare/telegram-*`: isolated Telegram transport.
 
@@ -185,17 +186,18 @@ Egress accepts only `/telegram/send`, a ±60 second signature, a matching reques
 
 ## VK transport
 
-VK Callback API posts directly through API Gateway/SWS to the same gateway Function. The handler checks group ID and callback secret on every request. `confirmation` returns the Lockbox confirmation string immediately. Other supported callbacks return `ok`; outbound messages use `messages.send` with a deterministic `random_id`. Telegram handle is optional and normalized to `@username` when present.
+VK Callback API posts directly through API Gateway/SWS to the same gateway Function. The handler checks group ID and callback secret on every request. `confirmation` returns the configured confirmation string immediately. Other supported callbacks return `ok`; outbound messages use `messages.send` with a deterministic `random_id`. Telegram handle is optional and normalized to `@username` when present.
 
 ## Security model
 
 - Every Telegram Cloudflare→Yandex request and Yandex→Cloudflare egress request uses HMAC-SHA256 with timestamp freshness and body integrity.
-- Admin IDs are JSON numeric arrays in the latest Lockbox version, cached no longer than 60 seconds. Every privileged action rechecks authorization.
+- Runtime Functions exchange their platform-provided IAM credentials for one-hour Yandex OIDC ID tokens. The egress Worker verifies the Yandex signature, exact audience, expiry, and an allowlist containing only the gateway and ordered-worker service accounts before returning runtime configuration.
+- Admin IDs are JSON numeric arrays in the Worker configuration, cached no longer than 60 seconds. Every privileged action rechecks authorization.
 - Event IDs and participant state are reloaded server-side; callback values are never trusted as authorization.
 - Profile/pass data stays in private YDB and structured logs omit request bodies, email, legal names, and credentials.
 - Smart Web Security in API mode and Advanced Rate Limiter enforce a configurable global 25 requests/second. It is intentionally not grouped by Cloudflare source IP.
 - Function scaling defaults to three instances per function, one request per instance.
-- Worker secrets are installed with `wrangler secret bulk` after Terraform, keeping their values out of Terraform state and outputs.
+- All application secrets are installed as encrypted Worker bindings with `wrangler secret bulk` after Terraform. Yandex Functions receive only non-secret endpoint and identity configuration; secret values exist only in Worker bindings and short-lived Function memory.
 - `.env*`, state, plans, build output, Wrangler state, and Python/Node caches are ignored.
 
 ## IAM
@@ -204,8 +206,8 @@ Terraform creates separate gateway, ordered-worker, kick-trigger, API-Gateway, a
 
 | Identity | Roles/purpose |
 |---|---|
-| gateway | `ydb.editor`, `lockbox.payloadViewer` |
-| ordered worker | `ydb.editor`, `lockbox.payloadViewer` |
+| gateway | `ydb.editor`; can mint an OIDC token only for its own service account |
+| ordered worker | `ydb.editor`; can mint an OIDC token only for its own service account |
 | YMQ client key owner | `ymq.reader`, `ymq.writer` |
 | kick trigger | `ymq.reader`, invokes only ordered worker |
 | API Gateway | invokes only gateway Function |
@@ -282,10 +284,10 @@ These names are exhaustive for the supplied workflows:
 | `VK_CONFIRMATION_STRING` | VK's server-confirmation string |
 | `VK_GROUP_ID` | Numeric community ID; treated as protected configuration |
 | `PARTICIPANT_KEY_HMAC_SECRET` | At least 32 random bytes, high-entropy; rotation changes lookup keys and requires a migration |
-| `CF_TO_YANDEX_HMAC_SECRET` | At least 32 random bytes; identical in ingress and Lockbox |
-| `YANDEX_TO_CF_EGRESS_HMAC_SECRET` | At least 32 random bytes; identical in Lockbox and egress |
+| `CF_TO_YANDEX_HMAC_SECRET` | At least 32 random bytes; installed in ingress and the egress runtime-config Worker |
+| `YANDEX_TO_CF_EGRESS_HMAC_SECRET` | At least 32 random bytes; installed in the egress Worker and provided to authenticated Yandex runtimes |
 
-The YMQ access key is generated by Terraform and copied directly to Lockbox by `deploy.yml`; do not create `YMQ_ACCESS_KEY_ID` or `YMQ_SECRET_ACCESS_KEY` GitHub Secrets. `YANDEX_GATEWAY_URL` is a Terraform output injected into ingress and is also not a GitHub Secret.
+The YMQ access key is generated by Terraform and copied directly to the egress Worker by `deploy.yml`; do not create `YMQ_ACCESS_KEY_ID` or `YMQ_SECRET_ACCESS_KEY` GitHub Secrets. `YANDEX_GATEWAY_URL`, the runtime-config URL/audience, and allowed Yandex service-account IDs are Terraform outputs or derived values injected into Workers and Functions; none is a GitHub Secret.
 
 Generate secrets locally without printing them into shell history:
 
@@ -308,9 +310,9 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 
-### Lockbox entries
+### OIDC-protected runtime configuration
 
-`deploy.yml` creates a new payload version containing exactly these runtime values:
+`deploy.yml` installs these values as encrypted `telegram-egress` Worker bindings. The `/runtime/config` route returns the subset needed by Yandex only after verifying a Yandex-signed OIDC ID token:
 
 ```text
 YANDEX_DISK_TOKEN
@@ -342,17 +344,30 @@ YANDEX_GATEWAY_URL
 ```text
 TG_BOT_TOKEN
 YANDEX_TO_CF_EGRESS_HMAC_SECRET
+YANDEX_DISK_TOKEN
+VK_ACCESS_TOKEN
+VK_CALLBACK_SECRET
+VK_CONFIRMATION_STRING
+VK_GROUP_ID
+TG_ADMIN_IDS
+VK_ADMIN_IDS
+PARTICIPANT_KEY_HMAC_SECRET
+CF_TO_YANDEX_HMAC_SECRET
+YMQ_ACCESS_KEY_ID
+YMQ_SECRET_ACCESS_KEY
+YANDEX_OIDC_AUDIENCE
+YANDEX_SERVICE_ACCOUNT_IDS
 ```
 
 ## First deployment
 
 1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Cloudflare account, and active Yandex billing folder.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
-3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Lockbox, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
+3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
 4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the nine GitHub Variables above.
 5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, three YDB tables, and public Worker endpoints.
-7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, adds a Lockbox version, injects Worker secrets, calls Telegram `setWebhook`, and performs an unauthenticated-rejection smoke test.
+7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, injects every application secret into Workers, calls Telegram `setWebhook`, and runs live Telegram/VK smoke tests.
 8. In VK community settings, add the emitted `vk_callback_url`, set the same callback secret, select the current API version, confirm the server using `VK_CONFIRMATION_STRING`, and enable message events.
 9. Send `/start` to Telegram and a message to the VK community. Create a test game as an admin, open the returned public workbook URL, enlist, confirm with a wish, edit it, and cancel.
 10. Verify YDB contains only `tg_users`, `vk_users`, and `events`; verify the Telegram webhook points to `*.workers.dev`, never the Yandex gateway.
@@ -378,7 +393,7 @@ Use the Terraform `vk_callback_url`, numeric `VK_GROUP_ID`, matching `VK_CALLBAC
 
 ## Admin management
 
-Update the public GitHub Actions repository variable `TG_ADMIN_IDS` or `VK_ADMIN_IDS` and rerun `deploy.yml`, or add a new Lockbox payload version manually with the same complete entry set. Values must be JSON arrays of stable numeric platform IDs—not usernames. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. Warm Functions refresh within 60 seconds. No build, Terraform change, or Function redeploy is required for a manual Lockbox version change.
+Update the public GitHub Actions repository variable `TG_ADMIN_IDS` or `VK_ADMIN_IDS` and rerun `deploy.yml`. Values must be JSON arrays of stable numeric platform IDs—not usernames. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. The workflow replaces the Worker binding and warm Functions refresh within 60 seconds.
 
 Every create/close/delete request rechecks the latest admin set. Deletion requires the exact case-sensitive game name after trimming outer whitespace. Admin listing is oldest-first with exactly ten entries per page.
 
@@ -388,10 +403,10 @@ Every create/close/delete request rechecks the latest admin set. Deletion requir
 - Rotate both transport HMACs in a coordinated deploy because both ends must match. A short interruption is safer than temporarily accepting two secrets.
 - Rotate `TG_WEBHOOK_SECRET` by updating GitHub and redeploying; the workflow injects ingress before calling `setWebhook`.
 - Rotate the Terraform-state key at least every 90 days and update both `TF_STATE_*` secrets.
-- Rotate the Terraform-managed YMQ key by replacing `yandex_iam_service_account_static_access_key.ymq_client`; the deployment copies the new value to Lockbox before normal traffic should resume.
+- Rotate the Terraform-managed YMQ key by replacing `yandex_iam_service_account_static_access_key.ymq_client`; the deployment copies the new value to the Worker before normal traffic should resume.
 - Do not casually rotate `PARTICIPANT_KEY_HMAC_SECRET`: existing workbook rows become undiscoverable. Plan a migration that rewrites all participant keys first.
 
-Lockbox always reads the latest payload without pinning a version ID.
+Worker binding updates create a new encrypted Worker version; Yandex runtimes never pin a binding version.
 
 ## Terraform resources
 
@@ -404,7 +419,6 @@ Terraform manages:
 - one standard-queue Function trigger (never a FIFO trigger);
 - one API Gateway with two POST routes;
 - Smart Web Security and Advanced Rate Limiter profiles;
-- one Lockbox secret container (payload versions are CI-managed);
 - two Cloudflare Worker objects, versions, deployments, and workers.dev bindings.
 
 Run manually only after building artifacts:
@@ -431,7 +445,7 @@ terraform plan
 
 Python tests cover profile differences, absence of global character wishes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
-Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, exactly three YDB tables, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
+Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, exactly three YDB tables, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
 
 ## Observability
 
@@ -454,7 +468,9 @@ Search Yandex Logging by operation/event ID. Cloudflare logs should contain requ
 
 **Queued acknowledgment arrives but final success does not:** inspect FIFO depth, kick queue/trigger, worker logs, Disk OAuth validity, and workbook schema. Do not delete the FIFO message manually until the authoritative mutation is understood.
 
-**VK confirmation fails:** compare numeric group ID, callback secret, and confirmation string with the latest Lockbox payload. The response body and Function content type are plain text.
+**VK confirmation fails:** compare numeric group ID, callback secret, and confirmation string with the current egress Worker bindings. The response body and Function content type are plain text.
+
+**Runtime config returns 403:** confirm the Function uses the expected gateway/worker service account, its self-scoped `iam.serviceAccounts.tokenCreator` binding exists, and `YANDEX_OIDC_AUDIENCE` plus `YANDEX_SERVICE_ACCOUNT_IDS` match Terraform outputs. Never replace this with a long-lived shared authentication secret.
 
 **Registration list is slow:** this is expected. With no YDB registration index, each page scans at most ten event workbooks with concurrency three. Add pagination; do not add a fourth YDB table.
 
@@ -471,9 +487,9 @@ The implementation was checked against current official documentation in August 
 - API Gateway supports Smart Web Security/ARL integration through `x-yc-apigateway.smartWebSecurity`.
 - Cloudflare provider v5 supports Worker/version/deployment resources; Worker secrets are safer via Wrangler after Terraform.
 - Telegram `setWebhook` supports `secret_token` and Bot API method responses in webhook HTTP 200 bodies.
-- Yandex Workload Identity Federation supports exchanging GitHub OIDC JWTs for short-lived service-account IAM tokens.
+- Yandex Workload Identity Federation supports exchanging GitHub OIDC JWTs for short-lived service-account IAM tokens, and Yandex service accounts can exchange IAM tokens for audience-bound ID tokens used with external OIDC consumers.
 
-One provider constraint deserves attention: Terraform's Yandex Message Queue resource uses SQS-compatible static credentials. Terraform generates a dedicated, least-privilege key, so its secret necessarily exists in encrypted remote Terraform state. It is never a normal output, source value, Function environment variable, or GitHub Secret; CI copies the sensitive output straight to Lockbox. Protect/version the state bucket and rotate this key. All application secrets and Cloudflare secret bindings remain outside Terraform state.
+One provider constraint deserves attention: Terraform's Yandex Message Queue resource uses SQS-compatible static credentials. Terraform generates a dedicated, least-privilege key, so its secret necessarily exists in encrypted remote Terraform state. It is never a normal output, source value, Function environment variable, or GitHub Secret; CI copies the sensitive output straight to the egress Worker. Protect/version the state bucket and rotate this key. All other application secrets and Cloudflare secret bindings remain outside Terraform state.
 
 ## Repository layout
 
@@ -484,7 +500,7 @@ One provider constraint deserves attention: Terraform's Yandex Message Queue res
 ├── src/larp_bot/
 │   ├── domain/
 │   ├── application/
-│   ├── adapters/{telegram,vk,ydb,yandex_disk,ymq,lockbox,transports}/
+│   ├── adapters/{telegram,vk,ydb,yandex_disk,ymq,runtime_config,transports}/
 │   ├── config/
 │   └── functions/{gateway,ordered_worker}/
 ├── cloudflare/
