@@ -23,10 +23,6 @@ output "runtime_service_account_ids" {
   description = "Allowed OIDC subjects for the Cloudflare runtime config endpoint."
 }
 
-output "lockbox_secret_id" {
-  value = yandex_lockbox_secret.application.id
-}
-
 output "ymq_access_key_id" {
   value     = yandex_iam_service_account_static_access_key.ymq_client.access_key
   sensitive = true
