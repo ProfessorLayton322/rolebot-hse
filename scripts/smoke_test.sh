@@ -74,6 +74,28 @@ status="$(curl --silent --show-error --output "${response_file}" --write-out '%{
   "${TELEGRAM_INGRESS_URL}")"
 test "${status}" = "403" || unexpected_response "Telegram ingress authentication probe" "${status}"
 
+# IAM binding and Function-version propagation can briefly outlive Terraform
+# apply. An unsigned direct request reaches runtime configuration before HMAC
+# validation, so HTTP 403 proves that a cold gateway instance can already mint
+# an ID token and read its Worker bindings. Keep the real signed probe fresh by
+# waiting here instead of retrying it with an aging timestamp and deadline.
+gateway_ready=false
+for attempt in $(seq 1 24); do
+  status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --data '{}' \
+    "${YANDEX_GATEWAY_URL}")"
+  if test "${status}" = "403"; then
+    gateway_ready=true
+    break
+  fi
+  if test "${attempt}" -lt 24; then
+    sleep 5
+  fi
+done
+test "${gateway_ready}" = true || unexpected_response "Telegram gateway readiness probe" "${status}"
+
 # A signed direct Telegram update proves that the gateway can connect to YDB and
 # that the configured Telegram administrator receives the admin menu.
 tg_update_id="$(date +%s)${RANDOM}"
