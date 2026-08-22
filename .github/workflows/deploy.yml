@@ -84,15 +84,18 @@ jobs:
             echo "YMQ_SECRET_ACCESS_KEY=${ymq_secret_access_key}"
           } >>"${GITHUB_ENV}"
           {
-            echo "lockbox_secret_id=$(terraform output -raw lockbox_secret_id)"
+            echo "runtime_service_account_ids=$(terraform output -raw runtime_service_account_ids)"
             echo "yandex_gateway_url=$(terraform output -raw yandex_gateway_url)"
             echo "telegram_ingress_url=$(terraform output -raw telegram_ingress_url)"
             echo "telegram_egress_url=$(terraform output -raw telegram_egress_url)"
             echo "vk_callback_url=$(terraform output -raw vk_callback_url)"
           } >>"${GITHUB_OUTPUT}"
-      - name: Install latest runtime values in Lockbox
+      - name: Inject Cloudflare Worker secrets
         env:
-          LOCKBOX_SECRET_ID: ${{ steps.outputs.outputs.lockbox_secret_id }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
+          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
           YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
           VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
           VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
@@ -101,16 +104,9 @@ jobs:
           TG_ADMIN_IDS: ${{ vars.TG_ADMIN_IDS }}
           VK_ADMIN_IDS: ${{ vars.VK_ADMIN_IDS }}
           PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
-          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
-          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
-        run: bash scripts/update_runtime_secrets.sh
-      - name: Inject Cloudflare Worker secrets
-        env:
-          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
-          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
           YANDEX_GATEWAY_URL: ${{ steps.outputs.outputs.yandex_gateway_url }}
+          YANDEX_OIDC_AUDIENCE: ${{ steps.outputs.outputs.telegram_egress_url }}/runtime/config
+          YANDEX_SERVICE_ACCOUNT_IDS: ${{ steps.outputs.outputs.runtime_service_account_ids }}
           INGRESS_WORKER_NAME: larp-bot-telegram-ingress
           EGRESS_WORKER_NAME: larp-bot-telegram-egress
         run: bash scripts/update_cloudflare_secrets.sh

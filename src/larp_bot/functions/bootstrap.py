@@ -5,7 +5,7 @@ from typing import Any
 
 import boto3
 
-from larp_bot.adapters.lockbox import LockboxConfigProvider
+from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.transports import (
     CloudflareTelegramEgress,
     MultiplexedDeferredTransport,
@@ -31,7 +31,7 @@ from larp_bot.config.logging import configure_logging
 @dataclass
 class AppContainer:
     settings: Settings
-    lockbox: LockboxConfigProvider
+    config: RuntimeConfigProvider
     users: YdbUserRepository
     events: YdbEventRepository
     tables: YandexDiskRegistrationRepository
@@ -50,9 +50,14 @@ def iam_token_from_context(context: Any) -> str | None:
 async def build_container(*, iam_token: str | None = None) -> AppContainer:
     settings = Settings.from_env()
     configure_logging(settings.app_log_level)
-    lockbox = LockboxConfigProvider(settings.lockbox_secret_id, iam_token=iam_token)
+    config = RuntimeConfigProvider(
+        settings.runtime_config_url,
+        settings.runtime_config_audience,
+        settings.runtime_service_account_id,
+        iam_token=iam_token,
+    )
     secrets = {
-        key: await lockbox.get_secret(key)
+        key: await config.get_secret(key)
         for key in (
             "YANDEX_DISK_TOKEN",
             "PARTICIPANT_KEY_HMAC_SECRET",
@@ -80,7 +85,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     transport = MultiplexedDeferredTransport(telegram, vk)
     registrations = RegistrationService(events, tables, publisher, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
     administration = EventAdministrationService(events, tables)
-    conversation = ConversationEngine(users, events, registrations, administration, lockbox)
+    conversation = ConversationEngine(users, events, registrations, administration, config)
     mutations = OrderedMutationService(events, tables, users)
     worker = OrderedWorker(
         consumer,
@@ -91,7 +96,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     )
     return AppContainer(
         settings=settings,
-        lockbox=lockbox,
+        config=config,
         users=users,
         events=events,
         tables=tables,

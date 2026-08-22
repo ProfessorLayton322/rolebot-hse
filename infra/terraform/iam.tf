@@ -29,7 +29,8 @@ resource "yandex_iam_service_account" "ymq_client" {
 }
 
 # YMQ's SQS-compatible Terraform/API authentication requires a static access key.
-# The secret is copied into Lockbox by CI and never placed in Function environment variables.
+# The secret is copied into a Cloudflare Worker secret binding by CI and never
+# placed in a Function environment variable.
 resource "yandex_iam_service_account_static_access_key" "ymq_client" {
   service_account_id = yandex_iam_service_account.ymq_client.id
   description        = "${var.project_name} YMQ client; rotate through Terraform"
@@ -37,14 +38,26 @@ resource "yandex_iam_service_account_static_access_key" "ymq_client" {
 
 locals {
   runtime_bindings = {
-    gateway_ydb     = { role = "ydb.editor", member = yandex_iam_service_account.gateway.id }
-    gateway_lockbox = { role = "lockbox.payloadViewer", member = yandex_iam_service_account.gateway.id }
-    worker_ydb      = { role = "ydb.editor", member = yandex_iam_service_account.worker.id }
-    worker_lockbox  = { role = "lockbox.payloadViewer", member = yandex_iam_service_account.worker.id }
-    ymq_reader      = { role = "ymq.reader", member = yandex_iam_service_account.ymq_client.id }
-    ymq_writer      = { role = "ymq.writer", member = yandex_iam_service_account.ymq_client.id }
-    trigger_reader  = { role = "ymq.reader", member = yandex_iam_service_account.trigger.id }
+    gateway_ydb    = { role = "ydb.editor", member = yandex_iam_service_account.gateway.id }
+    worker_ydb     = { role = "ydb.editor", member = yandex_iam_service_account.worker.id }
+    ymq_reader     = { role = "ymq.reader", member = yandex_iam_service_account.ymq_client.id }
+    ymq_writer     = { role = "ymq.writer", member = yandex_iam_service_account.ymq_client.id }
+    trigger_reader = { role = "ymq.reader", member = yandex_iam_service_account.trigger.id }
   }
+}
+
+# Runtime Functions exchange their platform-provided IAM tokens for one-hour
+# Yandex OIDC ID tokens. Each identity can mint a token only for itself; the
+# Cloudflare Worker verifies the signature, audience, expiry, and subject.
+resource "yandex_iam_service_account_iam_member" "runtime_self_token_creator" {
+  for_each = {
+    gateway = yandex_iam_service_account.gateway.id
+    worker  = yandex_iam_service_account.worker.id
+  }
+
+  service_account_id = each.value
+  role               = "iam.serviceAccounts.tokenCreator"
+  member             = "serviceAccount:${each.value}"
 }
 
 resource "yandex_resourcemanager_folder_iam_member" "runtime" {

@@ -13,7 +13,9 @@ class Settings(BaseModel):
     ymq_endpoint: str = "https://message-queue.api.cloud.yandex.net"
     ymq_fifo_url: str
     ymq_kick_url: str
-    lockbox_secret_id: str
+    runtime_config_url: str
+    runtime_config_audience: str
+    runtime_service_account_id: str
     telegram_egress_url: str
     inline_safety_margin_ms: int = Field(default=100, ge=50, le=500)
     worker_max_seconds: float = Field(default=40.0, ge=1, le=300)
@@ -27,7 +29,9 @@ class Settings(BaseModel):
             "ydb_database": "YDB_DATABASE",
             "ymq_fifo_url": "YMQ_FIFO_URL",
             "ymq_kick_url": "YMQ_KICK_URL",
-            "lockbox_secret_id": "LOCKBOX_SECRET_ID",
+            "runtime_config_url": "RUNTIME_CONFIG_URL",
+            "runtime_config_audience": "RUNTIME_CONFIG_AUDIENCE",
+            "runtime_service_account_id": "RUNTIME_SERVICE_ACCOUNT_ID",
             "telegram_egress_url": "TELEGRAM_EGRESS_URL",
         }
         missing = [environment for environment in required.values() if not os.getenv(environment)]

@@ -15,12 +15,12 @@ from larp_bot.functions.gateway.handler import (
     _telegram,
     _verify_cloudflare,
     _vk,
-    _vk_confirmation_from_lockbox,
+    _vk_confirmation_from_config,
     async_handler,
 )
 
 
-class FakeLockbox:
+class FakeConfig:
     def __init__(self) -> None:
         self.values = {
             "CF_TO_YANDEX_HMAC_SECRET": "transport-secret",
@@ -70,7 +70,7 @@ def signed_event(body: bytes, *, deadline_ms: int, timestamp: int | None = None)
 
 def fake_app(response: BotResponse) -> Any:
     return SimpleNamespace(
-        lockbox=FakeLockbox(),
+        config=FakeConfig(),
         conversation=FakeConversation(response),
         transport=MemoryDeferredTransport(),
         settings=SimpleNamespace(inline_safety_margin_ms=100),
@@ -168,9 +168,9 @@ async def test_obviously_unauthenticated_vk_request_does_not_initialize_containe
 
 
 @pytest.mark.asyncio
-async def test_vk_confirmation_reads_only_lockbox() -> None:
+async def test_vk_confirmation_reads_only_runtime_config() -> None:
     event = {"type": "confirmation", "group_id": 42, "secret": "vk-secret"}
-    result = await _vk_confirmation_from_lockbox(event, FakeLockbox())
+    result = await _vk_confirmation_from_config(event, FakeConfig())
 
     assert result["statusCode"] == 200
     assert result["body"] == "confirmation-value"

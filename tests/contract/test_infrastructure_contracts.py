@@ -57,6 +57,22 @@ def test_cloudflare_secret_updates_load_worker_configs() -> None:
     assert "--config cloudflare/telegram-egress/wrangler.toml" in script
 
 
+def test_yandex_runtime_uses_oidc_protected_worker_config() -> None:
+    production = "\n".join(path.read_text() for path in (ROOT / "src/larp_bot").rglob("*.py"))
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
+    egress = (ROOT / "cloudflare/telegram-egress/src/index.ts").read_text()
+
+    assert "lockbox" not in production.lower()
+    assert "LOCKBOX_SECRET_ID" not in functions
+    assert "RUNTIME_CONFIG_URL" in functions
+    assert "update_runtime_secrets" not in deploy
+    assert "YANDEX_SERVICE_ACCOUNT_IDS" in deploy
+    assert 'const RUNTIME_CONFIG_PATH = "/runtime/config"' in egress
+    assert 'const OIDC_ISSUER = "https://auth.yandex.cloud"' in egress
+    assert "verifyYandexIdentityToken" in egress
+
+
 def test_admin_page_size_is_ten_in_shared_engine() -> None:
     source = (ROOT / "src/larp_bot/application/conversation.py").read_text()
     assert "self.events.list_page(after=after, limit=10)" in source
