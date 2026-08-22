@@ -59,11 +59,13 @@ def test_cloudflare_secret_updates_load_worker_configs() -> None:
 
 def test_yandex_runtime_uses_oidc_protected_worker_config() -> None:
     production = "\n".join(path.read_text() for path in (ROOT / "src/larp_bot").rglob("*.py"))
+    terraform = "\n".join(path.read_text() for path in (ROOT / "infra/terraform").glob("*.tf"))
     functions = (ROOT / "infra/terraform/functions.tf").read_text()
     deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
     egress = (ROOT / "cloudflare/telegram-egress/src/index.ts").read_text()
 
     assert "lockbox" not in production.lower()
+    assert "yandex_lockbox" not in terraform
     assert "LOCKBOX_SECRET_ID" not in functions
     assert "RUNTIME_CONFIG_URL" in functions
     assert "update_runtime_secrets" not in deploy
