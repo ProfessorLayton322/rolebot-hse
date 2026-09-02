@@ -18,7 +18,12 @@ def test_telegram_profile_requires_vk_url(value: str | None) -> None:
 
 @pytest.mark.parametrize(
     ("raw", "normalized"),
-    [("vk.com/id123", "https://vk.com/id123"), ("https://m.vk.com/name", "https://vk.com/name")],
+    [
+        ("vk.com/id123", "https://vk.com/id123"),
+        ("https://m.vk.com/name", "https://vk.com/name"),
+        ("vk.ru/id456", "https://vk.com/id456"),
+        ("https://m.vk.ru/name", "https://vk.com/name"),
+    ],
 )
 def test_telegram_vk_url_is_normalized(raw: str, normalized: str) -> None:
     assert TelegramUser(tg_id=1, vk_url=raw).vk_url == normalized

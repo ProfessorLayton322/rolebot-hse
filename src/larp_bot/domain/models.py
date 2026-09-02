@@ -54,7 +54,7 @@ class PassDetails(StrictModel):
     russian_citizen: bool
 
 
-_VK_HOSTS = {"vk.com", "www.vk.com", "m.vk.com"}
+_VK_HOSTS = {"vk.com", "www.vk.com", "m.vk.com", "vk.ru", "www.vk.ru", "m.vk.ru"}
 _VK_PATH_RE = re.compile(r"^/[A-Za-z0-9_.-]{1,100}/?$")
 
 
@@ -68,7 +68,7 @@ def normalize_vk_url(value: str) -> str:
         candidate = f"https://{candidate}"
     parsed = urlsplit(candidate)
     if parsed.scheme != "https" or parsed.hostname not in _VK_HOSTS:
-        raise ValueError("Нужна HTTPS-ссылка на vk.com")
+        raise ValueError("Нужна HTTPS-ссылка на vk.com или vk.ru")
     if not _VK_PATH_RE.fullmatch(parsed.path) or parsed.query or parsed.fragment:
         raise ValueError("Некорректный адрес страницы VK")
     return f"https://vk.com/{parsed.path.strip('/')}"
