@@ -24,6 +24,7 @@ from larp_bot.domain.models import (
     User,
     normalize_telegram_handle,
     normalize_vk_url,
+    validate_pass_email,
 )
 
 from .deadlines import (
@@ -318,18 +319,18 @@ class ConversationEngine:
             user.dialog_state = next_state
             return BotResponse(text=prompt)
         if state == "PROFILE_PASS_EMAIL":
-            context["email"] = value
+            try:
+                email = validate_pass_email(value)
+            except ValidationError:
+                return BotResponse(text="Некорректный email. Введите email ещё раз:")
+            context["email"] = email
             user.dialog_state = "PROFILE_PASS_CITIZEN"
             return BotResponse(text="Являетесь ли вы гражданином РФ?", buttons=yes_no_buttons())
         if state == "PROFILE_PASS_CITIZEN":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
             context["russian_citizen"] = value == "Да"
-            try:
-                return await self._finish_profile(user)
-            except ValidationError:
-                user.dialog_state = "PROFILE_PASS_EMAIL"
-                return BotResponse(text="Некорректный email. Введите email ещё раз:")
+            return await self._finish_profile(user)
         raise AssertionError(f"unknown profile state: {state}")
 
     async def _finish_profile(self, user: User) -> BotResponse:

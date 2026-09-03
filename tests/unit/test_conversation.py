@@ -336,6 +336,49 @@ async def test_incomplete_profile_cannot_enlist(disk_store: MemoryDiskStore, eve
 
 
 @pytest.mark.asyncio
+async def test_profile_validates_email_before_advancing_to_next_question(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    user_id = 2
+    answers = (
+        PROFILE,
+        "Иван Иванов",
+        "https://vk.com/id2",
+        "Да",
+        "Нет",
+        "Да",
+        "Иванов Иван Иванович",
+        "Ivanov Ivan Ivanovich",
+    )
+    for update, answer in enumerate(answers, start=1):
+        await engine.handle(inbound(update, answer, user_id=user_id))
+
+    invalid = await engine.handle(inbound(9, "not-an-email", user_id=user_id))
+
+    assert "Некорректный email" in invalid.text
+    assert "гражданином" not in invalid.text
+    pending = await users.get(Platform.TELEGRAM, user_id)
+    assert pending is not None
+    assert pending.dialog_state == "PROFILE_PASS_EMAIL"
+    assert "email" not in pending.dialog_context
+
+    next_question = await engine.handle(inbound(10, "player@example.com", user_id=user_id))
+
+    assert "гражданином" in next_question.text
+    pending = await users.get(Platform.TELEGRAM, user_id)
+    assert pending is not None
+    assert pending.dialog_state == "PROFILE_PASS_CITIZEN"
+    assert pending.dialog_context["email"] == "player@example.com"
+
+    saved = await engine.handle(inbound(11, "Да", user_id=user_id))
+    profile = await users.get(Platform.TELEGRAM, user_id)
+    assert "Профиль сохранён" in saved.text
+    assert profile is not None and profile.pass_details is not None
+    assert profile.pass_details.email == "player@example.com"
+
+
+@pytest.mark.asyncio
 async def test_admin_delete_requires_exact_case_but_trims_whitespace(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
     menu = await engine.handle(inbound(1, ADMIN))

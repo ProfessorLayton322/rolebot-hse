@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -14,6 +14,16 @@ def utc_now() -> datetime:
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+
+PassEmail = Annotated[str, StringConstraints(max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")]
+_PASS_EMAIL_ADAPTER = TypeAdapter(PassEmail)
+
+
+def validate_pass_email(value: str) -> str:
+    """Validate an email before a dialogue is allowed to leave its email step."""
+
+    return _PASS_EMAIL_ADAPTER.validate_python(value)
 
 
 class Platform(StrEnum):
@@ -55,7 +65,7 @@ class BotIdentity(StrictModel):
 class PassDetails(StrictModel):
     legal_name_cyrillic: str = Field(min_length=2, max_length=300)
     legal_name_latin: str = Field(min_length=2, max_length=300)
-    email: str = Field(pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$", max_length=254)
+    email: PassEmail
     russian_citizen: bool
 
 
