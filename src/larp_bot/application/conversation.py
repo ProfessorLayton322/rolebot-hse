@@ -15,6 +15,7 @@ from larp_bot.domain.models import (
     Event,
     EventStatus,
     InboundMessage,
+    NotificationPayload,
     Operation,
     PassDetails,
     Platform,
@@ -48,6 +49,7 @@ SKIP = "Пропустить"
 NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
+SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
@@ -120,6 +122,18 @@ def _confirmation_deadline_response(*, invalid: bool = False) -> BotResponse:
             Button(label=NEAREST_THURSDAY, value="admin:deadline:nearest-thursday"),
             Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
         ],
+    )
+
+
+def _confirmed_notification_prompt(event_name: str, *, invalid: str = "") -> BotResponse:
+    prefix = f"{invalid}\n\n" if invalid else ""
+    return BotResponse(
+        text=(
+            f"{prefix}Отправьте текст уведомления для подтвердивших участие в игре «{event_name}».\n\n"
+            "Можно просто вставить ссылку-приглашение в чат Telegram или VK: бот сам добавит её "
+            "и название игры в уведомление."
+        ),
+        buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
     )
 
 
@@ -388,6 +402,7 @@ class ConversationEngine:
             "admin-status": None,
             "admin-delete": None,
             "admin-reminder": frozenset({EventStatus.CONFIRMATION_OPEN}),
+            "admin-notification": None,
         }
         if flow in event_flow_statuses:
             return await self._show_events(flow, event_flow_statuses[flow], after=after)
@@ -462,7 +477,7 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if flow in {"admin-status", "admin-delete", "admin-reminder"}:
+        if flow in {"admin-status", "admin-delete", "admin-reminder", "admin-notification"}:
             return await self._admin_select(user, message, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
@@ -651,6 +666,7 @@ class ConversationEngine:
             "➕ Создать игру",
             CHANGE_STATUS,
             SEND_CONFIRMATION_REMINDER,
+            SEND_CONFIRMED_NOTIFICATION,
             "🗑 Удалить игру",
             "📋 Список игр",
             BACK,
@@ -730,6 +746,36 @@ class ConversationEngine:
                 deferred=True,
                 command_enqueued=True,
             )
+        if user.dialog_state == "ADMIN_NOTIFICATION_TEXT":
+            event_name = str(user.dialog_context["event_name"])
+            if message.callback is not None:
+                return _confirmed_notification_prompt(
+                    event_name,
+                    invalid="Отправьте уведомление обычным текстовым сообщением.",
+                )
+            if not value:
+                return _confirmed_notification_prompt(event_name, invalid="Текст уведомления не может быть пустым.")
+            if len(value) > 4000:
+                return _confirmed_notification_prompt(
+                    event_name,
+                    invalid="Текст уведомления не должен превышать 4000 символов.",
+                )
+            context = user.dialog_context.copy()
+            await self._clear(user)
+            await self.registrations.enqueue(
+                operation=Operation.SEND_CONFIRMED_NOTIFICATION,
+                event_id=str(context["event_id"]),
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=NotificationPayload(text=value),
+                reply_context=ReplyContext(),
+                idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMED_NOTIFICATION.value}",
+            )
+            return BotResponse(
+                text="⏳ Уведомление принято в обработку.",
+                deferred=True,
+                command_enqueued=True,
+            )
         if user.dialog_state == "ADMIN_DELETE_NAME":
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
@@ -785,6 +831,9 @@ class ConversationEngine:
                 idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMATION_REMINDER.value}",
             )
             return BotResponse(text="⏳ Напоминание принято в обработку.", deferred=True, command_enqueued=True)
+        if flow == "admin-notification":
+            user.dialog_state = "ADMIN_NOTIFICATION_TEXT"
+            return _confirmed_notification_prompt(event.name)
         user.dialog_state = "ADMIN_DELETE_NAME"
         return BotResponse(
             text=(
@@ -826,6 +875,8 @@ class ConversationEngine:
                 frozenset({EventStatus.CONFIRMATION_OPEN}),
                 empty_text="Нет игр с открытым подтверждением.",
             )
+        if value == SEND_CONFIRMED_NOTIFICATION:
+            return await self._show_events("admin-notification", None, empty_text="Игр нет.")
         if value == "🗑 Удалить игру":
             events = list(await self.events.list_page(limit=10))
             return BotResponse(text="Выберите игру:", buttons=_event_buttons(events, "admin-delete"))
@@ -839,6 +890,7 @@ class ConversationEngine:
             "➕ Создать игру",
             CHANGE_STATUS,
             SEND_CONFIRMATION_REMINDER,
+            SEND_CONFIRMED_NOTIFICATION,
             "🗑 Удалить игру",
             "📋 Список игр",
         }

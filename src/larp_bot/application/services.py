@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
@@ -15,6 +16,7 @@ from larp_bot.domain.models import (
     EnlistPayload,
     Event,
     EventStatus,
+    NotificationPayload,
     Operation,
     OrderedRegistrationCommand,
     Platform,
@@ -157,7 +159,11 @@ class RegistrationService:
         event_id: str,
         platform: Platform,
         user_id: int,
-        payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload,
+        payload: EnlistPayload
+        | CharacterWishPayload
+        | ConfirmationDeadlinePayload
+        | NotificationPayload
+        | EmptyPayload,
         reply_context: ReplyContext,
         idempotency_key: str | None = None,
     ) -> OrderedRegistrationCommand:
@@ -169,6 +175,7 @@ class RegistrationService:
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
+            Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.CLOSE_EVENT,
             Operation.DELETE_EVENT,
         }:
@@ -234,10 +241,54 @@ class NotificationRecipient:
     user: User
 
 
-class ConfirmationNotificationService:
-    """Delivers explicit admin-triggered notifications to waiting players."""
+_TELEGRAM_CHAT_HOSTS = frozenset(
+    {"t.me", "www.t.me", "telegram.me", "www.telegram.me", "telegram.dog", "www.telegram.dog"}
+)
+_TELEGRAM_CHAT_PATH_RE = re.compile(r"^/(?:\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+|[A-Za-z][A-Za-z0-9_]{3,31})/?$")
+_VK_CHAT_PATH_RE = re.compile(r"^/join/[A-Za-z0-9_=-]+/?$")
 
-    NOTIFICATION_OPERATIONS = frozenset({Operation.OPEN_CONFIRMATION, Operation.SEND_CONFIRMATION_REMINDER})
+
+def is_plain_chat_link(value: str) -> bool:
+    """Recognize a message consisting solely of a Telegram or VK chat link."""
+
+    candidate = value.strip()
+    if not candidate or any(character.isspace() for character in candidate):
+        return False
+    try:
+        parsed = urlsplit(candidate)
+        has_credentials_or_port = parsed.username is not None or parsed.password is not None or parsed.port is not None
+        host = (parsed.hostname or "").casefold()
+    except ValueError:
+        return False
+    if parsed.scheme.casefold() not in {"http", "https"} or has_credentials_or_port:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    if host in _TELEGRAM_CHAT_HOSTS:
+        return bool(_TELEGRAM_CHAT_PATH_RE.fullmatch(parsed.path))
+    return host in {"vk.me", "www.vk.me"} and bool(_VK_CHAT_PATH_RE.fullmatch(parsed.path))
+
+
+def confirmed_notification_text(event_name: str, message: str) -> str:
+    clean_message = message.strip()
+    if not is_plain_chat_link(clean_message):
+        return clean_message
+    return (
+        f"Вы подтвердили своё участие в игре {event_name}! "
+        f"Пожалуйста, добавьтесь в чат игры, мы вас очень ждём: {clean_message}"
+    )
+
+
+class ConfirmationNotificationService:
+    """Delivers ordered, admin-triggered notifications to event participants."""
+
+    NOTIFICATION_OPERATIONS = frozenset(
+        {
+            Operation.OPEN_CONFIRMATION,
+            Operation.SEND_CONFIRMATION_REMINDER,
+            Operation.SEND_CONFIRMED_NOTIFICATION,
+        }
+    )
 
     def __init__(
         self,
@@ -259,37 +310,47 @@ class ConfirmationNotificationService:
             return Platform.TELEGRAM, user.tg_id
         return Platform.VK, user.vk_id
 
-    async def _recipients(self, event: Event) -> list[NotificationRecipient]:
+    async def _recipients(
+        self,
+        event: Event,
+        attendance_status: AttendanceStatus,
+    ) -> list[NotificationRecipient]:
         await self.catalog.ensure_migrated(event)
-        waiting_keys = {
+        participant_keys = {
             registration.participant_key
             for registration in await self.catalog.registrations.list_for_event(event.event_id)
-            if registration.attendance_status is AttendanceStatus.WAITING
+            if registration.attendance_status is attendance_status
         }
         recipients: list[NotificationRecipient] = []
         for user in await self.users.list_all():
             platform, uid = self._identity(user)
             key = participant_key(self.participant_secret, platform, uid, event.event_id)
-            if key in waiting_keys:
+            if key in participant_keys:
                 recipients.append(NotificationRecipient(platform, uid, user))
         return recipients
 
-    async def notify_waiting(self, command: OrderedRegistrationCommand) -> int:
+    async def notify(self, command: OrderedRegistrationCommand) -> int:
         if command.operation not in self.NOTIFICATION_OPERATIONS:
-            raise ValueError("command does not send a confirmation notification")
+            raise ValueError("command does not send a participant notification")
         event = await self.events.get(command.event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
-        if event.confirmation_deadline is None:
-            raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
-        deadline = format_confirmation_deadline(event.confirmation_deadline)
-        if command.operation is Operation.OPEN_CONFIRMATION:
-            text = f"Подтверждение на игру {event.name} открыто! Дедлайн подтверждения - {deadline}"
+        if command.operation is Operation.SEND_CONFIRMED_NOTIFICATION:
+            assert isinstance(command.payload, NotificationPayload)
+            text = confirmed_notification_text(event.name, command.payload.text)
+            attendance_status = AttendanceStatus.CONFIRMED
         else:
-            text = f"Напоминаем о необходимости подтвердить или отменить участие в игре {event.name} до {deadline}!"
+            if event.confirmation_deadline is None:
+                raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
+            deadline = format_confirmation_deadline(event.confirmation_deadline)
+            if command.operation is Operation.OPEN_CONFIRMATION:
+                text = f"Подтверждение на игру {event.name} открыто! Дедлайн подтверждения - {deadline}"
+            else:
+                text = f"Напоминаем о необходимости подтвердить или отменить участие в игре {event.name} до {deadline}!"
+            attendance_status = AttendanceStatus.WAITING
 
         delivered = 0
-        for recipient in await self._recipients(event):
+        for recipient in await self._recipients(event, attendance_status):
             request_id = (
                 f"{command.operation_id}:confirmation-notification:{recipient.platform.value}:{recipient.user_id}"
             )
@@ -340,6 +401,9 @@ class OrderedMutationService:
             if event.confirmation_deadline is None:
                 raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
             return "Напоминание о подтверждении отправлено"
+        if command.operation is Operation.SEND_CONFIRMED_NOTIFICATION:
+            assert isinstance(command.payload, NotificationPayload)
+            return "Уведомление подтвердившим участие отправлено"
         if command.operation in status_operations:
             status, message = status_operations[command.operation]
             await self.events.set_status(event.event_id, status)

@@ -42,6 +42,7 @@ class Operation(StrEnum):
     OPEN_REGISTRATION = "OPEN_REGISTRATION"
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
+    SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
     CLOSE_EVENT = "CLOSE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
 
@@ -211,7 +212,19 @@ class ConfirmationDeadlinePayload(StrictModel):
         return value
 
 
-CommandPayload = EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload
+class NotificationPayload(StrictModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("text")
+    @classmethod
+    def normalize(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Текст уведомления не может быть пустым")
+        return normalized
+
+
+CommandPayload = EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | NotificationPayload | EmptyPayload
 
 
 class ReplyContext(StrictModel):
@@ -251,6 +264,10 @@ class OrderedRegistrationCommand(StrictModel):
             raise ValueError(f"{self.operation} requires CharacterWishPayload")
         if self.operation is Operation.OPEN_CONFIRMATION and not isinstance(self.payload, ConfirmationDeadlinePayload):
             raise ValueError("OPEN_CONFIRMATION requires ConfirmationDeadlinePayload")
+        if self.operation is Operation.SEND_CONFIRMED_NOTIFICATION and not isinstance(
+            self.payload, NotificationPayload
+        ):
+            raise ValueError("SEND_CONFIRMED_NOTIFICATION requires NotificationPayload")
         empty_payload_operations = {
             Operation.CANCEL,
             Operation.OPEN_REGISTRATION,

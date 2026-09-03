@@ -65,7 +65,7 @@ class OrderedWorker:
                     if command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS:
                         if self.notifications is None:
                             raise RuntimeError("confirmation notification service is not configured")
-                        await self.notifications.notify_waiting(command)
+                        await self.notifications.notify(command)
                         notification_delivered = True
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
