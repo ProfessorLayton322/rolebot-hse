@@ -61,6 +61,8 @@ stateDiagram-v2
 
 The admin interface names these states `Регистрация`, `Подтверждение`, and `Закрытие регистрации`. Players may enlist in `CREATED` (`Регистрация`) and `CONFIRMATION_OPEN` (`Подтверждение`). They may confirm attendance only in `CONFIRMATION_OPEN`; `CLOSED` (`Закрытие регистрации`) accepts neither enlistment nor confirmation. Existing persisted `OPEN` events are interpreted as `CONFIRMATION_OPEN` during the rollout.
 
+Opening confirmation requires a Moscow-time deadline in `DD.MM.YY HH:MM` format; the admin may instead choose the nearest Thursday at 19:00, including the current day. The ordered worker stores the deadline and notifies registrations still in `Ожидается`. Admins can send the same audience a separate reminder from the administration menu. No timer or cron closes confirmation: every later status change remains an explicit admin action.
+
 ```mermaid
 stateDiagram-v2
     [*] --> NotRegistered
@@ -95,7 +97,7 @@ Terraform declares exactly these application tables:
 |---|---|---|
 | `tg_users` | `tg_id` | Telegram profile, mandatory VK URL, FSM context, update/delivery metadata |
 | `vk_users` | `vk_id` | VK profile, optional Telegram handle, FSM context, update/delivery metadata |
-| `events` | `event_id` | Name, stable Disk resource path/public URL, status, migration timestamp |
+| `events` | `event_id` | Name, stable Disk resource path/public URL, status, confirmation deadline, migration timestamp |
 | `registrations` | `(event_id, participant_key)` | Authoritative per-game registration, public profile projection, attendance, operation metadata |
 
 The composite registration key makes exact participant lookups constant-cost and keeps every game's rows contiguous for an efficient showcase rebuild. No secondary index or duplicated participant array is maintained. Profile/FSM writes use parameterized YQL and serializable read/write semantics. Event pages are keyset-ordered by `(created_at, event_id)` and never load the complete history just to paginate.
@@ -151,7 +153,7 @@ bounded ordered FIFO drainer
 
 Do not attach the trigger directly to FIFO unless Yandex officially adds support and this architecture is deliberately migrated. The kick has no business-ordering role. The publisher first makes the FIFO command durable, then emits a kick. If kick publishing fails, the platform retry uses the same operation ID: FIFO deduplicates the command while the retry emits another kick.
 
-YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. All admin status changes and deletion share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
+YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Confirmation notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys, and only `Ожидается` registrations are selected. All admin status changes, reminders, and deletion share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
 
 ## Telegram transport
 

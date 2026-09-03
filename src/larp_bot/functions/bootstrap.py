@@ -19,6 +19,7 @@ from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrati
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.conversation import ConversationEngine
 from larp_bot.application.services import (
+    ConfirmationNotificationService,
     EventAdministrationService,
     OrderedMutationService,
     RegistrationCatalog,
@@ -91,11 +92,19 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     administration = EventAdministrationService(events, showcase)
     conversation = ConversationEngine(users, events, registration_service, administration, config)
     mutations = OrderedMutationService(events, catalog, users)
+    notifications = ConfirmationNotificationService(
+        events,
+        catalog,
+        users,
+        transport,
+        secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+    )
     worker = OrderedWorker(
         consumer,
         mutations,
         users,
         transport,
+        notifications,
         max_seconds=settings.worker_max_seconds,
     )
     return AppContainer(

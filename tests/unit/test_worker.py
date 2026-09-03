@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -13,19 +14,23 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.application.services import OrderedMutationService, RegistrationCatalog
+from larp_bot.application.services import ConfirmationNotificationService, OrderedMutationService, RegistrationCatalog
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
     CharacterWishPayload,
+    ConfirmationDeadlinePayload,
     EmptyPayload,
     EnlistPayload,
     Event,
+    EventStatus,
     Operation,
     OrderedRegistrationCommand,
     Platform,
     TelegramUser,
+    VkUser,
 )
+from larp_bot.domain.security import participant_key
 from tests.conftest import MemoryDiskStore
 
 
@@ -52,7 +57,7 @@ class FailingTransport(MemoryDeferredTransport):
 def queued(
     event: Event,
     operation: Operation,
-    payload: EnlistPayload | CharacterWishPayload | EmptyPayload,
+    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload,
     index: int,
 ) -> QueueEnvelope:
     command = OrderedRegistrationCommand(
@@ -61,7 +66,11 @@ def queued(
         operation=operation,
         platform=Platform.TELEGRAM,
         platform_user_id=1,
-        participant_key="a" * 43,
+        participant_key=(
+            "a" * 43
+            if operation in {Operation.ENLIST, Operation.CONFIRM, Operation.UPDATE_CHARACTER_WISH, Operation.CANCEL}
+            else None
+        ),
         payload=payload,
     )
     return QueueEnvelope(command=command, receipt_handle=f"receipt-{index}")
@@ -124,3 +133,83 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     assert consumer.deleted == []
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "expected_text"),
+    [
+        (
+            Operation.OPEN_CONFIRMATION,
+            "Подтверждение на игру Лесной предел открыто! Дедлайн подтверждения - 10.09.26 19:00",
+        ),
+        (
+            Operation.SEND_CONFIRMATION_REMINDER,
+            "Напоминаем о необходимости подтвердить или отменить участие в игре Лесной предел до 10.09.26 19:00!",
+        ),
+    ],
+)
+async def test_confirmation_notifications_go_only_to_waiting_players(
+    operation: Operation,
+    expected_text: str,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
+    event.status = EventStatus.CREATED if operation is Operation.OPEN_CONFIRMATION else EventStatus.CONFIRMATION_OPEN
+    event.confirmation_deadline = None if operation is Operation.OPEN_CONFIRMATION else deadline
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    catalog = RegistrationCatalog(events, tables, showcase)
+    users = MemoryUserRepository()
+    waiting_users = [TelegramUser(tg_id=2), VkUser(vk_id=3)]
+    confirmed_user = TelegramUser(tg_id=4)
+    cancelled_user = VkUser(vk_id=5)
+    for user in [*waiting_users, confirmed_user, cancelled_user, TelegramUser(tg_id=1)]:
+        await users.save(user)
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
+        if uid == 1:
+            continue
+        key = participant_key(secret, platform, uid, event.event_id)
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{platform.value}-{uid}",
+            participant_key=key,
+            display_name=f"Player {uid}",
+            wish_play="A",
+        )
+        if user is confirmed_user:
+            await tables.confirm(
+                event.event_id,
+                operation_id="confirm-4",
+                participant_key=key,
+                character_wish="Doctor",
+            )
+        if user is cancelled_user:
+            await tables.cancel(event.event_id, operation_id="cancel-5", participant_key=key)
+
+    payload = (
+        ConfirmationDeadlinePayload(deadline=deadline) if operation is Operation.OPEN_CONFIRMATION else EmptyPayload()
+    )
+    envelope = queued(event, operation, payload, 1)
+    consumer = FakeConsumer([envelope])
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog),
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 1
+    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == {
+        (Platform.TELEGRAM, 2, expected_text),
+        (Platform.VK, 3, expected_text),
+    }
+    assert consumer.deleted == ["receipt-1"]

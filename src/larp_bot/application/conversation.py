@@ -9,6 +9,7 @@ from larp_bot.domain.models import (
     BotResponse,
     Button,
     CharacterWishPayload,
+    ConfirmationDeadlinePayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -24,6 +25,12 @@ from larp_bot.domain.models import (
     normalize_vk_url,
 )
 
+from .deadlines import (
+    NEAREST_THURSDAY,
+    closest_thursday_19,
+    format_confirmation_deadline,
+    parse_confirmation_deadline,
+)
 from .ports import AdminConfigProvider, EventRepository, UserRepository, new_user
 from .services import EventAdministrationService, RegistrationService
 
@@ -40,6 +47,7 @@ KEEP = "Оставить без изменений"
 SKIP = "Пропустить"
 NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
+SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
@@ -99,6 +107,19 @@ def _admin_status_response(event_name: str, current_status: EventStatus) -> BotR
         ),
         buttons=[Button(label=label, value=value) for value, (label, _) in ADMIN_STATUS_CHOICES.items()]
         + [Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+    )
+
+
+def _confirmation_deadline_response(*, invalid: bool = False) -> BotResponse:
+    prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n" if invalid else ""
+    return BotResponse(
+        text=(
+            f"{prefix}Введите дедлайн подтверждения строго в формате DD.MM.YY HH:MM или нажмите «{NEAREST_THURSDAY}»."
+        ),
+        buttons=[
+            Button(label=NEAREST_THURSDAY, value="admin:deadline:nearest-thursday"),
+            Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+        ],
     )
 
 
@@ -366,6 +387,7 @@ class ConversationEngine:
             "enlist": REGISTRATION_OPEN_STATUSES,
             "admin-status": None,
             "admin-delete": None,
+            "admin-reminder": frozenset({EventStatus.CONFIRMATION_OPEN}),
         }
         if flow in event_flow_statuses:
             return await self._show_events(flow, event_flow_statuses[flow], after=after)
@@ -440,8 +462,8 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if flow in {"admin-status", "admin-delete"}:
-            return await self._admin_select(user, event, flow)
+        if flow in {"admin-status", "admin-delete", "admin-reminder"}:
+            return await self._admin_select(user, message, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
             return BotResponse(text="Сначала запишитесь на эту игру.")
@@ -628,6 +650,7 @@ class ConversationEngine:
         labels = [
             "➕ Создать игру",
             CHANGE_STATUS,
+            SEND_CONFIRMATION_REMINDER,
             "🗑 Удалить игру",
             "📋 Список игр",
             BACK,
@@ -661,6 +684,9 @@ class ConversationEngine:
                     EventStatus(str(user.dialog_context["event_status"])),
                 )
             status_label, operation = choice
+            if operation is Operation.OPEN_CONFIRMATION:
+                user.dialog_state = "ADMIN_CONFIRMATION_DEADLINE"
+                return _confirmation_deadline_response()
             context = user.dialog_context.copy()
             await self._clear(user)
             await self.registrations.enqueue(
@@ -675,6 +701,35 @@ class ConversationEngine:
                 idempotency_key=f"{message.update_id}:{operation.value}",
             )
             return BotResponse(text="⏳ Изменение Статуса принято в обработку.", deferred=True, command_enqueued=True)
+        if user.dialog_state == "ADMIN_CONFIRMATION_DEADLINE":
+            if value == "admin:deadline:nearest-thursday":
+                deadline = closest_thursday_19()
+            else:
+                try:
+                    deadline = parse_confirmation_deadline(value)
+                except ValueError:
+                    return _confirmation_deadline_response(invalid=True)
+            context = user.dialog_context.copy()
+            await self._clear(user)
+            await self.registrations.enqueue(
+                operation=Operation.OPEN_CONFIRMATION,
+                event_id=str(context["event_id"]),
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=ConfirmationDeadlinePayload(deadline=deadline),
+                reply_context=ReplyContext(
+                    text_success=f"Статус игры «{context['event_name']}» изменён: {STATUS_CONFIRMATION}."
+                ),
+                idempotency_key=f"{message.update_id}:{Operation.OPEN_CONFIRMATION.value}",
+            )
+            return BotResponse(
+                text=(
+                    "⏳ Открытие подтверждения принято в обработку.\n\n"
+                    f"Дедлайн: {format_confirmation_deadline(deadline)}"
+                ),
+                deferred=True,
+                command_enqueued=True,
+            )
         if user.dialog_state == "ADMIN_DELETE_NAME":
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
@@ -694,7 +749,13 @@ class ConversationEngine:
         await self._clear(user)
         return BotResponse(text="Административный диалог сброшен.")
 
-    async def _admin_select(self, user: User, event: Event, flow: str) -> BotResponse:
+    async def _admin_select(
+        self,
+        user: User,
+        message: InboundMessage,
+        event: Event,
+        flow: str,
+    ) -> BotResponse:
         if not await self._require_admin(user):
             return BotResponse(text="Недостаточно прав.")
         user.dialog_context = {
@@ -705,6 +766,25 @@ class ConversationEngine:
         if flow == "admin-status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
             return _admin_status_response(event.name, event.status)
+        if flow == "admin-reminder":
+            await self._clear(user)
+            if event.confirmation_deadline is None:
+                return BotResponse(
+                    text=(
+                        f"Для игры «{event.name}» не задан дедлайн. "
+                        "Снова откройте статус подтверждения и укажите дедлайн."
+                    )
+                )
+            await self.registrations.enqueue(
+                operation=Operation.SEND_CONFIRMATION_REMINDER,
+                event_id=event.event_id,
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=EmptyPayload(),
+                reply_context=ReplyContext(),
+                idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMATION_REMINDER.value}",
+            )
+            return BotResponse(text="⏳ Напоминание принято в обработку.", deferred=True, command_enqueued=True)
         user.dialog_state = "ADMIN_DELETE_NAME"
         return BotResponse(
             text=(
@@ -740,6 +820,12 @@ class ConversationEngine:
             return BotResponse(text="Введите название игры:")
         if value == CHANGE_STATUS or value in LEGACY_STATUS_ACTIONS:
             return await self._show_events("admin-status", None, empty_text="Игр нет.")
+        if value == SEND_CONFIRMATION_REMINDER:
+            return await self._show_events(
+                "admin-reminder",
+                frozenset({EventStatus.CONFIRMATION_OPEN}),
+                empty_text="Нет игр с открытым подтверждением.",
+            )
         if value == "🗑 Удалить игру":
             events = list(await self.events.list_page(limit=10))
             return BotResponse(text="Выберите игру:", buttons=_event_buttons(events, "admin-delete"))
@@ -749,7 +835,13 @@ class ConversationEngine:
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.
     async def dispatch_idle_admin(self, user: User, value: str) -> BotResponse | None:
-        admin_actions = {"➕ Создать игру", CHANGE_STATUS, "🗑 Удалить игру", "📋 Список игр"}
+        admin_actions = {
+            "➕ Создать игру",
+            CHANGE_STATUS,
+            SEND_CONFIRMATION_REMINDER,
+            "🗑 Удалить игру",
+            "📋 Список игр",
+        }
         if value in admin_actions or value in LEGACY_STATUS_ACTIONS:
             return await self._admin_start(user, value)
         return None

@@ -20,6 +20,7 @@ from larp_bot.application.conversation import (
     ENLIST,
     KEEP,
     PROFILE,
+    SEND_CONFIRMATION_REMINDER,
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
     STATUS_REGISTRATION,
@@ -32,6 +33,7 @@ from larp_bot.application.services import (
 )
 from larp_bot.domain.models import (
     BotIdentity,
+    ConfirmationDeadlinePayload,
     EnlistPayload,
     Event,
     EventStatus,
@@ -367,8 +369,72 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
             update += 1
         queued = await engine.handle(inbound(update, callback, callback=True))
         update += 1
+        if operation is Operation.OPEN_CONFIRMATION:
+            assert "DD.MM.YY HH:MM" in queued.text
+            queued = await engine.handle(inbound(update, "10.09.26 19:00"))
+            update += 1
         assert queued.deferred
         assert publisher.commands[-1].operation is operation
+        if operation is Operation.OPEN_CONFIRMATION:
+            payload = publisher.commands[-1].payload
+            assert isinstance(payload, ConfirmationDeadlinePayload)
+            assert payload.deadline.strftime("%d.%m.%y %H:%M") == "10.09.26 19:00"
+
+
+@pytest.mark.asyncio
+async def test_admin_confirmation_deadline_retries_invalid_input_with_same_options(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    event.status = EventStatus.CREATED
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    await engine.handle(inbound(1, CHANGE_STATUS))
+    await engine.handle(inbound(2, f"select:admin-status:{event.event_id}", callback=True))
+    prompt = await engine.handle(inbound(3, "admin:status:confirmation", callback=True))
+    invalid = await engine.handle(inbound(4, "9.09.26 19:00"))
+
+    assert "DD.MM.YY HH:MM" in prompt.text
+    assert prompt.buttons[0].label == "Ближайший четверг 19:00"
+    assert "Некорректная" in invalid.text
+    assert invalid.buttons == prompt.buttons
+    assert not publisher.commands
+
+
+@pytest.mark.asyncio
+async def test_admin_can_choose_nearest_thursday_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    deadline = datetime(2026, 9, 3, 16, tzinfo=UTC)
+    monkeypatch.setattr("larp_bot.application.conversation.closest_thursday_19", lambda: deadline)
+    event.status = EventStatus.CREATED
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    await engine.handle(inbound(1, CHANGE_STATUS))
+    await engine.handle(inbound(2, f"select:admin-status:{event.event_id}", callback=True))
+    await engine.handle(inbound(3, "admin:status:confirmation", callback=True))
+    queued = await engine.handle(inbound(4, "admin:deadline:nearest-thursday", callback=True))
+
+    assert "03.09.26 19:00" in queued.text
+    payload = publisher.commands[-1].payload
+    assert isinstance(payload, ConfirmationDeadlinePayload)
+    assert payload.deadline == deadline
+
+
+@pytest.mark.asyncio
+async def test_admin_has_separate_confirmation_reminder_action(disk_store: MemoryDiskStore, event: Event) -> None:
+    event.confirmation_deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert SEND_CONFIRMATION_REMINDER in [button.value for button in menu.buttons]
+    games = await engine.handle(inbound(2, SEND_CONFIRMATION_REMINDER, callback=True))
+    assert any(button.value == f"select:admin-reminder:{event.event_id}" for button in games.buttons)
+    queued = await engine.handle(inbound(3, f"select:admin-reminder:{event.event_id}", callback=True))
+
+    assert queued.deferred
+    assert publisher.commands[-1].operation is Operation.SEND_CONFIRMATION_REMINDER
 
 
 @pytest.mark.asyncio

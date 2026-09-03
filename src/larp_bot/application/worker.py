@@ -7,7 +7,7 @@ from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.domain.models import Platform
 
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
-from .services import DomainError, OrderedMutationService
+from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
 
 LOGGER = logging.getLogger("larp_bot.application.worker")
 
@@ -19,6 +19,7 @@ class OrderedWorker:
         mutations: OrderedMutationService,
         users: UserRepository,
         transport: DeferredTransport,
+        notifications: ConfirmationNotificationService | None = None,
         *,
         max_seconds: float = 40.0,
     ) -> None:
@@ -26,6 +27,7 @@ class OrderedWorker:
         self.mutations = mutations
         self.users = users
         self.transport = transport
+        self.notifications = notifications
         self.max_seconds = max_seconds
 
     async def _deliver_once(self, envelope: QueueEnvelope, text: str) -> None:
@@ -56,12 +58,19 @@ class OrderedWorker:
                 if not isinstance(raw, QueueEnvelope):
                     raise TypeError("consumer returned an invalid queue envelope")
                 command = raw.command
+                notification_delivered = False
                 try:
                     default_text = await self.mutations.apply(command)
                     text = command.reply_context.text_success or default_text
+                    if command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS:
+                        if self.notifications is None:
+                            raise RuntimeError("confirmation notification service is not configured")
+                        await self.notifications.notify_waiting(command)
+                        notification_delivered = True
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
-                await self._deliver_once(raw, text)
+                if not notification_delivered:
+                    await self._deliver_once(raw, text)
                 await self.consumer.delete(raw.receipt_handle)
                 LOGGER.info(
                     "ordered_command_completed",

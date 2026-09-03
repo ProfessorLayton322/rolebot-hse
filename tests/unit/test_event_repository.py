@@ -59,3 +59,16 @@ async def test_confirmation_open_filter_includes_legacy_open_rows() -> None:
     assert events[0].status is EventStatus.CONFIRMATION_OPEN
     status_values = {value for key, value in executor.params.items() if key.startswith("$status_")}
     assert status_values == {"CREATED", "CONFIRMATION_OPEN", "OPEN"}
+
+
+@pytest.mark.asyncio
+async def test_open_confirmation_persists_deadline_with_status() -> None:
+    executor = RecordingExecutor([event_row("CREATED")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
+
+    assert await repository.open_confirmation("event-a1", deadline)
+
+    assert "confirmation_deadline = $deadline" in executor.query_text
+    assert executor.params["$status"] == EventStatus.CONFIRMATION_OPEN.value
+    assert executor.params["$deadline"] == deadline

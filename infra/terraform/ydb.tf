@@ -125,6 +125,10 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   column {
+    name = "confirmation_deadline"
+    type = "Timestamp"
+  }
+  column {
     name = "registrations_migrated_at"
     type = "Timestamp"
   }

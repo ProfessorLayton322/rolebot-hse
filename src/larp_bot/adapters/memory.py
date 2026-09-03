@@ -29,6 +29,9 @@ class MemoryUserRepository:
         user_id = user.tg_id if hasattr(user, "tg_id") else user.vk_id
         self.rows[(platform, user_id)] = deepcopy(user)
 
+    async def list_all(self) -> Sequence[User]:
+        return deepcopy(list(self.rows.values()))
+
     async def claim_delivery(self, platform: Platform, user_id: int, operation_id: str) -> bool:
         user = self.rows.get((platform, user_id))
         if user is None:
@@ -58,6 +61,16 @@ class MemoryEventRepository:
             return False
         changed = event.status is not status
         event.status = status
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return changed
+
+    async def open_confirmation(self, event_id: str, deadline: datetime) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        changed = event.status is not EventStatus.CONFIRMATION_OPEN or event.confirmation_deadline != deadline
+        event.status = EventStatus.CONFIRMATION_OPEN
+        event.confirmation_deadline = deadline
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 

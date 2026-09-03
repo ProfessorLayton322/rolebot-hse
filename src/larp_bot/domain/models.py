@@ -41,6 +41,7 @@ class Operation(StrEnum):
     CANCEL = "CANCEL"
     OPEN_REGISTRATION = "OPEN_REGISTRATION"
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
+    SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     CLOSE_EVENT = "CLOSE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
 
@@ -154,6 +155,7 @@ class Event(StrictModel):
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
     status: EventStatus = EventStatus.CREATED
+    confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -198,7 +200,18 @@ class EmptyPayload(StrictModel):
     pass
 
 
-CommandPayload = EnlistPayload | CharacterWishPayload | EmptyPayload
+class ConfirmationDeadlinePayload(StrictModel):
+    deadline: datetime
+
+    @field_validator("deadline")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("deadline must include a timezone")
+        return value
+
+
+CommandPayload = EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload
 
 
 class ReplyContext(StrictModel):
@@ -236,10 +249,12 @@ class OrderedRegistrationCommand(StrictModel):
             self.payload, CharacterWishPayload
         ):
             raise ValueError(f"{self.operation} requires CharacterWishPayload")
+        if self.operation is Operation.OPEN_CONFIRMATION and not isinstance(self.payload, ConfirmationDeadlinePayload):
+            raise ValueError("OPEN_CONFIRMATION requires ConfirmationDeadlinePayload")
         empty_payload_operations = {
             Operation.CANCEL,
             Operation.OPEN_REGISTRATION,
-            Operation.OPEN_CONFIRMATION,
+            Operation.SEND_CONFIRMATION_REMINDER,
             Operation.CLOSE_EVENT,
             Operation.DELETE_EVENT,
         }
