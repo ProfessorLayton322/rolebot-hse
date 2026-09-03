@@ -278,9 +278,13 @@ updated_at
 Status:
 
 ```text
-OPEN
+CREATED
+CONFIRMATION_OPEN
 CLOSED
 ```
+
+Transitions are one-way: `CREATED -> CONFIRMATION_OPEN -> CLOSED`. Enlistment is allowed in the first two
+states. Attendance confirmation is allowed only in `CONFIRMATION_OPEN`.
 
 Do NOT store participants inside `events`.
 
@@ -606,7 +610,7 @@ New registration:
 Ожидается
 ```
 
-If an existing `Отменено` participant enlists again for an OPEN game:
+If an existing `Отменено` participant enlists again for a `CREATED` or `CONFIRMATION_OPEN` game:
 
 - update the per-game wanted co-player preference;
 - move status to `Ожидается`;
@@ -743,7 +747,7 @@ If not:
 
 Then:
 
-1. list OPEN games;
+1. list `CREATED` and `CONFIRMATION_OPEN` games;
 2. user selects one game;
 3. ask:
 
@@ -1194,7 +1198,7 @@ If existing and currently `Подтверждено`:
 - preserve character wish;
 - preserve `Подтверждено`.
 
-If existing and currently `Отменено`, and event is OPEN:
+If existing and currently `Отменено`, and registration is not `CLOSED`:
 
 - update `wish_play`;
 - preserve previous character wish;
@@ -1203,6 +1207,8 @@ If existing and currently `Отменено`, and event is OPEN:
 ## CONFIRM
 
 Require participant row.
+
+Require the event to be `CONFIRMATION_OPEN`. Reject confirmation while it is `CREATED` or `CLOSED`.
 
 Write:
 
@@ -1243,9 +1249,18 @@ Preserve character wish.
 
 ---
 
-# 29. Closing registration
+# 29. Opening confirmation and closing registration
 
-Admins can close an event.
+Admins first open confirmation for a created event, then close the event. Both transitions are irreversible and
+MUST enter the same FIFO group for that `event_id` as participant commands.
+
+When `OPEN_CONFIRMATION` is processed:
+
+```text
+events.status = CONFIRMATION_OPEN
+```
+
+It is accepted only from `CREATED`. The admin confirmation prompt must warn that this action cannot be undone.
 
 `CLOSE_EVENT` itself MUST enter the same FIFO group for that `event_id`.
 
@@ -1255,7 +1270,8 @@ When processed:
 events.status = CLOSED
 ```
 
-A subsequent ENLIST command ordered after CLOSE_EVENT must be rejected.
+A subsequent ENLIST or CONFIRM command ordered after CLOSE_EVENT must be rejected. `CLOSE_EVENT` is accepted
+only after confirmation has been opened.
 
 Do not rely solely on an early HTTP-handler status check.
 
@@ -1265,14 +1281,12 @@ Closing registration prevents:
 
 - new enlistments;
 - a previously cancelled player from starting a new enlistment cycle.
+- confirmations and re-confirmations.
 
 It does NOT prevent an already enlisted participant from:
 
-- confirming;
 - cancelling;
 - updating an already-created character wish.
-
-This is important because registration may close before final attendance confirmation.
 
 ---
 
@@ -1339,7 +1353,8 @@ Submenu:
 
 ```text
 ➕ Создать игру
-🔒 Закрыть регистрацию
+🔓 Открыть подтверждения
+🔒 Закрыть подтверждения
 🗑 Удалить игру
 📋 Список игр
 ⬅️ Назад
@@ -1385,17 +1400,22 @@ https://...
 
 The URL must remain stable for that game's lifetime.
 
+New games start in `CREATED`: players can enlist immediately, but cannot confirm yet.
+
 ---
 
-# 33. Close game
+# 33. Open confirmation and close game
+
+For `🔓 Открыть подтверждения`, show only `CREATED` games, display an irreversible-action warning, ask for
+confirmation, and enqueue `OPEN_CONFIRMATION`.
 
 Admin selects:
 
 ```text
-🔒 Закрыть регистрацию
+🔒 Закрыть подтверждения
 ```
 
-Show OPEN events.
+Show only `CONFIRMATION_OPEN` events.
 
 After selection:
 
@@ -1487,7 +1507,7 @@ Pagination size:
 Each entry:
 
 - game name;
-- OPEN/CLOSED status;
+- CREATED/CONFIRMATION_OPEN/CLOSED status;
 - creation date;
 - public table URL.
 
@@ -2839,18 +2859,21 @@ Example:
 
 ```text
 ENLIST User A
+OPEN_CONFIRMATION
+CONFIRM User A
 CLOSE_EVENT
 ENLIST User B
-CONFIRM User A
+CONFIRM User A again
 ```
 
 Expected:
 
 - User A enlisted;
+- confirmation opened;
+- User A confirmed;
 - event closed;
 - User B ENLIST rejected;
-- User A CONFIRM still succeeds;
-- User A can provide per-event character wishes during confirmation.
+- User A re-confirmation rejected.
 
 Also test:
 
@@ -3280,22 +3303,23 @@ Work in this order:
 12. implement CONFIRM with per-game character wishes;
 13. implement UPDATE_CHARACTER_WISH;
 14. implement CANCEL;
-15. implement FIFO publisher;
-16. implement kick publisher;
-17. implement FIFO drainer;
-18. implement admin operations;
-19. implement Telegram platform adapter;
-20. implement VK platform adapter;
-21. implement Cloudflare telegram-ingress;
-22. implement Cloudflare telegram-egress;
-23. implement Yandex HTTP gateway Function;
-24. implement Terraform;
-25. implement GitHub Actions;
-26. write tests;
-27. write README;
-28. run every validation command;
-29. fix failures;
-30. produce deployment checklist.
+15. implement the ordered OPEN_CONFIRMATION and CLOSE_EVENT lifecycle;
+16. implement FIFO publisher;
+17. implement kick publisher;
+18. implement FIFO drainer;
+19. implement admin operations;
+20. implement Telegram platform adapter;
+21. implement VK platform adapter;
+22. implement Cloudflare telegram-ingress;
+23. implement Cloudflare telegram-egress;
+24. implement Yandex HTTP gateway Function;
+25. implement Terraform;
+26. implement GitHub Actions;
+27. write tests;
+28. write README;
+29. run every validation command;
+30. fix failures;
+31. produce deployment checklist.
 
 Do not stop at an architecture proposal.
 

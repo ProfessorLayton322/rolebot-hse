@@ -14,9 +14,11 @@ from larp_bot.adapters.yandex_disk.repository import YandexDiskRegistrationRepos
 from larp_bot.application.conversation import (
     ADMIN,
     CHARACTER,
+    CLOSE_CONFIRMATION,
     CONFIRM,
     ENLIST,
     KEEP,
+    OPEN_CONFIRMATION,
     PROFILE,
     ConversationEngine,
 )
@@ -25,6 +27,7 @@ from larp_bot.domain.models import (
     BotIdentity,
     EnlistPayload,
     Event,
+    EventStatus,
     InboundMessage,
     Operation,
     Platform,
@@ -148,6 +151,30 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     assert "пожелания" in selection.text.casefold()
     await engine.handle(inbound(3, "Doctor"))
     assert publisher.commands[-1].operation is Operation.CONFIRM
+
+
+@pytest.mark.asyncio
+async def test_created_game_accepts_signup_but_does_not_offer_confirmation(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    event.status = EventStatus.CREATED
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+
+    enlist_games = await engine.handle(inbound(1, ENLIST))
+    assert any(button.value == f"select:enlist:{event.event_id}" for button in enlist_games.buttons)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+
+    confirmation_games = await engine.handle(inbound(2, CONFIRM))
+    assert "ещё не открыто" in confirmation_games.text
+    assert not any(button.value == f"select:confirm:{event.event_id}" for button in confirmation_games.buttons)
+    assert not publisher.commands
 
 
 @pytest.mark.asyncio
@@ -291,6 +318,39 @@ async def test_admin_delete_requires_exact_case_but_trims_whitespace(disk_store:
     accepted = await engine.handle(inbound(5, f"  {event.name}  "))
     assert accepted.deferred
     assert publisher.commands[-1].operation is Operation.DELETE_EVENT
+
+
+@pytest.mark.asyncio
+async def test_admin_open_confirmation_warns_that_transition_is_irreversible(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    event.status = EventStatus.CREATED
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert OPEN_CONFIRMATION in [button.value for button in menu.buttons]
+    games = await engine.handle(inbound(2, OPEN_CONFIRMATION, callback=True))
+    assert any(button.value == f"select:admin-open:{event.event_id}" for button in games.buttons)
+    warning = await engine.handle(inbound(3, f"select:admin-open:{event.event_id}", callback=True))
+    assert "нельзя отменить" in warning.text
+    assert any(button.value == "admin:open-confirmation:yes" for button in warning.buttons)
+
+    queued = await engine.handle(inbound(4, "admin:open-confirmation:yes", callback=True))
+    assert queued.deferred
+    assert publisher.commands[-1].operation is Operation.OPEN_CONFIRMATION
+
+
+@pytest.mark.asyncio
+async def test_admin_can_close_only_after_confirmation_is_open(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    games = await engine.handle(inbound(1, CLOSE_CONFIRMATION, callback=True))
+    assert any(button.value == f"select:admin-close:{event.event_id}" for button in games.buttons)
+    warning = await engine.handle(inbound(2, f"select:admin-close:{event.event_id}", callback=True))
+    assert "не смогут ни записаться, ни подтвердить" in warning.text
+    queued = await engine.handle(inbound(3, "admin:close:yes", callback=True))
+    assert queued.deferred
+    assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
 
 
 @pytest.mark.asyncio

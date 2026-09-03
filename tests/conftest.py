@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from larp_bot.domain.models import Event
+from larp_bot.domain.models import Event, EventStatus
 
 
 class MemoryDiskStore:
@@ -57,4 +57,5 @@ def event() -> Event:
         name="Лесной предел",
         disk_resource_path="disk:/larp-bot/events/event-a1-les.xlsx",
         public_registration_url="https://disk.example/public/1",
+        status=EventStatus.CONFIRMATION_OPEN,
     )

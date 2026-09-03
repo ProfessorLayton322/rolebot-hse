@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
@@ -235,12 +235,16 @@ class YdbEventRepository:
 
     @staticmethod
     def _from_row(row: dict[str, Any]) -> Event:
+        # OPEN was the only non-final status before the confirmation gate was
+        # introduced. Preserve its former behavior during a rolling deploy.
+        raw_status = str(row["status"])
+        status = EventStatus.CONFIRMATION_OPEN if raw_status == "OPEN" else EventStatus(raw_status)
         return Event(
             event_id=row["event_id"],
             name=row["name"],
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
-            status=EventStatus(row["status"]),
+            status=status,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
         )
@@ -318,7 +322,7 @@ class YdbEventRepository:
     async def list_page(
         self,
         *,
-        status: EventStatus | None = None,
+        statuses: Collection[EventStatus] | None = None,
         after: tuple[datetime, str] | None = None,
         limit: int = 10,
     ) -> Sequence[Event]:
@@ -327,10 +331,17 @@ class YdbEventRepository:
         conditions: list[str] = []
         params: dict[str, Any] = {"$limit": limit}
         declarations = ["DECLARE $limit AS Uint64;"]
-        if status is not None:
-            conditions.append("status = $status")
-            declarations.append("DECLARE $status AS Utf8;")
-            params["$status"] = status.value
+        if statuses is not None:
+            persisted_statuses = {status.value for status in statuses}
+            if EventStatus.CONFIRMATION_OPEN in statuses:
+                persisted_statuses.add("OPEN")
+            status_conditions = []
+            for index, value in enumerate(sorted(persisted_statuses)):
+                parameter = f"$status_{index}"
+                status_conditions.append(f"status = {parameter}")
+                declarations.append(f"DECLARE {parameter} AS Utf8;")
+                params[parameter] = value
+            conditions.append(f"({' OR '.join(status_conditions)})" if status_conditions else "FALSE")
         if after is not None:
             conditions.append("(created_at > $after_time OR (created_at = $after_time AND event_id > $after_id))")
             declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_id AS Utf8;"])
