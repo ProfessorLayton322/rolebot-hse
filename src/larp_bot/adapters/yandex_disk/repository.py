@@ -17,6 +17,8 @@ from larp_bot.domain.models import AttendanceStatus, Event, Registration
 VISIBLE_HEADERS = (
     "№",
     "Имя",
+    "Профиль ВКонтакте",
+    "Профиль в Telegram",
     "Предыдущий опыт в LARP",
     "Готовность к кроссполу",
     "С кем хочу играть",
@@ -25,7 +27,18 @@ VISIBLE_HEADERS = (
 )
 # These layouts are read only while migrating deployments that used XLSX as
 # storage. Newly generated showcase files contain VISIBLE_HEADERS exclusively.
-STATEFUL_HEADERS = (*VISIBLE_HEADERS, "participant_key", "last_operation_id", "updated_at")
+STATEFUL_HEADERS = (
+    "№",
+    "Имя",
+    "Предыдущий опыт в LARP",
+    "Готовность к кроссполу",
+    "С кем хочу играть",
+    "Пожелания по персонажу",
+    "Текущий статус",
+    "participant_key",
+    "last_operation_id",
+    "updated_at",
+)
 LEGACY_HEADERS = (
     "Имя",
     "С кем хочу играть",
@@ -88,8 +101,8 @@ def _format_sheet(sheet: Worksheet) -> None:
     for cell in sheet[1]:
         cell.font = Font(bold=True)
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = "A1:G1"
-    widths = (8, 30, 25, 26, 35, 45, 18)
+    sheet.auto_filter.ref = "A1:I1"
+    widths = (8, 30, 32, 32, 25, 26, 35, 45, 18)
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
 
@@ -104,6 +117,8 @@ def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes
             (
                 number,
                 safe_cell(registration.display_name),
+                safe_cell(registration.vk_profile),
+                safe_cell(registration.telegram_profile or ""),
                 _bool_cell(registration.larp_experience),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),

@@ -447,23 +447,27 @@ class YdbEventRepository:
 
 class YdbRegistrationRepository:
     COLUMNS = """
-        event_id, participant_key, display_name, wish_play, larp_experience,
+        event_id, participant_key, display_name, vk_profile, telegram_profile,
+        wish_play, larp_experience,
         crossplay, character_wish, attendance_status, last_operation_id,
         created_at, updated_at
     """
     INSERT = """
         DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
-        DECLARE $display_name AS Utf8; DECLARE $wish_play AS Utf8;
+        DECLARE $display_name AS Utf8; DECLARE $vk_profile AS Utf8;
+        DECLARE $telegram_profile AS Optional<Utf8>; DECLARE $wish_play AS Utf8;
         DECLARE $larp_experience AS Optional<Bool>; DECLARE $crossplay AS Optional<Bool>;
         DECLARE $character_wish AS Utf8; DECLARE $attendance_status AS Utf8;
         DECLARE $last_operation_id AS Utf8; DECLARE $created_at AS Timestamp;
         DECLARE $updated_at AS Timestamp;
         INSERT INTO `registrations` (
-            event_id, participant_key, display_name, wish_play, larp_experience,
+            event_id, participant_key, display_name, vk_profile, telegram_profile,
+            wish_play, larp_experience,
             crossplay, character_wish, attendance_status, last_operation_id,
             created_at, updated_at
         ) VALUES (
-            $event_id, $participant_key, $display_name, $wish_play, $larp_experience,
+            $event_id, $participant_key, $display_name, $vk_profile, $telegram_profile,
+            $wish_play, $larp_experience,
             $crossplay, $character_wish, $attendance_status, $last_operation_id,
             $created_at, $updated_at
         );
@@ -478,6 +482,8 @@ class YdbRegistrationRepository:
             event_id=row["event_id"],
             participant_key=row["participant_key"],
             display_name=row["display_name"],
+            vk_profile=row.get("vk_profile") or "",
+            telegram_profile=row.get("telegram_profile"),
             wish_play=row["wish_play"],
             larp_experience=row.get("larp_experience"),
             crossplay=row.get("crossplay"),
@@ -518,17 +524,20 @@ class YdbRegistrationRepository:
         await self.db.query(
             """
             DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
-            DECLARE $display_name AS Utf8; DECLARE $wish_play AS Utf8;
+            DECLARE $display_name AS Utf8; DECLARE $vk_profile AS Utf8;
+            DECLARE $telegram_profile AS Optional<Utf8>; DECLARE $wish_play AS Utf8;
             DECLARE $larp_experience AS Optional<Bool>; DECLARE $crossplay AS Optional<Bool>;
             DECLARE $character_wish AS Utf8; DECLARE $attendance_status AS Utf8;
             DECLARE $last_operation_id AS Utf8; DECLARE $created_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             UPSERT INTO `registrations` (
-                event_id, participant_key, display_name, wish_play, larp_experience,
+                event_id, participant_key, display_name, vk_profile, telegram_profile,
+                wish_play, larp_experience,
                 crossplay, character_wish, attendance_status, last_operation_id,
                 created_at, updated_at
             ) VALUES (
-                $event_id, $participant_key, $display_name, $wish_play, $larp_experience,
+                $event_id, $participant_key, $display_name, $vk_profile, $telegram_profile,
+                $wish_play, $larp_experience,
                 $crossplay, $character_wish, $attendance_status, $last_operation_id,
                 $created_at, $updated_at
             );
@@ -537,6 +546,8 @@ class YdbRegistrationRepository:
                 "$event_id": registration.event_id,
                 "$participant_key": registration.participant_key,
                 "$display_name": registration.display_name,
+                "$vk_profile": registration.vk_profile,
+                "$telegram_profile": registration.telegram_profile,
                 "$wish_play": registration.wish_play,
                 "$larp_experience": registration.larp_experience,
                 "$crossplay": registration.crossplay,
@@ -554,6 +565,8 @@ class YdbRegistrationRepository:
             "$event_id": registration.event_id,
             "$participant_key": registration.participant_key,
             "$display_name": registration.display_name,
+            "$vk_profile": registration.vk_profile,
+            "$telegram_profile": registration.telegram_profile,
             "$wish_play": registration.wish_play,
             "$larp_experience": registration.larp_experience,
             "$crossplay": registration.crossplay,
@@ -590,6 +603,8 @@ class YdbRegistrationRepository:
         wish_play: str,
         larp_experience: bool | None = None,
         crossplay: bool | None = None,
+        vk_profile: str = "",
+        telegram_profile: str | None = None,
     ) -> bool:
         registration = await self.get(event_id, participant_key)
         if registration is not None and registration.last_operation_id == operation_id:
@@ -602,12 +617,16 @@ class YdbRegistrationRepository:
                 wish_play=wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,
+                vk_profile=vk_profile,
+                telegram_profile=telegram_profile,
             )
         else:
             registration.display_name = display_name
             registration.wish_play = wish_play
             registration.larp_experience = larp_experience
             registration.crossplay = crossplay
+            registration.vk_profile = vk_profile
+            registration.telegram_profile = telegram_profile
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
         registration.last_operation_id = operation_id

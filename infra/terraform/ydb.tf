@@ -167,6 +167,14 @@ resource "yandex_ydb_table" "registrations" {
     not_null = true
   }
   column {
+    name = "vk_profile"
+    type = "Utf8"
+  }
+  column {
+    name = "telegram_profile"
+    type = "Utf8"
+  }
+  column {
     name     = "wish_play"
     type     = "Utf8"
     not_null = true

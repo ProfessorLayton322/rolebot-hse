@@ -13,6 +13,8 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     ydb = (ROOT / "infra/terraform/ydb.tf").read_text()
     assert 'primary_key = ["event_id", "participant_key"]' in ydb
     assert 'name = "confirmation_deadline"' in ydb
+    assert 'name = "vk_profile"' in ydb
+    assert 'name = "telegram_profile"' in ydb
 
 
 def test_no_fifo_native_trigger() -> None:

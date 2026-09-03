@@ -111,6 +111,8 @@ Visible columns:
 ```text
 №
 Имя
+Профиль ВКонтакте
+Профиль в Telegram
 Предыдущий опыт в LARP
 Готовность к кроссполу
 С кем хочу играть
@@ -120,7 +122,7 @@ Visible columns:
 
 There are no technical or hidden columns. The participant key, operation ID, and timestamps exist only in YDB. User text beginning with `=`, `+`, `-`, or `@` is prefixed with the established spreadsheet apostrophe escape to prevent formula execution.
 
-The public workbook intentionally exposes row number, display name, prior LARP experience, readiness for cross-gender play, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, participant keys, operation metadata, and credentials never enter it. Operators must disclose to players that these fields are public. On first access after rollout, legacy stateful workbooks are imported idempotently into YDB and immediately replaced with the visible-only projection; `events.registrations_migrated_at` prevents later XLSX reads.
+The public workbook intentionally exposes row number, display name, VK profile, optional Telegram profile, prior LARP experience, readiness for cross-gender play, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw Telegram IDs, participant keys, operation metadata, and credentials never enter it. Operators must disclose to players that these fields are public. On first access after rollout, legacy stateful workbooks are imported idempotently into YDB and immediately replaced with the visible-only projection; `events.registrations_migrated_at` prevents later XLSX reads.
 
 Malformed legacy XLSX aborts migration without setting the migration timestamp. After migration, damaged or manually edited showcase files are safely regenerated from YDB on the next mutation.
 

@@ -130,6 +130,8 @@ class MemoryRegistrationRepository:
         wish_play: str,
         larp_experience: bool | None = None,
         crossplay: bool | None = None,
+        vk_profile: str = "",
+        telegram_profile: str | None = None,
     ) -> bool:
         key = (event_id, participant_key)
         registration = self.rows.get(key)
@@ -143,6 +145,8 @@ class MemoryRegistrationRepository:
                 wish_play=wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,
+                vk_profile=vk_profile,
+                telegram_profile=telegram_profile,
             )
             self.rows[key] = registration
         else:
@@ -150,6 +154,8 @@ class MemoryRegistrationRepository:
             registration.wish_play = wish_play
             registration.larp_experience = larp_experience
             registration.crossplay = crossplay
+            registration.vk_profile = vk_profile
+            registration.telegram_profile = telegram_profile
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
         registration.last_operation_id = operation_id

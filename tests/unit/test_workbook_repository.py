@@ -34,9 +34,10 @@ async def test_new_workbook_is_a_visible_only_showcase(disk_store: MemoryDiskSto
     try:
         headers = tuple(cell.value for cell in workbook.active[1])
         assert headers == VISIBLE_HEADERS
-        assert workbook.active.max_column == 7
+        assert headers[2:4] == ("Профиль ВКонтакте", "Профиль в Telegram")
+        assert workbook.active.max_column == 9
         assert not any(
-            workbook.active.column_dimensions[column].hidden for column in ("A", "B", "C", "D", "E", "F", "G")
+            workbook.active.column_dimensions[column].hidden for column in ("A", "B", "C", "D", "E", "F", "G", "H", "I")
         )
     finally:
         workbook.close()
@@ -49,6 +50,8 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
         event_id=event.event_id,
         participant_key="a" * 43,
         display_name='=HYPERLINK("bad")',
+        vk_profile="https://vk.com/player",
+        telegram_profile="https://t.me/player",
         wish_play="+SUM(1,2)",
         larp_experience=True,
         crossplay=False,
@@ -60,16 +63,18 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
 
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]), data_only=False)
     try:
-        assert tuple(workbook.active.cell(2, column).value for column in range(1, 8)) == (
+        assert tuple(workbook.active.cell(2, column).value for column in range(1, 10)) == (
             1,
             '\'=HYPERLINK("bad")',
+            "https://vk.com/player",
+            "https://t.me/player",
             "Да",
             "Нет",
             "'+SUM(1,2)",
             "Doctor",
             AttendanceStatus.CONFIRMED.value,
         )
-        assert workbook.active.max_column == 7
+        assert workbook.active.max_column == 9
     finally:
         workbook.close()
 
@@ -119,9 +124,31 @@ async def test_legacy_state_is_imported_once_then_removed_from_xlsx(
     rendered = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         assert tuple(cell.value for cell in rendered.active[1]) == VISIBLE_HEADERS
-        assert rendered.active.max_column == 7
+        assert rendered.active.max_column == 9
     finally:
         rendered.close()
+
+
+@pytest.mark.asyncio
+async def test_optional_telegram_profile_is_rendered_as_blank(disk_store: MemoryDiskStore, event: Event) -> None:
+    showcase = await initialized(disk_store, event)
+    registration = Registration(
+        event_id=event.event_id,
+        participant_key="a" * 43,
+        display_name="Player",
+        vk_profile="https://vk.com/id1",
+        telegram_profile=None,
+        wish_play="Anyone",
+    )
+
+    await showcase.replace(event, [registration])
+
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert workbook.active["C2"].value == "https://vk.com/id1"
+        assert workbook.active["D2"].value is None
+    finally:
+        workbook.close()
 
 
 @pytest.mark.asyncio
