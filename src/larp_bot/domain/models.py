@@ -39,6 +39,7 @@ class Operation(StrEnum):
     CONFIRM = "CONFIRM"
     UPDATE_CHARACTER_WISH = "UPDATE_CHARACTER_WISH"
     CANCEL = "CANCEL"
+    OPEN_REGISTRATION = "OPEN_REGISTRATION"
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
     CLOSE_EVENT = "CLOSE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
@@ -233,6 +234,7 @@ class OrderedRegistrationCommand(StrictModel):
             raise ValueError(f"{self.operation} requires CharacterWishPayload")
         empty_payload_operations = {
             Operation.CANCEL,
+            Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
             Operation.CLOSE_EVENT,
             Operation.DELETE_EVENT,

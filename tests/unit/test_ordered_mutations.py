@@ -38,7 +38,10 @@ def command(
         platform=Platform.TELEGRAM,
         platform_user_id=1,
         participant_key=(
-            None if operation in {Operation.OPEN_CONFIRMATION, Operation.CLOSE_EVENT, Operation.DELETE_EVENT} else key
+            None
+            if operation
+            in {Operation.OPEN_REGISTRATION, Operation.OPEN_CONFIRMATION, Operation.CLOSE_EVENT, Operation.DELETE_EVENT}
+            else key
         ),
         payload=payload,
     )
@@ -161,23 +164,28 @@ async def test_close_orders_both_enlist_and_confirmation_rejection(disk_store: M
 
 
 @pytest.mark.asyncio
-async def test_confirmation_lifecycle_cannot_move_backwards(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_admin_status_commands_allow_any_transition(disk_store: MemoryDiskStore, event: Event) -> None:
     event.status = EventStatus.CREATED
     tables = YandexDiskRegistrationRepository(disk_store)
     await tables.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     mutations = OrderedMutationService(events, tables)
 
-    with pytest.raises(OperationNotAllowed, match="Сначала откройте"):
-        await mutations.apply(command(event, Operation.CLOSE_EVENT, EmptyPayload()))
-    await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, EmptyPayload()))
-    opened = await events.get(event.event_id)
-    assert opened is not None and opened.status is EventStatus.CONFIRMATION_OPEN
     await mutations.apply(command(event, Operation.CLOSE_EVENT, EmptyPayload()))
     closed = await events.get(event.event_id)
     assert closed is not None and closed.status is EventStatus.CLOSED
-    with pytest.raises(OperationNotAllowed, match="нельзя открыть снова"):
-        await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, EmptyPayload()))
+
+    await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, EmptyPayload()))
+    opened = await events.get(event.event_id)
+    assert opened is not None and opened.status is EventStatus.CONFIRMATION_OPEN
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
+    await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
+
+    await mutations.apply(command(event, Operation.OPEN_REGISTRATION, EmptyPayload()))
+    registration = await events.get(event.event_id)
+    assert registration is not None and registration.status is EventStatus.CREATED
+    with pytest.raises(OperationNotAllowed, match="ещё не открыто"):
+        await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Changed")))
 
 
 @pytest.mark.asyncio

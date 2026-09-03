@@ -13,13 +13,15 @@ from larp_bot.adapters.memory import (
 from larp_bot.adapters.yandex_disk.repository import YandexDiskRegistrationRepository
 from larp_bot.application.conversation import (
     ADMIN,
+    CHANGE_STATUS,
     CHARACTER,
-    CLOSE_CONFIRMATION,
     CONFIRM,
     ENLIST,
     KEEP,
-    OPEN_CONFIRMATION,
     PROFILE,
+    STATUS_CLOSED,
+    STATUS_CONFIRMATION,
+    STATUS_REGISTRATION,
     ConversationEngine,
 )
 from larp_bot.application.services import EventAdministrationService, RegistrationService
@@ -321,36 +323,41 @@ async def test_admin_delete_requires_exact_case_but_trims_whitespace(disk_store:
 
 
 @pytest.mark.asyncio
-async def test_admin_open_confirmation_warns_that_transition_is_irreversible(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: MemoryDiskStore, event: Event) -> None:
     event.status = EventStatus.CREATED
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
     menu = await engine.handle(inbound(1, ADMIN))
-    assert OPEN_CONFIRMATION in [button.value for button in menu.buttons]
-    games = await engine.handle(inbound(2, OPEN_CONFIRMATION, callback=True))
-    assert any(button.value == f"select:admin-open:{event.event_id}" for button in games.buttons)
-    warning = await engine.handle(inbound(3, f"select:admin-open:{event.event_id}", callback=True))
-    assert "нельзя отменить" in warning.text
-    assert any(button.value == "admin:open-confirmation:yes" for button in warning.buttons)
+    assert CHANGE_STATUS in [button.value for button in menu.buttons]
+    games = await engine.handle(inbound(2, CHANGE_STATUS, callback=True))
+    assert any(button.value == f"select:admin-status:{event.event_id}" for button in games.buttons)
+    status_prompt = await engine.handle(inbound(3, f"select:admin-status:{event.event_id}", callback=True))
+    assert "Текущий Статус: Регистрация" in status_prompt.text
+    assert "могут записываться, но ещё не могут подтверждать" in status_prompt.text
+    assert "могут записываться и подтверждать" in status_prompt.text
+    assert "не могут ни записываться, ни подтверждать" in status_prompt.text
+    assert [button.label for button in status_prompt.buttons[:3]] == [
+        STATUS_REGISTRATION,
+        STATUS_CONFIRMATION,
+        STATUS_CLOSED,
+    ]
 
-    queued = await engine.handle(inbound(4, "admin:open-confirmation:yes", callback=True))
-    assert queued.deferred
-    assert publisher.commands[-1].operation is Operation.OPEN_CONFIRMATION
-
-
-@pytest.mark.asyncio
-async def test_admin_can_close_only_after_confirmation_is_open(disk_store: MemoryDiskStore, event: Event) -> None:
-    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
-
-    games = await engine.handle(inbound(1, CLOSE_CONFIRMATION, callback=True))
-    assert any(button.value == f"select:admin-close:{event.event_id}" for button in games.buttons)
-    warning = await engine.handle(inbound(2, f"select:admin-close:{event.event_id}", callback=True))
-    assert "не смогут ни записаться, ни подтвердить" in warning.text
-    queued = await engine.handle(inbound(3, "admin:close:yes", callback=True))
-    assert queued.deferred
-    assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
+    expected_operations = [
+        ("admin:status:registration", Operation.OPEN_REGISTRATION),
+        ("admin:status:confirmation", Operation.OPEN_CONFIRMATION),
+        ("admin:status:closed", Operation.CLOSE_EVENT),
+    ]
+    update = 4
+    for callback, operation in expected_operations:
+        if update > 4:
+            await engine.handle(inbound(update, CHANGE_STATUS, callback=True))
+            update += 1
+            await engine.handle(inbound(update, f"select:admin-status:{event.event_id}", callback=True))
+            update += 1
+        queued = await engine.handle(inbound(update, callback, callback=True))
+        update += 1
+        assert queued.deferred
+        assert publisher.commands[-1].operation is operation
 
 
 @pytest.mark.asyncio
@@ -390,5 +397,6 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
     )
     page = await engine.handle(inbound(1, "📋 Список игр"))
     assert page.text.count("https://disk.example/") == min(count, 10)
+    assert page.text.count("Статус: Регистрация") == min(count, 10)
     has_next = any(button.label == "➡️ Далее" for button in page.buttons)
     assert has_next is (count > 10)

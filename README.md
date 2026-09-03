@@ -45,16 +45,20 @@ The old `main.py` was a 286-line Telegram polling script with an in-memory aiogr
 
 There is deliberately no `character_wish` field on `TelegramUser`, `VkUser`, `tg_users`, or `vk_users`. Pydantic rejects unknown fields, and a contract test prevents this field from being reintroduced.
 
-Every game follows one irreversible three-state lifecycle:
+Every game has exactly three states. Admins may move a game freely between them:
 
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED: game created / signup available
     CREATED --> CONFIRMATION_OPEN: admin opens confirmation
+    CREATED --> CLOSED: admin closes registration
+    CONFIRMATION_OPEN --> CREATED: admin returns to signup only
     CONFIRMATION_OPEN --> CLOSED: admin closes registration
+    CLOSED --> CREATED: admin reopens signup only
+    CLOSED --> CONFIRMATION_OPEN: admin reopens signup and confirmation
 ```
 
-Players may enlist in `CREATED` and `CONFIRMATION_OPEN`. They may confirm attendance only in `CONFIRMATION_OPEN`; `CLOSED` accepts neither enlistment nor confirmation. The admin UI warns that opening confirmation cannot be undone. Existing persisted `OPEN` events are interpreted as `CONFIRMATION_OPEN` during the rollout.
+The admin interface names these states `Регистрация`, `Подтверждение`, and `Закрытие регистрации`. Players may enlist in `CREATED` (`Регистрация`) and `CONFIRMATION_OPEN` (`Подтверждение`). They may confirm attendance only in `CONFIRMATION_OPEN`; `CLOSED` (`Закрытие регистрации`) accepts neither enlistment nor confirmation. Existing persisted `OPEN` events are interpreted as `CONFIRMATION_OPEN` during the rollout.
 
 ```mermaid
 stateDiagram-v2
@@ -153,7 +157,7 @@ bounded ordered FIFO drainer
 
 Do not attach the trigger directly to FIFO unless Yandex officially adds support and this architecture is deliberately migrated. The kick has no business-ordering role. The publisher first makes the FIFO command durable, then emits a kick. If kick publishing fails, the platform retry uses the same operation ID: FIFO deduplicates the command while the retry emits another kick.
 
-Workbook download/upload failures leave the FIFO message undeleted. Mutation success followed by bot-delivery failure does not roll back the workbook; delivery is retried. The delivery marker is written only after the transport accepts the response. Opening confirmation, closing registration, and deletion share the same per-event FIFO group as participant mutations. Worker-time event/registration state—not an earlier button—is authoritative.
+Workbook download/upload failures leave the FIFO message undeleted. Mutation success followed by bot-delivery failure does not roll back the workbook; delivery is retried. The delivery marker is written only after the transport accepts the response. All admin status changes and deletion share the same per-event FIFO group as participant mutations. Worker-time event/registration state—not an earlier button—is authoritative.
 
 ## Telegram transport
 
@@ -380,7 +384,7 @@ YANDEX_SERVICE_ACCOUNT_IDS
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, three YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, injects every application secret into Workers, calls Telegram `setWebhook`, and runs live Telegram/VK smoke tests.
 8. In VK community settings, add the emitted `vk_callback_url`, set the same callback secret, select the current API version, confirm the server using `VK_CONFIRMATION_STRING`, and enable message events.
-9. Send `/start` to Telegram and a message to the VK community. Create a test game as an admin, open the returned public workbook URL, enlist while confirmation is unavailable, open confirmation as an admin, confirm with a wish, edit it, close registration, and cancel.
+9. Send `/start` to Telegram and a message to the VK community. Create a test game as an admin, open the returned public workbook URL, enlist while confirmation is unavailable, change its Статус to `Подтверждение`, confirm with a wish, change it to `Закрытие регистрации`, and verify signup and confirmation are unavailable.
 10. Verify YDB contains only `tg_users`, `vk_users`, and `events`; verify the Telegram webhook points to `*.workers.dev`, never the Yandex gateway.
 
 ## Telegram setup details
@@ -454,7 +458,7 @@ terraform plan
 
 ## Tests and enforced contracts
 
-Python tests cover profile differences, absence of global character wishes, the three-state game lifecycle, signup before confirmation opens, irreversible ordered state transitions, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
+Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
 Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, exactly three YDB tables, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
 

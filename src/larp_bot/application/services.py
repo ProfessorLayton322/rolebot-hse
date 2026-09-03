@@ -113,7 +113,12 @@ class RegistrationService:
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
         participant = None
-        if operation not in {Operation.OPEN_CONFIRMATION, Operation.CLOSE_EVENT, Operation.DELETE_EVENT}:
+        if operation not in {
+            Operation.OPEN_REGISTRATION,
+            Operation.OPEN_CONFIRMATION,
+            Operation.CLOSE_EVENT,
+            Operation.DELETE_EVENT,
+        }:
             participant = self.key(platform, user_id, event_id)
         command = OrderedRegistrationCommand(
             operation_id=(
@@ -189,20 +194,15 @@ class OrderedMutationService:
                 return "Игра и таблица уже удалены"
             raise EventNotFound("Игра уже удалена или не существует")
 
-        if command.operation is Operation.OPEN_CONFIRMATION:
-            if event.status is EventStatus.CLOSED:
-                raise OperationNotAllowed("Закрытую регистрацию нельзя открыть снова")
-            if event.status is EventStatus.CONFIRMATION_OPEN:
-                return "Подтверждение участия уже открыто"
-            await self.events.set_status(event.event_id, EventStatus.CONFIRMATION_OPEN)
-            return "Подтверждение участия открыто"
-        if command.operation is Operation.CLOSE_EVENT:
-            if event.status is EventStatus.CREATED:
-                raise OperationNotAllowed("Сначала откройте подтверждение участия")
-            if event.status is EventStatus.CLOSED:
-                return "Регистрация и подтверждение участия уже закрыты"
-            await self.events.set_status(event.event_id, EventStatus.CLOSED)
-            return "Регистрация и подтверждение участия закрыты"
+        status_operations = {
+            Operation.OPEN_REGISTRATION: (EventStatus.CREATED, "Установлен Статус «Регистрация»"),
+            Operation.OPEN_CONFIRMATION: (EventStatus.CONFIRMATION_OPEN, "Установлен Статус «Подтверждение»"),
+            Operation.CLOSE_EVENT: (EventStatus.CLOSED, "Установлен Статус «Закрытие регистрации»"),
+        }
+        if command.operation in status_operations:
+            status, message = status_operations[command.operation]
+            await self.events.set_status(event.event_id, status)
+            return message
         if command.operation is Operation.DELETE_EVENT:
             await self.tables.delete_event_workbook(event.disk_resource_path)
             await self.events.delete(event.event_id)
