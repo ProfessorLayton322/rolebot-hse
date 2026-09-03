@@ -39,15 +39,25 @@ NO_WISHES = "Без пожеланий"
 KEEP = "Оставить без изменений"
 SKIP = "Пропустить"
 NO_CO_PLAYER_WISH = "Без пожеланий"
-OPEN_CONFIRMATION = "🔓 Открыть подтверждения"
-CLOSE_CONFIRMATION = "🔒 Закрыть подтверждения"
+CHANGE_STATUS = "🔄 Изменить статус"
+STATUS_REGISTRATION = "Регистрация"
+STATUS_CONFIRMATION = "Подтверждение"
+STATUS_CLOSED = "Закрытие регистрации"
 
 REGISTRATION_OPEN_STATUSES = frozenset({EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN})
 EVENT_STATUS_LABELS = {
-    EventStatus.CREATED: "регистрация открыта, подтверждение ещё не открыто",
-    EventStatus.CONFIRMATION_OPEN: "регистрация и подтверждение открыты",
-    EventStatus.CLOSED: "регистрация и подтверждение закрыты",
+    EventStatus.CREATED: STATUS_REGISTRATION,
+    EventStatus.CONFIRMATION_OPEN: STATUS_CONFIRMATION,
+    EventStatus.CLOSED: STATUS_CLOSED,
 }
+ADMIN_STATUS_CHOICES = {
+    "admin:status:registration": (STATUS_REGISTRATION, Operation.OPEN_REGISTRATION),
+    "admin:status:confirmation": (STATUS_CONFIRMATION, Operation.OPEN_CONFIRMATION),
+    "admin:status:closed": (STATUS_CLOSED, Operation.CLOSE_EVENT),
+}
+# Keep buttons sent immediately before this rollout useful; they now open the
+# unrestricted status picker instead of applying their former transition.
+LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
 
 
 def yes_no_buttons() -> list[Button]:
@@ -75,6 +85,21 @@ def _bool_text(value: bool | None) -> str:
 
 def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
+
+
+def _admin_status_response(event_name: str, current_status: EventStatus) -> BotResponse:
+    return BotResponse(
+        text=(
+            f"Игра: «{event_name}»\n"
+            f"Текущий Статус: {EVENT_STATUS_LABELS[current_status]}\n\n"
+            "Выберите новый Статус:\n\n"
+            f"{STATUS_REGISTRATION} — игроки могут записываться, но ещё не могут подтверждать участие.\n\n"
+            f"{STATUS_CONFIRMATION} — игроки могут записываться и подтверждать участие.\n\n"
+            f"{STATUS_CLOSED} — игроки не могут ни записываться, ни подтверждать участие."
+        ),
+        buttons=[Button(label=label, value=value) for value, (label, _) in ADMIN_STATUS_CHOICES.items()]
+        + [Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+    )
 
 
 class ConversationEngine:
@@ -339,8 +364,7 @@ class ConversationEngine:
         after = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
         event_flow_statuses = {
             "enlist": REGISTRATION_OPEN_STATUSES,
-            "admin-open": frozenset({EventStatus.CREATED}),
-            "admin-close": frozenset({EventStatus.CONFIRMATION_OPEN}),
+            "admin-status": None,
             "admin-delete": None,
         }
         if flow in event_flow_statuses:
@@ -416,7 +440,7 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if flow in {"admin-open", "admin-close", "admin-delete"}:
+        if flow in {"admin-status", "admin-delete"}:
             return await self._admin_select(user, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
@@ -603,8 +627,7 @@ class ConversationEngine:
             return BotResponse(text="Недостаточно прав.")
         labels = [
             "➕ Создать игру",
-            OPEN_CONFIRMATION,
-            CLOSE_CONFIRMATION,
+            CHANGE_STATUS,
             "🗑 Удалить игру",
             "📋 Список игр",
             BACK,
@@ -626,43 +649,32 @@ class ConversationEngine:
                 text=(
                     f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
                     f"Таблица регистрации:\n{event.public_registration_url}\n\n"
-                    "Игроки уже могут записываться. Подтверждение участия пока закрыто."
+                    f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
+                    "но пока не могут подтверждать участие."
                 )
             )
-        if user.dialog_state == "ADMIN_OPEN_CONFIRMATION_CONFIRM":
-            if value != "admin:open-confirmation:yes":
-                return BotResponse(text="Подтвердите открытие кнопкой или выберите «Отмена».")
+        if user.dialog_state == "ADMIN_STATUS_SELECT":
+            choice = ADMIN_STATUS_CHOICES.get(value)
+            if choice is None:
+                return _admin_status_response(
+                    str(user.dialog_context["event_name"]),
+                    EventStatus(str(user.dialog_context["event_status"])),
+                )
+            status_label, operation = choice
             context = user.dialog_context.copy()
             await self._clear(user)
             await self.registrations.enqueue(
-                operation=Operation.OPEN_CONFIRMATION,
+                operation=operation,
                 event_id=str(context["event_id"]),
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
-                    text_success=f"🔓 Подтверждение участия в «{context['event_name']}» открыто."
+                    text_success=f"Статус игры «{context['event_name']}» изменён: {status_label}."
                 ),
-                idempotency_key=f"{message.update_id}:OPEN_CONFIRMATION",
+                idempotency_key=f"{message.update_id}:{operation.value}",
             )
-            return BotResponse(text="⏳ Открытие принято в обработку.", deferred=True, command_enqueued=True)
-        if user.dialog_state == "ADMIN_CLOSE_CONFIRM":
-            if value != "admin:close:yes":
-                return BotResponse(text="Подтвердите закрытие кнопкой или выберите «Отмена».")
-            context = user.dialog_context.copy()
-            await self._clear(user)
-            await self.registrations.enqueue(
-                operation=Operation.CLOSE_EVENT,
-                event_id=str(context["event_id"]),
-                platform=message.identity.platform,
-                user_id=message.identity.platform_user_id,
-                payload=EmptyPayload(),
-                reply_context=ReplyContext(
-                    text_success=f"🔒 Регистрация и подтверждение участия в «{context['event_name']}» закрыты."
-                ),
-                idempotency_key=f"{message.update_id}:CLOSE_EVENT",
-            )
-            return BotResponse(text="⏳ Закрытие принято в обработку.", deferred=True, command_enqueued=True)
+            return BotResponse(text="⏳ Изменение Статуса принято в обработку.", deferred=True, command_enqueued=True)
         if user.dialog_state == "ADMIN_DELETE_NAME":
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
@@ -685,35 +697,14 @@ class ConversationEngine:
     async def _admin_select(self, user: User, event: Event, flow: str) -> BotResponse:
         if not await self._require_admin(user):
             return BotResponse(text="Недостаточно прав.")
-        user.dialog_context = {"event_id": event.event_id, "event_name": event.name}
-        if flow == "admin-open":
-            if event.status is not EventStatus.CREATED:
-                return BotResponse(text="Подтверждение для этой игры уже было открыто или регистрация закрыта.")
-            user.dialog_state = "ADMIN_OPEN_CONFIRMATION_CONFIRM"
-            return BotResponse(
-                text=(
-                    f"Открыть подтверждение участия для игры «{event.name}»?\n\n"
-                    "⚠️ Это действие нельзя отменить: вернуться в состояние без подтверждений будет невозможно."
-                ),
-                buttons=[
-                    Button(label="Да, открыть подтверждение", value="admin:open-confirmation:yes"),
-                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
-                ],
-            )
-        if flow == "admin-close":
-            if event.status is not EventStatus.CONFIRMATION_OPEN:
-                return BotResponse(text="Закрыть можно только игру с уже открытым подтверждением участия.")
-            user.dialog_state = "ADMIN_CLOSE_CONFIRM"
-            return BotResponse(
-                text=(
-                    f"Закрыть регистрацию на игру «{event.name}»?\n\n"
-                    "После этого игроки не смогут ни записаться, ни подтвердить участие."
-                ),
-                buttons=[
-                    Button(label="Да, закрыть", value="admin:close:yes"),
-                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
-                ],
-            )
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "event_status": event.status.value,
+        }
+        if flow == "admin-status":
+            user.dialog_state = "ADMIN_STATUS_SELECT"
+            return _admin_status_response(event.name, event.status)
         user.dialog_state = "ADMIN_DELETE_NAME"
         return BotResponse(
             text=(
@@ -729,7 +720,7 @@ class ConversationEngine:
         lines = []
         for event in events:
             lines.append(
-                f"{event.name}\n{EVENT_STATUS_LABELS[event.status]} · {event.created_at:%d.%m.%Y}\n"
+                f"{event.name}\nСтатус: {EVENT_STATUS_LABELS[event.status]} · {event.created_at:%d.%m.%Y}\n"
                 f"{event.public_registration_url}"
             )
         buttons: list[Button] = []
@@ -747,18 +738,8 @@ class ConversationEngine:
         if value == "➕ Создать игру":
             user.dialog_state = "ADMIN_CREATE_NAME"
             return BotResponse(text="Введите название игры:")
-        if value == OPEN_CONFIRMATION:
-            return await self._show_events(
-                "admin-open",
-                frozenset({EventStatus.CREATED}),
-                empty_text="Нет игр, для которых можно открыть подтверждение.",
-            )
-        if value in {CLOSE_CONFIRMATION, "🔒 Закрыть регистрацию"}:
-            return await self._show_events(
-                "admin-close",
-                frozenset({EventStatus.CONFIRMATION_OPEN}),
-                empty_text="Нет игр с открытым подтверждением.",
-            )
+        if value == CHANGE_STATUS or value in LEGACY_STATUS_ACTIONS:
+            return await self._show_events("admin-status", None, empty_text="Игр нет.")
         if value == "🗑 Удалить игру":
             events = list(await self.events.list_page(limit=10))
             return BotResponse(text="Выберите игру:", buttons=_event_buttons(events, "admin-delete"))
@@ -768,13 +749,7 @@ class ConversationEngine:
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.
     async def dispatch_idle_admin(self, user: User, value: str) -> BotResponse | None:
-        if value in {
-            "➕ Создать игру",
-            OPEN_CONFIRMATION,
-            CLOSE_CONFIRMATION,
-            "🔒 Закрыть регистрацию",
-            "🗑 Удалить игру",
-            "📋 Список игр",
-        }:
+        admin_actions = {"➕ Создать игру", CHANGE_STATUS, "🗑 Удалить игру", "📋 Список игр"}
+        if value in admin_actions or value in LEGACY_STATUS_ACTIONS:
             return await self._admin_start(user, value)
         return None

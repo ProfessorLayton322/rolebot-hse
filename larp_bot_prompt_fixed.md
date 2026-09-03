@@ -283,8 +283,8 @@ CONFIRMATION_OPEN
 CLOSED
 ```
 
-Transitions are one-way: `CREATED -> CONFIRMATION_OPEN -> CLOSED`. Enlistment is allowed in the first two
-states. Attendance confirmation is allowed only in `CONFIRMATION_OPEN`.
+Admins may change freely between any of the three states. Enlistment is allowed in the first two states.
+Attendance confirmation is allowed only in `CONFIRMATION_OPEN`.
 
 Do NOT store participants inside `events`.
 
@@ -1249,29 +1249,22 @@ Preserve character wish.
 
 ---
 
-# 29. Opening confirmation and closing registration
+# 29. Changing game status
 
-Admins first open confirmation for a created event, then close the event. Both transitions are irreversible and
-MUST enter the same FIFO group for that `event_id` as participant commands.
+Admins may freely set any game to any of the three states. Every status command MUST enter the same FIFO group
+for that `event_id` as participant commands.
 
-When `OPEN_CONFIRMATION` is processed:
-
-```text
-events.status = CONFIRMATION_OPEN
-```
-
-It is accepted only from `CREATED`. The admin confirmation prompt must warn that this action cannot be undone.
-
-`CLOSE_EVENT` itself MUST enter the same FIFO group for that `event_id`.
-
-When processed:
+The ordered command mapping is:
 
 ```text
-events.status = CLOSED
+OPEN_REGISTRATION -> CREATED
+OPEN_CONFIRMATION -> CONFIRMATION_OPEN
+CLOSE_EVENT -> CLOSED
 ```
 
-A subsequent ENLIST or CONFIRM command ordered after CLOSE_EVENT must be rejected. `CLOSE_EVENT` is accepted
-only after confirmation has been opened.
+These commands are accepted from any current state, including reopening a `CLOSED` game or moving directly
+from `CREATED` to `CLOSED`. A subsequent ENLIST or CONFIRM command must be accepted or rejected according to
+the status most recently applied in FIFO order.
 
 Do not rely solely on an early HTTP-handler status check.
 
@@ -1353,8 +1346,7 @@ Submenu:
 
 ```text
 ➕ Создать игру
-🔓 Открыть подтверждения
-🔒 Закрыть подтверждения
+🔄 Изменить статус
 🗑 Удалить игру
 📋 Список игр
 ⬅️ Назад
@@ -1404,25 +1396,27 @@ New games start in `CREATED`: players can enlist immediately, but cannot confirm
 
 ---
 
-# 33. Open confirmation and close game
+# 33. Change game status
 
-For `🔓 Открыть подтверждения`, show only `CREATED` games, display an irreversible-action warning, ask for
-confirmation, and enqueue `OPEN_CONFIRMATION`.
-
-Admin selects:
+For `🔄 Изменить статус`, show all games. After the admin selects a game, show its current Статус and briefly
+describe every option:
 
 ```text
-🔒 Закрыть подтверждения
+Регистрация — игроки могут записываться, но ещё не могут подтверждать участие.
+Подтверждение — игроки могут записываться и подтверждать участие.
+Закрытие регистрации — игроки не могут ни записываться, ни подтверждать участие.
 ```
 
-Show only `CONFIRMATION_OPEN` events.
+Show three status buttons:
 
-After selection:
+```text
+Регистрация
+Подтверждение
+Закрытие регистрации
+```
 
-1. show game name;
-2. ask confirmation;
-3. enqueue `CLOSE_EVENT`;
-4. respond when processed.
+Each button enqueues its corresponding ordered status command. Do not restrict the available target based on
+the current status.
 
 ---
 
@@ -1507,7 +1501,7 @@ Pagination size:
 Each entry:
 
 - game name;
-- CREATED/CONFIRMATION_OPEN/CLOSED status;
+- Статус using the labels Регистрация/Подтверждение/Закрытие регистрации;
 - creation date;
 - public table URL.
 
@@ -2853,26 +2847,28 @@ Test multiple ordered-worker invocations cannot violate per-event ordering.
 
 ---
 
-# 76. Close-ordering tests
+# 76. Status-ordering tests
 
 Example:
 
 ```text
 ENLIST User A
-OPEN_CONFIRMATION
-CONFIRM User A
 CLOSE_EVENT
 ENLIST User B
+OPEN_CONFIRMATION
+CONFIRM User A
+OPEN_REGISTRATION
 CONFIRM User A again
 ```
 
 Expected:
 
 - User A enlisted;
-- confirmation opened;
-- User A confirmed;
 - event closed;
 - User B ENLIST rejected;
+- event reopened directly in confirmation mode;
+- User A confirmed;
+- event returned to registration-only mode;
 - User A re-confirmation rejected.
 
 Also test:
@@ -3303,7 +3299,7 @@ Work in this order:
 12. implement CONFIRM with per-game character wishes;
 13. implement UPDATE_CHARACTER_WISH;
 14. implement CANCEL;
-15. implement the ordered OPEN_CONFIRMATION and CLOSE_EVENT lifecycle;
+15. implement the ordered OPEN_REGISTRATION, OPEN_CONFIRMATION, and CLOSE_EVENT status commands;
 16. implement FIFO publisher;
 17. implement kick publisher;
 18. implement FIFO drainer;
