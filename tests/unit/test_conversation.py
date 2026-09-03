@@ -21,6 +21,7 @@ from larp_bot.application.conversation import (
     KEEP,
     PROFILE,
     SEND_CONFIRMATION_REMINDER,
+    SEND_CONFIRMED_NOTIFICATION,
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
     STATUS_REGISTRATION,
@@ -38,6 +39,7 @@ from larp_bot.domain.models import (
     Event,
     EventStatus,
     InboundMessage,
+    NotificationPayload,
     Operation,
     Platform,
     TelegramUser,
@@ -435,6 +437,31 @@ async def test_admin_has_separate_confirmation_reminder_action(disk_store: Memor
 
     assert queued.deferred
     assert publisher.commands[-1].operation is Operation.SEND_CONFIRMATION_REMINDER
+
+
+@pytest.mark.asyncio
+async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryDiskStore, event: Event) -> None:
+    event.status = EventStatus.CLOSED
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert SEND_CONFIRMED_NOTIFICATION in [button.value for button in menu.buttons]
+    games = await engine.handle(inbound(2, SEND_CONFIRMED_NOTIFICATION, callback=True))
+    assert any(button.value == f"select:admin-notification:{event.event_id}" for button in games.buttons)
+    prompt = await engine.handle(inbound(3, f"select:admin-notification:{event.event_id}", callback=True))
+    assert "просто вставить ссылку-приглашение" in prompt.text
+    assert "бот сам добавит её и название игры" in prompt.text
+
+    stale_button = await engine.handle(inbound(4, CHANGE_STATUS, callback=True))
+    assert "обычным текстовым сообщением" in stale_button.text
+    assert not publisher.commands
+
+    queued = await engine.handle(inbound(5, "https://t.me/+GameChat_123"))
+    assert queued.deferred
+    command = publisher.commands[-1]
+    assert command.operation is Operation.SEND_CONFIRMED_NOTIFICATION
+    assert isinstance(command.payload, NotificationPayload)
+    assert command.payload.text == "https://t.me/+GameChat_123"
 
 
 @pytest.mark.asyncio

@@ -61,7 +61,7 @@ stateDiagram-v2
 
 The admin interface names these states `Регистрация`, `Подтверждение`, and `Закрытие регистрации`. Players may enlist in `CREATED` (`Регистрация`) and `CONFIRMATION_OPEN` (`Подтверждение`). They may confirm attendance only in `CONFIRMATION_OPEN`; `CLOSED` (`Закрытие регистрации`) accepts neither enlistment nor confirmation. Existing persisted `OPEN` events are interpreted as `CONFIRMATION_OPEN` during the rollout.
 
-Opening confirmation requires a Moscow-time deadline in `DD.MM.YY HH:MM` format; the admin may instead choose the nearest Thursday at 19:00, including the current day. The ordered worker stores the deadline and notifies registrations still in `Ожидается`. Admins can send the same audience a separate reminder from the administration menu. No timer or cron closes confirmation: every later status change remains an explicit admin action.
+Opening confirmation requires a Moscow-time deadline in `DD.MM.YY HH:MM` format; the admin may instead choose the nearest Thursday at 19:00, including the current day. The ordered worker stores the deadline and notifies registrations still in `Ожидается`. Admins can send the same audience a separate reminder from the administration menu. They can also select any game and send arbitrary text to registrations currently in `Подтверждено`. A notification containing only a Telegram or VK chat link is expanded with the game name and an invitation to join that chat. No timer or cron closes confirmation: every later status change remains an explicit admin action.
 
 ```mermaid
 stateDiagram-v2
@@ -153,7 +153,7 @@ bounded ordered FIFO drainer
 
 Do not attach the trigger directly to FIFO unless Yandex officially adds support and this architecture is deliberately migrated. The kick has no business-ordering role. The publisher first makes the FIFO command durable, then emits a kick. If kick publishing fails, the platform retry uses the same operation ID: FIFO deduplicates the command while the retry emits another kick.
 
-YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Confirmation notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys, and only `Ожидается` registrations are selected. All admin status changes, reminders, and deletion share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
+YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Participant notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys. Confirmation-open and reminder messages select only `Ожидается` registrations; arbitrary admin broadcasts select only `Подтверждено` registrations. All admin status changes, reminders, broadcasts, and deletion share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
 
 ## Telegram transport
 
@@ -406,7 +406,7 @@ Use the Terraform `vk_callback_url`, numeric `VK_GROUP_ID`, matching `VK_CALLBAC
 
 Update the public GitHub Actions repository variable `TG_ADMIN_IDS` or `VK_ADMIN_IDS` and rerun `deploy.yml`. Values must be JSON arrays of stable numeric platform IDs—not usernames. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. The workflow replaces the Worker binding and warm Functions refresh within 60 seconds.
 
-Every create/close/delete request rechecks the latest admin set. Deletion requires the exact case-sensitive game name after trimming outer whitespace. Admin listing is oldest-first with exactly ten entries per page.
+Every privileged request rechecks the latest admin set. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Deletion requires the exact case-sensitive game name after trimming outer whitespace. Admin listing is oldest-first with exactly ten entries per page.
 
 ## Secret rotation
 
@@ -454,7 +454,7 @@ terraform plan
 
 ## Tests and enforced contracts
 
-Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
+Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, confirmed-only broadcasts and chat-link expansion, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
 Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the four-table YDB model, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
 

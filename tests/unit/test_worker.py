@@ -14,7 +14,13 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.application.services import ConfirmationNotificationService, OrderedMutationService, RegistrationCatalog
+from larp_bot.application.services import (
+    ConfirmationNotificationService,
+    OrderedMutationService,
+    RegistrationCatalog,
+    confirmed_notification_text,
+    is_plain_chat_link,
+)
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -24,6 +30,7 @@ from larp_bot.domain.models import (
     EnlistPayload,
     Event,
     EventStatus,
+    NotificationPayload,
     Operation,
     OrderedRegistrationCommand,
     Platform,
@@ -57,7 +64,7 @@ class FailingTransport(MemoryDeferredTransport):
 def queued(
     event: Event,
     operation: Operation,
-    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload,
+    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | NotificationPayload | EmptyPayload,
     index: int,
 ) -> QueueEnvelope:
     command = OrderedRegistrationCommand(
@@ -211,5 +218,115 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
     assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == {
         (Platform.TELEGRAM, 2, expected_text),
         (Platform.VK, 3, expected_text),
+    }
+    assert consumer.deleted == ["receipt-1"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://t.me/+GameChat_123",
+        "https://telegram.me/joinchat/GameChat-123",
+        "https://t.me/public_game_chat",
+        "https://vk.me/join/GameChat_123-=",
+    ],
+)
+def test_plain_chat_links_get_game_invitation(value: str) -> None:
+    assert is_plain_chat_link(value)
+    assert confirmed_notification_text("Лесной предел", value) == (
+        "Вы подтвердили своё участие в игре Лесной предел! "
+        f"Пожалуйста, добавьтесь в чат игры, мы вас очень ждём: {value}"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Встречаемся у главного входа в 18:30",
+        "Чат игры: https://t.me/+GameChat_123",
+        "https://vk.com/id1",
+        "https://example.com/join/GameChat_123",
+        "https://t.me/+GameChat_123?start=1",
+        "https://t.me:443/+GameChat_123",
+        "https://vk.me/join//GameChat_123",
+    ],
+)
+def test_arbitrary_or_non_chat_messages_stay_unchanged(value: str) -> None:
+    assert not is_plain_chat_link(value)
+    assert confirmed_notification_text("Лесной предел", value) == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "expected_text"),
+    [
+        ("Сбор игроков в 18:30 у главного входа.", "Сбор игроков в 18:30 у главного входа."),
+        (
+            "https://vk.me/join/GameChat_123-=",
+            "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
+            "мы вас очень ждём: https://vk.me/join/GameChat_123-=",
+        ),
+    ],
+)
+async def test_confirmed_notifications_go_only_to_confirmed_players(
+    message: str,
+    expected_text: str,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    catalog = RegistrationCatalog(events, tables, showcase)
+    users = MemoryUserRepository()
+    waiting_user = TelegramUser(tg_id=2)
+    confirmed_users = [TelegramUser(tg_id=3), VkUser(vk_id=4)]
+    cancelled_user = VkUser(vk_id=5)
+    for user in [waiting_user, *confirmed_users, cancelled_user, TelegramUser(tg_id=1)]:
+        await users.save(user)
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
+        if uid == 1:
+            continue
+        key = participant_key(secret, platform, uid, event.event_id)
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{platform.value}-{uid}",
+            participant_key=key,
+            display_name=f"Player {uid}",
+            wish_play="A",
+        )
+        if user in confirmed_users or user is cancelled_user:
+            await tables.confirm(
+                event.event_id,
+                operation_id=f"confirm-{platform.value}-{uid}",
+                participant_key=key,
+                character_wish="Doctor",
+            )
+        if user is cancelled_user:
+            await tables.cancel(
+                event.event_id,
+                operation_id="cancel-vk-5",
+                participant_key=key,
+            )
+
+    envelope = queued(event, Operation.SEND_CONFIRMED_NOTIFICATION, NotificationPayload(text=message), 1)
+    consumer = FakeConsumer([envelope])
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog),
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 1
+    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == {
+        (Platform.TELEGRAM, 3, expected_text),
+        (Platform.VK, 4, expected_text),
     }
     assert consumer.deleted == ["receipt-1"]
