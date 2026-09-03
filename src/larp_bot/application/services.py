@@ -113,7 +113,7 @@ class RegistrationService:
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
         participant = None
-        if operation not in {Operation.CLOSE_EVENT, Operation.DELETE_EVENT}:
+        if operation not in {Operation.OPEN_CONFIRMATION, Operation.CLOSE_EVENT, Operation.DELETE_EVENT}:
             participant = self.key(platform, user_id, event_id)
         command = OrderedRegistrationCommand(
             operation_id=(
@@ -189,9 +189,20 @@ class OrderedMutationService:
                 return "Игра и таблица уже удалены"
             raise EventNotFound("Игра уже удалена или не существует")
 
+        if command.operation is Operation.OPEN_CONFIRMATION:
+            if event.status is EventStatus.CLOSED:
+                raise OperationNotAllowed("Закрытую регистрацию нельзя открыть снова")
+            if event.status is EventStatus.CONFIRMATION_OPEN:
+                return "Подтверждение участия уже открыто"
+            await self.events.set_status(event.event_id, EventStatus.CONFIRMATION_OPEN)
+            return "Подтверждение участия открыто"
         if command.operation is Operation.CLOSE_EVENT:
+            if event.status is EventStatus.CREATED:
+                raise OperationNotAllowed("Сначала откройте подтверждение участия")
+            if event.status is EventStatus.CLOSED:
+                return "Регистрация и подтверждение участия уже закрыты"
             await self.events.set_status(event.event_id, EventStatus.CLOSED)
-            return "Регистрация закрыта"
+            return "Регистрация и подтверждение участия закрыты"
         if command.operation is Operation.DELETE_EVENT:
             await self.tables.delete_event_workbook(event.disk_resource_path)
             await self.events.delete(event.event_id)
@@ -219,6 +230,11 @@ class OrderedMutationService:
                 crossplay=crossplay,
             )
             return "Заявка на игру записана"
+
+        if command.operation is Operation.CONFIRM and event.status is not EventStatus.CONFIRMATION_OPEN:
+            if event.status is EventStatus.CREATED:
+                raise OperationNotAllowed("Подтверждение участия в этой игре ещё не открыто")
+            raise OperationNotAllowed("Подтверждение участия в этой игре закрыто")
 
         registration = await self.tables.find_registration(event, command.participant_key)
         if registration is None:

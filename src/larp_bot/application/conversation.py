@@ -39,6 +39,15 @@ NO_WISHES = "Без пожеланий"
 KEEP = "Оставить без изменений"
 SKIP = "Пропустить"
 NO_CO_PLAYER_WISH = "Без пожеланий"
+OPEN_CONFIRMATION = "🔓 Открыть подтверждения"
+CLOSE_CONFIRMATION = "🔒 Закрыть подтверждения"
+
+REGISTRATION_OPEN_STATUSES = frozenset({EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN})
+EVENT_STATUS_LABELS = {
+    EventStatus.CREATED: "регистрация открыта, подтверждение ещё не открыто",
+    EventStatus.CONFIRMATION_OPEN: "регистрация и подтверждение открыты",
+    EventStatus.CLOSED: "регистрация и подтверждение закрыты",
+}
 
 
 def yes_no_buttons() -> list[Button]:
@@ -286,18 +295,36 @@ class ConversationEngine:
         await self._clear(user)
         return await self._main(user, "✅ Профиль сохранён.")
 
-    async def _show_open_events(self, flow: str) -> BotResponse:
-        events = list(await self.events.list_page(status=EventStatus.OPEN, limit=10))
+    async def _show_events(
+        self,
+        flow: str,
+        statuses: frozenset[EventStatus] | None,
+        *,
+        after: tuple[datetime, str] | None = None,
+        empty_text: str = "Подходящих игр сейчас нет.",
+    ) -> BotResponse:
+        events = list(await self.events.list_page(statuses=statuses, after=after, limit=10))
         if not events:
-            return BotResponse(text="Сейчас нет открытых игр.", buttons=[Button(label=BACK, value=BACK)])
+            return BotResponse(text=empty_text, buttons=[Button(label=BACK, value=BACK)])
         buttons = _event_buttons(events, flow)
         if len(events) == 10:
             last = events[-1]
-            more = await self.events.list_page(status=EventStatus.OPEN, after=(last.created_at, last.event_id), limit=1)
+            more = await self.events.list_page(
+                statuses=statuses,
+                after=(last.created_at, last.event_id),
+                limit=1,
+            )
             if more:
                 buttons.append(Button(label="➡️ Далее", value=self._cursor(flow, last)))
         buttons.append(Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG))
         return BotResponse(text="🎮 Выберите игру:", buttons=buttons)
+
+    async def _show_open_events(self, flow: str) -> BotResponse:
+        return await self._show_events(
+            flow,
+            REGISTRATION_OPEN_STATUSES,
+            empty_text="Сейчас нет игр с открытой регистрацией.",
+        )
 
     @staticmethod
     def _cursor(flow: str, event: Event) -> str:
@@ -310,14 +337,14 @@ class ConversationEngine:
             return BotResponse(text="Некорректная страница.")
         _, flow, micros, event_id = parts
         after = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
-        if flow in {"enlist", "admin-close", "admin-delete"}:
-            status = EventStatus.OPEN if flow in {"enlist", "admin-close"} else None
-            events = list(await self.events.list_page(status=status, after=after, limit=10))
-            buttons = _event_buttons(events, flow)
-            if len(events) == 10:
-                buttons.append(Button(label="➡️ Далее", value=self._cursor(flow, events[-1])))
-            buttons.append(Button(label=BACK, value=BACK))
-            return BotResponse(text="Выберите игру:", buttons=buttons)
+        event_flow_statuses = {
+            "enlist": REGISTRATION_OPEN_STATUSES,
+            "admin-open": frozenset({EventStatus.CREATED}),
+            "admin-close": frozenset({EventStatus.CONFIRMATION_OPEN}),
+            "admin-delete": None,
+        }
+        if flow in event_flow_statuses:
+            return await self._show_events(flow, event_flow_statuses[flow], after=after)
         if flow == "admin-list":
             return await self._admin_list(after)
         return await self._show_registered(user, flow, after=after)
@@ -336,13 +363,31 @@ class ConversationEngine:
             )
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         matches, cursor = await self.registrations.registered_games_page(platform, user_id(user), after=after)
-        buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in matches]
+        actionable_matches = matches
+        if flow == "confirm":
+            actionable_matches = [item for item in matches if item[0].status is EventStatus.CONFIRMATION_OPEN]
+        buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
         if cursor is not None:
             micros = int(cursor[0].timestamp() * 1_000_000)
             buttons.append(Button(label="➡️ Далее", value=f"page:{flow}:{micros}:{cursor[1]}"))
         buttons.append(Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG))
         if not matches and cursor is None:
             return BotResponse(text="У вас пока нет записей на игры.", buttons=buttons)
+        if flow == "confirm" and not actionable_matches:
+            created = any(event.status is EventStatus.CREATED for event, _ in matches)
+            closed = any(event.status is EventStatus.CLOSED for event, _ in matches)
+            if created and not closed:
+                unavailable_text = "Подтверждение участия для ваших игр ещё не открыто. Организаторы откроют его позже."
+            elif closed and not created:
+                unavailable_text = "Регистрация и подтверждение участия для ваших игр уже закрыты."
+            else:
+                unavailable_text = (
+                    "Для одних ваших игр подтверждение участия ещё не открыто, а для закрытых игр оно уже недоступно."
+                )
+            return BotResponse(
+                text=unavailable_text,
+                buttons=buttons,
+            )
         return BotResponse(text="🎭 Выберите игру:", buttons=buttons)
 
     async def _select_event(self, user: User, message: InboundMessage, value: str) -> BotResponse:
@@ -371,11 +416,20 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if flow in {"admin-close", "admin-delete"}:
+        if flow in {"admin-open", "admin-close", "admin-delete"}:
             return await self._admin_select(user, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
             return BotResponse(text="Сначала запишитесь на эту игру.")
+        if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
+            if event.status is EventStatus.CREATED:
+                return BotResponse(
+                    text=(
+                        f"Вы записаны на игру «{event.name}», но подтверждение участия ещё не открыто. "
+                        "Организаторы откроют его позже."
+                    )
+                )
+            return BotResponse(text=f"Регистрация и подтверждение участия в игре «{event.name}» закрыты.")
         user.dialog_context = {
             "event_id": event_id,
             "event_name": event.name,
@@ -547,7 +601,14 @@ class ConversationEngine:
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         if not await self.admins.is_admin(platform, user_id(user)):
             return BotResponse(text="Недостаточно прав.")
-        labels = ["➕ Создать игру", "🔒 Закрыть регистрацию", "🗑 Удалить игру", "📋 Список игр", BACK]
+        labels = [
+            "➕ Создать игру",
+            OPEN_CONFIRMATION,
+            CLOSE_CONFIRMATION,
+            "🗑 Удалить игру",
+            "📋 Список игр",
+            BACK,
+        ]
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
     async def _require_admin(self, user: User) -> bool:
@@ -564,9 +625,27 @@ class ConversationEngine:
             return BotResponse(
                 text=(
                     f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
-                    f"Таблица регистрации:\n{event.public_registration_url}"
+                    f"Таблица регистрации:\n{event.public_registration_url}\n\n"
+                    "Игроки уже могут записываться. Подтверждение участия пока закрыто."
                 )
             )
+        if user.dialog_state == "ADMIN_OPEN_CONFIRMATION_CONFIRM":
+            if value != "admin:open-confirmation:yes":
+                return BotResponse(text="Подтвердите открытие кнопкой или выберите «Отмена».")
+            context = user.dialog_context.copy()
+            await self._clear(user)
+            await self.registrations.enqueue(
+                operation=Operation.OPEN_CONFIRMATION,
+                event_id=str(context["event_id"]),
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=EmptyPayload(),
+                reply_context=ReplyContext(
+                    text_success=f"🔓 Подтверждение участия в «{context['event_name']}» открыто."
+                ),
+                idempotency_key=f"{message.update_id}:OPEN_CONFIRMATION",
+            )
+            return BotResponse(text="⏳ Открытие принято в обработку.", deferred=True, command_enqueued=True)
         if user.dialog_state == "ADMIN_CLOSE_CONFIRM":
             if value != "admin:close:yes":
                 return BotResponse(text="Подтвердите закрытие кнопкой или выберите «Отмена».")
@@ -578,7 +657,9 @@ class ConversationEngine:
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
-                reply_context=ReplyContext(text_success=f"🔒 Регистрация на «{context['event_name']}» закрыта."),
+                reply_context=ReplyContext(
+                    text_success=f"🔒 Регистрация и подтверждение участия в «{context['event_name']}» закрыты."
+                ),
                 idempotency_key=f"{message.update_id}:CLOSE_EVENT",
             )
             return BotResponse(text="⏳ Закрытие принято в обработку.", deferred=True, command_enqueued=True)
@@ -605,10 +686,29 @@ class ConversationEngine:
         if not await self._require_admin(user):
             return BotResponse(text="Недостаточно прав.")
         user.dialog_context = {"event_id": event.event_id, "event_name": event.name}
+        if flow == "admin-open":
+            if event.status is not EventStatus.CREATED:
+                return BotResponse(text="Подтверждение для этой игры уже было открыто или регистрация закрыта.")
+            user.dialog_state = "ADMIN_OPEN_CONFIRMATION_CONFIRM"
+            return BotResponse(
+                text=(
+                    f"Открыть подтверждение участия для игры «{event.name}»?\n\n"
+                    "⚠️ Это действие нельзя отменить: вернуться в состояние без подтверждений будет невозможно."
+                ),
+                buttons=[
+                    Button(label="Да, открыть подтверждение", value="admin:open-confirmation:yes"),
+                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                ],
+            )
         if flow == "admin-close":
+            if event.status is not EventStatus.CONFIRMATION_OPEN:
+                return BotResponse(text="Закрыть можно только игру с уже открытым подтверждением участия.")
             user.dialog_state = "ADMIN_CLOSE_CONFIRM"
             return BotResponse(
-                text=f"Закрыть регистрацию на игру «{event.name}»?",
+                text=(
+                    f"Закрыть регистрацию на игру «{event.name}»?\n\n"
+                    "После этого игроки не смогут ни записаться, ни подтвердить участие."
+                ),
                 buttons=[
                     Button(label="Да, закрыть", value="admin:close:yes"),
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
@@ -629,7 +729,8 @@ class ConversationEngine:
         lines = []
         for event in events:
             lines.append(
-                f"{event.name}\n{event.status.value} · {event.created_at:%d.%m.%Y}\n{event.public_registration_url}"
+                f"{event.name}\n{EVENT_STATUS_LABELS[event.status]} · {event.created_at:%d.%m.%Y}\n"
+                f"{event.public_registration_url}"
             )
         buttons: list[Button] = []
         if len(events) == 10:
@@ -646,8 +747,18 @@ class ConversationEngine:
         if value == "➕ Создать игру":
             user.dialog_state = "ADMIN_CREATE_NAME"
             return BotResponse(text="Введите название игры:")
-        if value == "🔒 Закрыть регистрацию":
-            return await self._show_open_events("admin-close")
+        if value == OPEN_CONFIRMATION:
+            return await self._show_events(
+                "admin-open",
+                frozenset({EventStatus.CREATED}),
+                empty_text="Нет игр, для которых можно открыть подтверждение.",
+            )
+        if value in {CLOSE_CONFIRMATION, "🔒 Закрыть регистрацию"}:
+            return await self._show_events(
+                "admin-close",
+                frozenset({EventStatus.CONFIRMATION_OPEN}),
+                empty_text="Нет игр с открытым подтверждением.",
+            )
         if value == "🗑 Удалить игру":
             events = list(await self.events.list_page(limit=10))
             return BotResponse(text="Выберите игру:", buttons=_event_buttons(events, "admin-delete"))
@@ -657,6 +768,13 @@ class ConversationEngine:
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.
     async def dispatch_idle_admin(self, user: User, value: str) -> BotResponse | None:
-        if value in {"➕ Создать игру", "🔒 Закрыть регистрацию", "🗑 Удалить игру", "📋 Список игр"}:
+        if value in {
+            "➕ Создать игру",
+            OPEN_CONFIRMATION,
+            CLOSE_CONFIRMATION,
+            "🔒 Закрыть регистрацию",
+            "🗑 Удалить игру",
+            "📋 Список игр",
+        }:
             return await self._admin_start(user, value)
         return None

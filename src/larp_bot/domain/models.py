@@ -23,7 +23,8 @@ class Platform(StrEnum):
 
 
 class EventStatus(StrEnum):
-    OPEN = "OPEN"
+    CREATED = "CREATED"
+    CONFIRMATION_OPEN = "CONFIRMATION_OPEN"
     CLOSED = "CLOSED"
 
 
@@ -38,6 +39,7 @@ class Operation(StrEnum):
     CONFIRM = "CONFIRM"
     UPDATE_CHARACTER_WISH = "UPDATE_CHARACTER_WISH"
     CANCEL = "CANCEL"
+    OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
     CLOSE_EVENT = "CLOSE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
 
@@ -150,7 +152,7 @@ class Event(StrictModel):
     name: str = Field(min_length=1, max_length=200)
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
-    status: EventStatus = EventStatus.OPEN
+    status: EventStatus = EventStatus.CREATED
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -229,9 +231,13 @@ class OrderedRegistrationCommand(StrictModel):
             self.payload, CharacterWishPayload
         ):
             raise ValueError(f"{self.operation} requires CharacterWishPayload")
-        if self.operation in {Operation.CANCEL, Operation.CLOSE_EVENT, Operation.DELETE_EVENT} and not isinstance(
-            self.payload, EmptyPayload
-        ):
+        empty_payload_operations = {
+            Operation.CANCEL,
+            Operation.OPEN_CONFIRMATION,
+            Operation.CLOSE_EVENT,
+            Operation.DELETE_EVENT,
+        }
+        if self.operation in empty_payload_operations and not isinstance(self.payload, EmptyPayload):
             raise ValueError(f"{self.operation} requires EmptyPayload")
         return self
 

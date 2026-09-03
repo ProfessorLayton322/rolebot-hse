@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from copy import deepcopy
 from datetime import datetime
 
@@ -65,13 +65,14 @@ class MemoryEventRepository:
     async def list_page(
         self,
         *,
-        status: EventStatus | None = None,
+        statuses: Collection[EventStatus] | None = None,
         after: tuple[datetime, str] | None = None,
         limit: int = 10,
     ) -> Sequence[Event]:
         values = sorted(self.rows.values(), key=lambda event: (event.created_at, event.event_id))
-        if status is not None:
-            values = [event for event in values if event.status is status]
+        if statuses is not None:
+            accepted = set(statuses)
+            values = [event for event in values if event.status in accepted]
         if after is not None:
             values = [event for event in values if (event.created_at, event.event_id) > after]
         return deepcopy(values[:limit])

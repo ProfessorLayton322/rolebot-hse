@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from larp_bot.domain.models import EnlistPayload, Registration, TelegramUser, VkUser
+from larp_bot.domain.models import EnlistPayload, Event, EventStatus, Registration, TelegramUser, VkUser
 
 
 @pytest.mark.parametrize("value", [None, "", "-"])
@@ -50,3 +50,18 @@ def test_negative_co_player_preference_is_absent_from_domain_models() -> None:
     forbidden_field = "dont" + "_wish_play"
     assert forbidden_field not in EnlistPayload.model_fields
     assert forbidden_field not in Registration.model_fields
+
+
+def test_event_has_exactly_three_states_and_starts_before_confirmation() -> None:
+    assert list(EventStatus) == [
+        EventStatus.CREATED,
+        EventStatus.CONFIRMATION_OPEN,
+        EventStatus.CLOSED,
+    ]
+    event = Event(
+        event_id="event-a1",
+        name="Game",
+        disk_resource_path="disk:/larp-bot/events/event-a1-game.xlsx",
+        public_registration_url="https://disk.example/game",
+    )
+    assert event.status is EventStatus.CREATED

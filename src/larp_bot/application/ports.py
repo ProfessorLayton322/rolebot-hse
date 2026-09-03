@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -37,7 +37,7 @@ class EventRepository(Protocol):
     async def list_page(
         self,
         *,
-        status: EventStatus | None = None,
+        statuses: Collection[EventStatus] | None = None,
         after: tuple[datetime, str] | None = None,
         limit: int = 10,
     ) -> Sequence[Event]: ...
