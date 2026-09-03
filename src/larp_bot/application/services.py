@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
     AttendanceStatus,
     CharacterWishPayload,
+    ConfirmationDeadlinePayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -18,10 +20,14 @@ from larp_bot.domain.models import (
     Platform,
     Registration,
     ReplyContext,
+    TelegramUser,
+    User,
 )
 from larp_bot.domain.security import participant_key
 
+from .deadlines import format_confirmation_deadline
 from .ports import (
+    DeferredTransport,
     EventRepository,
     OrderedCommandPublisher,
     RegistrationRepository,
@@ -151,7 +157,7 @@ class RegistrationService:
         event_id: str,
         platform: Platform,
         user_id: int,
-        payload: EnlistPayload | CharacterWishPayload | EmptyPayload,
+        payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload,
         reply_context: ReplyContext,
         idempotency_key: str | None = None,
     ) -> OrderedRegistrationCommand:
@@ -162,6 +168,7 @@ class RegistrationService:
         if operation not in {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
+            Operation.SEND_CONFIRMATION_REMINDER,
             Operation.CLOSE_EVENT,
             Operation.DELETE_EVENT,
         }:
@@ -220,6 +227,85 @@ class EventAdministrationService:
         return event
 
 
+@dataclass(frozen=True)
+class NotificationRecipient:
+    platform: Platform
+    user_id: int
+    user: User
+
+
+class ConfirmationNotificationService:
+    """Delivers explicit admin-triggered notifications to waiting players."""
+
+    NOTIFICATION_OPERATIONS = frozenset({Operation.OPEN_CONFIRMATION, Operation.SEND_CONFIRMATION_REMINDER})
+
+    def __init__(
+        self,
+        events: EventRepository,
+        catalog: RegistrationCatalog,
+        users: UserRepository,
+        transport: DeferredTransport,
+        participant_secret: str,
+    ) -> None:
+        self.events = events
+        self.catalog = catalog
+        self.users = users
+        self.transport = transport
+        self.participant_secret = participant_secret
+
+    @staticmethod
+    def _identity(user: User) -> tuple[Platform, int]:
+        if isinstance(user, TelegramUser):
+            return Platform.TELEGRAM, user.tg_id
+        return Platform.VK, user.vk_id
+
+    async def _recipients(self, event: Event) -> list[NotificationRecipient]:
+        await self.catalog.ensure_migrated(event)
+        waiting_keys = {
+            registration.participant_key
+            for registration in await self.catalog.registrations.list_for_event(event.event_id)
+            if registration.attendance_status is AttendanceStatus.WAITING
+        }
+        recipients: list[NotificationRecipient] = []
+        for user in await self.users.list_all():
+            platform, uid = self._identity(user)
+            key = participant_key(self.participant_secret, platform, uid, event.event_id)
+            if key in waiting_keys:
+                recipients.append(NotificationRecipient(platform, uid, user))
+        return recipients
+
+    async def notify_waiting(self, command: OrderedRegistrationCommand) -> int:
+        if command.operation not in self.NOTIFICATION_OPERATIONS:
+            raise ValueError("command does not send a confirmation notification")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.confirmation_deadline is None:
+            raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
+        deadline = format_confirmation_deadline(event.confirmation_deadline)
+        if command.operation is Operation.OPEN_CONFIRMATION:
+            text = f"Подтверждение на игру {event.name} открыто! Дедлайн подтверждения - {deadline}"
+        else:
+            text = f"Напоминаем о необходимости подтвердить или отменить участие в игре {event.name} до {deadline}!"
+
+        delivered = 0
+        for recipient in await self._recipients(event):
+            request_id = (
+                f"{command.operation_id}:confirmation-notification:{recipient.platform.value}:{recipient.user_id}"
+            )
+            if recipient.user.last_delivery_operation_id == request_id:
+                continue
+            await self.transport.send(
+                platform=recipient.platform,
+                user_id=recipient.user_id,
+                request_id=request_id,
+                text=text,
+            )
+            await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id)
+            delivered += 1
+        return delivered
+
+
 class OrderedMutationService:
     """Authoritative worker-time validation, YDB mutation, and showcase refresh."""
 
@@ -242,9 +328,18 @@ class OrderedMutationService:
 
         status_operations = {
             Operation.OPEN_REGISTRATION: (EventStatus.CREATED, "Установлен Статус «Регистрация»"),
-            Operation.OPEN_CONFIRMATION: (EventStatus.CONFIRMATION_OPEN, "Установлен Статус «Подтверждение»"),
             Operation.CLOSE_EVENT: (EventStatus.CLOSED, "Установлен Статус «Закрытие регистрации»"),
         }
+        if command.operation is Operation.OPEN_CONFIRMATION:
+            assert isinstance(command.payload, ConfirmationDeadlinePayload)
+            await self.events.open_confirmation(event.event_id, command.payload.deadline)
+            return "Установлен Статус «Подтверждение»"
+        if command.operation is Operation.SEND_CONFIRMATION_REMINDER:
+            if event.status is not EventStatus.CONFIRMATION_OPEN:
+                raise OperationNotAllowed("Подтверждение участия для этой игры не открыто")
+            if event.confirmation_deadline is None:
+                raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
+            return "Напоминание о подтверждении отправлено"
         if command.operation in status_operations:
             status, message = status_operations[command.operation]
             await self.events.set_status(event.event_id, status)

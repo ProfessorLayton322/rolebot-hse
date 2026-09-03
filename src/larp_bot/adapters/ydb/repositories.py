@@ -172,7 +172,10 @@ class YdbUserRepository:
         rows = await self.db.query(query, {"$user_id": user_id}, read_only=True)
         if not rows:
             return None
-        row = rows[0]
+        return self._from_row(platform, user_id, rows[0])
+
+    @staticmethod
+    def _from_row(platform: Platform, user_id: int, row: dict[str, Any]) -> User:
         common = {
             "full_name": row.get("full_name"),
             "crossplay": row.get("crossplay"),
@@ -190,6 +193,22 @@ class YdbUserRepository:
         if platform is Platform.TELEGRAM:
             return TelegramUser.model_validate({"tg_id": user_id, "vk_url": row.get("vk_url"), **common})
         return VkUser.model_validate({"vk_id": user_id, "telegram_handle": row.get("telegram_handle"), **common})
+
+    async def list_all(self) -> Sequence[User]:
+        telegram_rows, vk_rows = await asyncio.gather(
+            self.db.query(
+                f"SELECT tg_id, vk_url, {self.COMMON_COLUMNS} FROM `tg_users`;",
+                read_only=True,
+            ),
+            self.db.query(
+                f"SELECT vk_id, telegram_handle, {self.COMMON_COLUMNS} FROM `vk_users`;",
+                read_only=True,
+            ),
+        )
+        return [
+            *(self._from_row(Platform.TELEGRAM, int(row["tg_id"]), row) for row in telegram_rows),
+            *(self._from_row(Platform.VK, int(row["vk_id"]), row) for row in vk_rows),
+        ]
 
     async def save(self, user: User) -> None:
         if isinstance(user, TelegramUser):
@@ -268,6 +287,9 @@ class YdbEventRepository:
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
             status=status,
+            confirmation_deadline=(
+                _dt(row["confirmation_deadline"]) if row.get("confirmation_deadline") is not None else None
+            ),
             registrations_migrated_at=(
                 _dt(row["registrations_migrated_at"]) if row.get("registrations_migrated_at") is not None else None
             ),
@@ -280,7 +302,7 @@ class YdbEventRepository:
             """
             DECLARE $event_id AS Utf8;
             SELECT event_id, name, disk_resource_path, public_registration_url,
-                   status, registrations_migrated_at, created_at, updated_at
+                   status, confirmation_deadline, registrations_migrated_at, created_at, updated_at
             FROM `events` WHERE event_id = $event_id;
             """,
             {"$event_id": event_id},
@@ -294,14 +316,15 @@ class YdbEventRepository:
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
+            DECLARE $confirmation_deadline AS Optional<Timestamp>;
             DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             INSERT INTO `events` (
                 event_id, name, disk_resource_path, public_registration_url,
-                status, registrations_migrated_at, created_at, updated_at
+                status, confirmation_deadline, registrations_migrated_at, created_at, updated_at
             ) VALUES (
                 $event_id, $name, $disk_resource_path, $public_url,
-                $status, $registrations_migrated_at, $created_at, $updated_at
+                $status, $confirmation_deadline, $registrations_migrated_at, $created_at, $updated_at
             );
             """,
             {
@@ -310,6 +333,7 @@ class YdbEventRepository:
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
                 "$status": event.status.value,
+                "$confirmation_deadline": event.confirmation_deadline,
                 "$registrations_migrated_at": event.registrations_migrated_at,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
@@ -332,6 +356,29 @@ class YdbEventRepository:
             {
                 "$event_id": event_id,
                 "$status": status.value,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def open_confirmation(self, event_id: str, deadline: datetime) -> bool:
+        event = await self.get(event_id)
+        if event is None:
+            return False
+        if event.status is EventStatus.CONFIRMATION_OPEN and event.confirmation_deadline == deadline:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $status AS Utf8;
+            DECLARE $deadline AS Timestamp; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET status = $status, confirmation_deadline = $deadline, updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$status": EventStatus.CONFIRMATION_OPEN.value,
+                "$deadline": deadline.astimezone(UTC),
                 "$updated_at": datetime.now(UTC),
             },
         )
@@ -389,7 +436,7 @@ class YdbEventRepository:
         query = f"""
             {" ".join(declarations)}
             SELECT event_id, name, disk_resource_path, public_registration_url,
-                   status, registrations_migrated_at, created_at, updated_at
+                   status, confirmation_deadline, registrations_migrated_at, created_at, updated_at
             FROM `events` {where}
             ORDER BY created_at ASC, event_id ASC
             LIMIT $limit;

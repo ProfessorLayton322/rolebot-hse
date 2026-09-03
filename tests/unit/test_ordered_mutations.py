@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from io import BytesIO
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from larp_bot.application.services import (
 from larp_bot.domain.models import (
     AttendanceStatus,
     CharacterWishPayload,
+    ConfirmationDeadlinePayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -32,7 +34,7 @@ from tests.conftest import MemoryDiskStore
 def command(
     event: Event,
     operation: Operation,
-    payload: EnlistPayload | CharacterWishPayload | EmptyPayload,
+    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload,
     *,
     key: str = "a" * 43,
 ) -> OrderedRegistrationCommand:
@@ -45,7 +47,13 @@ def command(
         participant_key=(
             None
             if operation
-            in {Operation.OPEN_REGISTRATION, Operation.OPEN_CONFIRMATION, Operation.CLOSE_EVENT, Operation.DELETE_EVENT}
+            in {
+                Operation.OPEN_REGISTRATION,
+                Operation.OPEN_CONFIRMATION,
+                Operation.SEND_CONFIRMATION_REMINDER,
+                Operation.CLOSE_EVENT,
+                Operation.DELETE_EVENT,
+            }
             else key
         ),
         payload=payload,
@@ -135,7 +143,8 @@ async def test_created_game_allows_enlist_but_rejects_confirmation_until_admin_o
     with pytest.raises(OperationNotAllowed, match="ещё не открыто"):
         await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
 
-    await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, EmptyPayload()))
+    deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
+    await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, ConfirmationDeadlinePayload(deadline=deadline)))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
@@ -186,9 +195,11 @@ async def test_admin_status_commands_allow_any_transition(disk_store: MemoryDisk
     closed = await events.get(event.event_id)
     assert closed is not None and closed.status is EventStatus.CLOSED
 
-    await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, EmptyPayload()))
+    deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
+    await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, ConfirmationDeadlinePayload(deadline=deadline)))
     opened = await events.get(event.event_id)
     assert opened is not None and opened.status is EventStatus.CONFIRMATION_OPEN
+    assert opened.confirmation_deadline == deadline
     await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
 

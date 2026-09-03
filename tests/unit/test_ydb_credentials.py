@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from larp_bot.adapters.ydb.repositories import YdbExecutor, YdbUserRepository, _dt
-from larp_bot.domain.models import Platform
+from larp_bot.domain.models import Platform, TelegramUser, VkUser
 
 
 def test_ydb_uses_function_context_token_instead_of_metadata() -> None:
@@ -119,3 +119,36 @@ async def test_user_repository_decodes_optional_ydb_timestamp() -> None:
     assert user.last_update_at == _dt(raw_timestamp)
     assert user.created_at == _dt(raw_timestamp)
     assert user.updated_at == _dt(raw_timestamp)
+
+
+@pytest.mark.asyncio
+async def test_user_repository_lists_both_platforms_for_notification_resolution() -> None:
+    timestamp = datetime(2026, 9, 4, tzinfo=UTC)
+    common = {
+        "full_name": None,
+        "crossplay": None,
+        "larp_experience": None,
+        "needs_pass": None,
+        "pass_details_json": None,
+        "dialog_state": "IDLE",
+        "dialog_context_json": "{}",
+        "last_update_id": None,
+        "last_update_at": None,
+        "last_delivery_operation_id": None,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    executor = SimpleNamespace(
+        query=AsyncMock(
+            side_effect=[
+                [{"tg_id": 42, "vk_url": None, **common}],
+                [{"vk_id": 84, "telegram_handle": None, **common}],
+            ]
+        )
+    )
+
+    users = await YdbUserRepository(executor).list_all()
+
+    assert len(users) == 2
+    assert isinstance(users[0], TelegramUser) and users[0].tg_id == 42
+    assert isinstance(users[1], VkUser) and users[1].vk_id == 84
