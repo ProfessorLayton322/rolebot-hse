@@ -12,15 +12,16 @@ from larp_bot.adapters.transports import (
     VkApiTransport,
 )
 from larp_bot.adapters.yandex_disk.repository import (
-    YandexDiskRegistrationRepository,
     YandexDiskRestClient,
+    YandexDiskShowcaseRepository,
 )
-from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbUserRepository
+from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.conversation import ConversationEngine
 from larp_bot.application.services import (
     EventAdministrationService,
     OrderedMutationService,
+    RegistrationCatalog,
     RegistrationService,
 )
 from larp_bot.application.worker import OrderedWorker
@@ -34,7 +35,8 @@ class AppContainer:
     config: RuntimeConfigProvider
     users: YdbUserRepository
     events: YdbEventRepository
-    tables: YandexDiskRegistrationRepository
+    registrations: YdbRegistrationRepository
+    showcase: YandexDiskShowcaseRepository
     publisher: YmqCommandPublisher
     transport: MultiplexedDeferredTransport
     conversation: ConversationEngine
@@ -70,7 +72,8 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     db = YdbExecutor(settings.ydb_endpoint, settings.ydb_database, iam_token=iam_token)
     users = YdbUserRepository(db)
     events = YdbEventRepository(db)
-    tables = YandexDiskRegistrationRepository(YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"]))
+    registrations = YdbRegistrationRepository(db)
+    showcase = YandexDiskShowcaseRepository(YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"]))
     sqs = boto3.client(
         "sqs",
         endpoint_url=settings.ymq_endpoint,
@@ -83,10 +86,11 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     telegram = CloudflareTelegramEgress(settings.telegram_egress_url, secrets["YANDEX_TO_CF_EGRESS_HMAC_SECRET"])
     vk = VkApiTransport(secrets["VK_ACCESS_TOKEN"])
     transport = MultiplexedDeferredTransport(telegram, vk)
-    registrations = RegistrationService(events, tables, publisher, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
-    administration = EventAdministrationService(events, tables)
-    conversation = ConversationEngine(users, events, registrations, administration, config)
-    mutations = OrderedMutationService(events, tables, users)
+    catalog = RegistrationCatalog(events, registrations, showcase)
+    registration_service = RegistrationService(events, catalog, publisher, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
+    administration = EventAdministrationService(events, showcase)
+    conversation = ConversationEngine(users, events, registration_service, administration, config)
+    mutations = OrderedMutationService(events, catalog, users)
     worker = OrderedWorker(
         consumer,
         mutations,
@@ -99,7 +103,8 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         config=config,
         users=users,
         events=events,
-        tables=tables,
+        registrations=registrations,
+        showcase=showcase,
         publisher=publisher,
         transport=transport,
         conversation=conversation,

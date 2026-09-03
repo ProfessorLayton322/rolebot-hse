@@ -1,6 +1,6 @@
 # LARP registration bot
 
-Production-oriented Telegram and VK community bots for LARP profile collection, per-game registration, attendance confirmation, and administration. Both gateways use one Python domain/application layer. Profiles and stateless dialog state live in exactly three YDB tables; each game owns one stable public XLSX registration workbook on Yandex Disk.
+Production-oriented Telegram and VK community bots for LARP profile collection, per-game registration, attendance confirmation, and administration. Both gateways use one Python domain/application layer. Profiles, events, and registrations live in four YDB tables; each game owns one stable public XLSX showcase on Yandex Disk.
 
 The default user-facing language is Russian. Python 3.12 is required.
 
@@ -18,7 +18,8 @@ flowchart LR
     KICK --> TRIGGER[Standard YMQ trigger]
     TRIGGER --> WORKER[Ordered worker]
     WORKER --> FIFO
-    WORKER --> DISK[Yandex Disk XLSX]
+    WORKER --> YDB
+    WORKER --> DISK[Yandex Disk XLSX showcase]
     GW --> CFE[Cloudflare telegram-egress + runtime config]
     WORKER --> CFE
     CFE --> TGAPI[Telegram Bot API]
@@ -32,8 +33,8 @@ The boundaries are:
 - `domain`: strict, platform-independent models and invariants;
 - `application`: shared conversation state machine and use cases;
 - `adapters/telegram` and `adapters/vk`: update parsing/rendering only;
-- `adapters/ydb`: user, event, dialog, and recent-delivery persistence;
-- `adapters/yandex_disk`: all XLSX resource and row operations;
+- `adapters/ydb`: authoritative user, event, registration, dialog, and recent-delivery persistence;
+- `adapters/yandex_disk`: public XLSX showcase creation and projection;
 - `adapters/ymq`: authoritative FIFO publishing, wake-up publishing, and consuming;
 - `adapters/runtime_config`: OIDC-authenticated Worker configuration, cached for at most 60 seconds;
 - `functions/gateway` and `functions/ordered_worker`: Yandex entry points;
@@ -74,15 +75,15 @@ stateDiagram-v2
     Cancelled --> Confirmed: CONFIRM / keep or replace old wish
 ```
 
-`ENLIST` asks only whom the player wants to play with. The prompt explicitly offers `Пропустить`; stale event-selection callbacks are rejected instead of being stored as player text. A new row is `Ожидается` with an empty character cell. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` in one local workbook mutation and one replacement upload. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
+`ENLIST` asks only whom the player wants to play with. The prompt explicitly offers `Пропустить`; stale event-selection callbacks are rejected instead of being stored as player text. A new YDB row is `Ожидается` with an empty character wish. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` to the authoritative row before regenerating the showcase. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
 
-The same user has a different deterministic participant key for every event. Every event has a different workbook, therefore:
+The same user has a different deterministic participant key for every event. Registrations are keyed by event in YDB, therefore:
 
 ```text
 Game A registration.character_wish != Game B registration.character_wish
 ```
 
-Editing a wish changes only the character cell, technical operation ID, and timestamp. Cancelling changes only status. Re-enlisting after cancellation updates the wanted co-player preference, returns to `Ожидается`, and preserves the old wish. A confirmed user updating that preference stays confirmed.
+Editing a wish changes only the character field, operation ID, and timestamp. Cancelling changes only status. Re-enlisting after cancellation updates the wanted co-player preference, returns to `Ожидается`, and preserves the old wish. A confirmed user updating that preference stays confirmed.
 
 ## Storage
 
@@ -94,13 +95,14 @@ Terraform declares exactly these application tables:
 |---|---|---|
 | `tg_users` | `tg_id` | Telegram profile, mandatory VK URL, FSM context, update/delivery metadata |
 | `vk_users` | `vk_id` | VK profile, optional Telegram handle, FSM context, update/delivery metadata |
-| `events` | `event_id` | Name, stable Disk resource path/public URL, CREATED/CONFIRMATION_OPEN/CLOSED, timestamps |
+| `events` | `event_id` | Name, stable Disk resource path/public URL, status, migration timestamp |
+| `registrations` | `(event_id, participant_key)` | Authoritative per-game registration, public profile projection, attendance, operation metadata |
 
-There is no registration, participant, command, session, admin, outbox, or idempotency table. Profile/FSM writes use parameterized YQL and serializable read/write semantics. Event pages are keyset-ordered by `(created_at, event_id)` and never load the complete history just to paginate.
+The composite registration key makes exact participant lookups constant-cost and keeps every game's rows contiguous for an efficient showcase rebuild. No secondary index or duplicated participant array is maintained. Profile/FSM writes use parameterized YQL and serializable read/write semantics. Event pages are keyset-ordered by `(created_at, event_id)` and never load the complete history just to paginate.
 
 ### XLSX
 
-Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once, published once, and overwritten in place for ordinary mutations, preserving the public URL.
+Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once, published once, and overwritten in place from the current YDB registration rows after ordinary mutations, preserving the public URL. It is a disposable read-only showcase, never application state.
 
 Visible columns:
 
@@ -114,19 +116,11 @@ Visible columns:
 Текущий статус
 ```
 
-Hidden technical columns:
+There are no technical or hidden columns. The participant key, operation ID, and timestamps exist only in YDB. User text beginning with `=`, `+`, `-`, or `@` is prefixed with the established spreadsheet apostrophe escape to prevent formula execution.
 
-```text
-participant_key
-last_operation_id
-updated_at
-```
+The public workbook intentionally exposes row number, display name, prior LARP experience, readiness for cross-gender play, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, participant keys, operation metadata, and credentials never enter it. Operators must disclose to players that these fields are public. On first access after rollout, legacy stateful workbooks are imported idempotently into YDB and immediately replaced with the visible-only projection; `events.registrations_migrated_at` prevents later XLSX reads.
 
-Hidden columns are not treated as a privacy control. The participant key is `base64url(HMAC-SHA256(secret, platform:user_id:event_id))`; raw Telegram/VK IDs never enter a public workbook. User text beginning with `=`, `+`, `-`, or `@` is prefixed with the established spreadsheet apostrophe escape to prevent formula execution.
-
-The public workbook intentionally exposes row number, display name, prior LARP experience, readiness for cross-gender play, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw IDs, and credentials never enter it. Operators must disclose to players that these profile and registration fields are public under this model. Existing workbooks with the previous header layout are migrated during their next ordered mutation.
-
-Malformed XLSX is never replaced by an empty file. Yandex Disk download redirects are followed before parsing the workbook. The command remains retryable and logs identify the event without participant data.
+Malformed legacy XLSX aborts migration without setting the migration timestamp. After migration, damaged or manually edited showcase files are safely regenerated from YDB on the next mutation.
 
 ## FIFO ordering and failure behavior
 
@@ -157,7 +151,7 @@ bounded ordered FIFO drainer
 
 Do not attach the trigger directly to FIFO unless Yandex officially adds support and this architecture is deliberately migrated. The kick has no business-ordering role. The publisher first makes the FIFO command durable, then emits a kick. If kick publishing fails, the platform retry uses the same operation ID: FIFO deduplicates the command while the retry emits another kick.
 
-Workbook download/upload failures leave the FIFO message undeleted. Mutation success followed by bot-delivery failure does not roll back the workbook; delivery is retried. The delivery marker is written only after the transport accepts the response. All admin status changes and deletion share the same per-event FIFO group as participant mutations. Worker-time event/registration state—not an earlier button—is authoritative.
+YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. All admin status changes and deletion share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
 
 ## Telegram transport
 
@@ -381,11 +375,11 @@ YANDEX_SERVICE_ACCOUNT_IDS
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
 4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the nine GitHub Variables above.
 5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
-6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, three YDB tables, and public Worker endpoints.
+6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, four YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, injects every application secret into Workers, calls Telegram `setWebhook`, and runs live Telegram/VK smoke tests.
 8. In VK community settings, add the emitted `vk_callback_url`, set the same callback secret, select the current API version, confirm the server using `VK_CONFIRMATION_STRING`, and enable message events.
 9. Send `/start` to Telegram and a message to the VK community. Create a test game as an admin, open the returned public workbook URL, enlist while confirmation is unavailable, change its Статус to `Подтверждение`, confirm with a wish, change it to `Закрытие регистрации`, and verify signup and confirmation are unavailable.
-10. Verify YDB contains only `tg_users`, `vk_users`, and `events`; verify the Telegram webhook points to `*.workers.dev`, never the Yandex gateway.
+10. Verify YDB contains `tg_users`, `vk_users`, `events`, and `registrations`; verify the Telegram webhook points to `*.workers.dev`, never the Yandex gateway.
 
 ## Telegram setup details
 
@@ -419,7 +413,7 @@ Every create/close/delete request rechecks the latest admin set. Deletion requir
 - Rotate `TG_WEBHOOK_SECRET` by updating GitHub and redeploying; the workflow injects ingress before calling `setWebhook`.
 - Rotate the Terraform-state key at least every 90 days and update both `TF_STATE_*` secrets.
 - Rotate the Terraform-managed YMQ key by replacing `yandex_iam_service_account_static_access_key.ymq_client`; the deployment copies the new value to the Worker before normal traffic should resume.
-- Do not casually rotate `PARTICIPANT_KEY_HMAC_SECRET`: existing workbook rows become undiscoverable. Plan a migration that rewrites all participant keys first.
+- Do not casually rotate `PARTICIPANT_KEY_HMAC_SECRET`: existing YDB registration rows become undiscoverable. Plan a migration that rewrites all participant keys first.
 
 Worker binding updates create a new encrypted Worker version; Yandex runtimes never pin a binding version.
 
@@ -428,7 +422,7 @@ Worker binding updates create a new encrypted Worker version; Yandex runtimes ne
 Terraform manages:
 
 - five least-purpose service accounts, runtime IAM and invocation bindings;
-- one Serverless YDB database and exactly three tables;
+- one Serverless YDB database and four application tables;
 - one FIFO command queue and one standard kick queue;
 - gateway and ordered-worker Functions, versions, logging, and scaling policies;
 - one standard-queue Function trigger (never a FIFO trigger);
@@ -460,7 +454,7 @@ terraform plan
 
 Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
-Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, exactly three YDB tables, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
+Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the four-table YDB model, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
 
 ## Observability
 
@@ -481,15 +475,15 @@ Search Yandex Logging by operation/event ID. Cloudflare logs should contain requ
 
 **Telegram receives no answer:** check `getWebhookInfo`, ingress Worker secret presence, Cloudflare status, then gateway logs by request ID. Confirm the webhook URL is Cloudflare. A 403 at Yandex usually means HMAC mismatch or stale timestamp.
 
-**Queued acknowledgment arrives but final success does not:** inspect FIFO depth, kick queue/trigger, worker logs, Disk OAuth validity, and workbook schema. Do not delete the FIFO message manually until the authoritative mutation is understood.
+**Queued acknowledgment arrives but final success does not:** inspect FIFO depth, kick queue/trigger, worker logs, YDB errors, and Disk OAuth validity. Do not delete the FIFO message manually until the authoritative mutation is understood.
 
 **VK confirmation fails:** compare numeric group ID, callback secret, and confirmation string with the current egress Worker bindings. The response body and Function content type are plain text.
 
 **Runtime config returns 403:** confirm the Function uses the expected gateway/worker service account, its self-scoped `iam.serviceAccounts.tokenCreator` binding exists, and `YANDEX_OIDC_AUDIENCE` plus `YANDEX_SERVICE_ACCOUNT_IDS` match Terraform outputs. Never replace this with a long-lived shared authentication secret.
 
-**Registration list is slow:** this is expected. With no YDB registration index, each page scans at most ten event workbooks with concurrency three. Add pagination; do not add a fourth YDB table.
+**Registration list is slow:** each page performs at most ten exact composite-primary-key YDB lookups with concurrency three. Inspect YDB throttling before changing the storage model.
 
-**Workbook is malformed:** restore a known-good XLSX with the exact seven headers at the same Disk resource path. Never create a new published resource, or its public URL will change.
+**Workbook is malformed:** after migration, enqueue or retry a registration mutation to regenerate it from YDB at the same Disk resource path. During legacy migration, restore the last stateful workbook backup so its rows can be imported. Never publish a replacement resource because its public URL would change.
 
 **Terraform cannot read YMQ:** verify the generated YMQ-client key in state and its `ymq.reader`/`ymq.writer` roles. State must remain private because the YMQ provider requires an SQS-compatible static key.
 

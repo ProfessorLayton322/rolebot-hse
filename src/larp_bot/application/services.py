@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
@@ -21,7 +21,13 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 
-from .ports import EventRepository, OrderedCommandPublisher, RegistrationTableRepository, UserRepository
+from .ports import (
+    EventRepository,
+    OrderedCommandPublisher,
+    RegistrationRepository,
+    RegistrationShowcaseRepository,
+    UserRepository,
+)
 
 LOGGER = logging.getLogger("larp_bot.application.services")
 
@@ -48,16 +54,56 @@ def event_slug(name: str) -> str:
     return (slug or "game")[:40]
 
 
+class RegistrationCatalog:
+    """YDB registration source of truth plus its derived public showcase."""
+
+    def __init__(
+        self,
+        events: EventRepository,
+        registrations: RegistrationRepository,
+        showcase: RegistrationShowcaseRepository,
+    ) -> None:
+        self.events = events
+        self.registrations = registrations
+        self.showcase = showcase
+
+    async def ensure_migrated(self, event: Event) -> Event:
+        if event.registrations_migrated_at is not None:
+            return event
+        legacy = await self.showcase.read_legacy_registrations(event)
+        await self.registrations.import_missing(legacy)
+        # Publish the YDB projection before setting the marker. If Disk is
+        # temporarily unavailable, the next request safely retries migration.
+        await self.refresh(event)
+        migrated_at = datetime.now(UTC)
+        await self.events.mark_registrations_migrated(event.event_id, migrated_at)
+        event.registrations_migrated_at = migrated_at
+        return event
+
+    async def get(self, event: Event, participant_key: str) -> Registration | None:
+        await self.ensure_migrated(event)
+        return await self.registrations.get(event.event_id, participant_key)
+
+    async def refresh(self, event: Event) -> None:
+        rows = await self.registrations.list_for_event(event.event_id)
+        await self.showcase.replace(event, rows)
+
+    async def delete(self, event: Event) -> None:
+        await self.showcase.delete_event_workbook(event.disk_resource_path)
+        await self.registrations.delete_for_event(event.event_id)
+        await self.events.delete(event.event_id)
+
+
 class RegistrationService:
     def __init__(
         self,
         events: EventRepository,
-        tables: RegistrationTableRepository,
+        catalog: RegistrationCatalog,
         publisher: OrderedCommandPublisher,
         participant_secret: str,
     ) -> None:
         self.events = events
-        self.tables = tables
+        self.catalog = catalog
         self.publisher = publisher
         self.participant_secret = participant_secret
 
@@ -72,7 +118,7 @@ class RegistrationService:
 
     async def get_registration(self, event_id: str, platform: Platform, user_id: int) -> Registration | None:
         event = await self._event(event_id)
-        return await self.tables.find_registration(event, self.key(platform, user_id, event_id))
+        return await self.catalog.get(event, self.key(platform, user_id, event_id))
 
     async def registered_games_page(
         self,
@@ -88,7 +134,7 @@ class RegistrationService:
 
         async def inspect(event: Event) -> tuple[Event, Registration] | None:
             async with semaphore:
-                found = await self.tables.find_registration(event, self.key(platform, user_id, event.event_id))
+                found = await self.catalog.get(event, self.key(platform, user_id, event.event_id))
                 return (event, found) if found is not None else None
 
         matches = [item for item in await asyncio.gather(*(inspect(e) for e in candidates)) if item]
@@ -149,9 +195,9 @@ class RegistrationService:
 
 
 class EventAdministrationService:
-    def __init__(self, events: EventRepository, tables: RegistrationTableRepository) -> None:
+    def __init__(self, events: EventRepository, showcase: RegistrationShowcaseRepository) -> None:
         self.events = events
-        self.tables = tables
+        self.showcase = showcase
 
     async def create_event(self, name: str) -> Event:
         clean_name = name.strip()
@@ -159,7 +205,7 @@ class EventAdministrationService:
             raise ValueError("Название игры не может быть пустым")
         event_id = str(uuid4())
         disk_path = f"disk:/larp-bot/events/{event_id}-{event_slug(clean_name)}.xlsx"
-        public_url = await self.tables.create_event_workbook(disk_path)
+        public_url = await self.showcase.create_event_workbook(disk_path)
         event = Event(
             event_id=event_id,
             name=clean_name,
@@ -169,22 +215,22 @@ class EventAdministrationService:
         try:
             await self.events.create(event)
         except Exception:
-            await self.tables.delete_event_workbook(disk_path)
+            await self.showcase.delete_event_workbook(disk_path)
             raise
         return event
 
 
 class OrderedMutationService:
-    """Authoritative worker-time validation and workbook mutation."""
+    """Authoritative worker-time validation, YDB mutation, and showcase refresh."""
 
     def __init__(
         self,
         events: EventRepository,
-        tables: RegistrationTableRepository,
+        catalog: RegistrationCatalog,
         users: UserRepository | None = None,
     ) -> None:
         self.events = events
-        self.tables = tables
+        self.catalog = catalog
         self.users = users
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
@@ -204,11 +250,11 @@ class OrderedMutationService:
             await self.events.set_status(event.event_id, status)
             return message
         if command.operation is Operation.DELETE_EVENT:
-            await self.tables.delete_event_workbook(event.disk_resource_path)
-            await self.events.delete(event.event_id)
+            await self.catalog.delete(event)
             return "Игра и таблица удалены"
 
         assert command.participant_key is not None
+        await self.catalog.ensure_migrated(event)
         if command.operation is Operation.ENLIST:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")
@@ -220,8 +266,8 @@ class OrderedMutationService:
                 if user is not None:
                     larp_experience = user.larp_experience
                     crossplay = user.crossplay
-            await self.tables.enlist(
-                event,
+            await self.catalog.registrations.enlist(
+                event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
                 display_name=command.payload.display_name,
@@ -229,6 +275,7 @@ class OrderedMutationService:
                 larp_experience=larp_experience,
                 crossplay=crossplay,
             )
+            await self.catalog.refresh(event)
             return "Заявка на игру записана"
 
         if command.operation is Operation.CONFIRM and event.status is not EventStatus.CONFIRMATION_OPEN:
@@ -236,17 +283,18 @@ class OrderedMutationService:
                 raise OperationNotAllowed("Подтверждение участия в этой игре ещё не открыто")
             raise OperationNotAllowed("Подтверждение участия в этой игре закрыто")
 
-        registration = await self.tables.find_registration(event, command.participant_key)
+        registration = await self.catalog.registrations.get(event.event_id, command.participant_key)
         if registration is None:
             raise RegistrationNotFound("Сначала запишитесь на эту игру")
         if command.operation is Operation.CONFIRM:
             assert isinstance(command.payload, CharacterWishPayload)
-            await self.tables.confirm(
-                event,
+            await self.catalog.registrations.confirm(
+                event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
                 character_wish=command.payload.character_wish,
             )
+            await self.catalog.refresh(event)
             return "Участие подтверждено"
         if command.operation is Operation.UPDATE_CHARACTER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
@@ -254,18 +302,20 @@ class OrderedMutationService:
             if registration.attendance_status is AttendanceStatus.WAITING and not registration.character_wish:
                 raise OperationNotAllowed("Впервые укажите пожелания при подтверждении участия")
             assert isinstance(command.payload, CharacterWishPayload)
-            await self.tables.update_character_wish(
-                event,
+            await self.catalog.registrations.update_character_wish(
+                event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
                 character_wish=command.payload.character_wish,
             )
+            await self.catalog.refresh(event)
             return "Пожелания по персонажу обновлены"
         if command.operation is Operation.CANCEL:
-            await self.tables.cancel(
-                event,
+            await self.catalog.registrations.cancel(
+                event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
             )
+            await self.catalog.refresh(event)
             return "Участие отменено"
         raise AssertionError(f"unhandled operation: {command.operation}")

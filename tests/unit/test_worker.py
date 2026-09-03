@@ -8,11 +8,12 @@ import pytest
 from larp_bot.adapters.memory import (
     MemoryDeferredTransport,
     MemoryEventRepository,
+    MemoryRegistrationRepository,
     MemoryUserRepository,
 )
-from larp_bot.adapters.yandex_disk.repository import YandexDiskRegistrationRepository
+from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.application.services import OrderedMutationService
+from larp_bot.application.services import OrderedMutationService, RegistrationCatalog
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -70,8 +71,9 @@ def queued(
 async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
-    tables = YandexDiskRegistrationRepository(disk_store)
-    await tables.create_event_workbook(event.disk_resource_path)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=1))
@@ -85,13 +87,13 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     transport = MemoryDeferredTransport()
     worker = OrderedWorker(
         consumer,
-        OrderedMutationService(events, tables),
+        OrderedMutationService(events, RegistrationCatalog(events, tables, showcase)),
         users,
         transport,
         max_seconds=2,
     )
     assert await worker.run() == 4
-    result = await tables.find_registration(event, "a" * 43)
+    result = await tables.get(event.event_id, "a" * 43)
     assert result is not None
     assert result.character_wish == "B"
     assert result.attendance_status is AttendanceStatus.CANCELLED
@@ -101,14 +103,18 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
 
 @pytest.mark.asyncio
 async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryDiskStore, event: Event) -> None:
-    tables = YandexDiskRegistrationRepository(disk_store)
-    await tables.create_event_workbook(event.disk_resource_path)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=1))
     consumer = FakeConsumer([queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A"), 1)])
     worker = OrderedWorker(
         consumer,
-        OrderedMutationService(MemoryEventRepository([event]), tables),
+        OrderedMutationService(
+            events := MemoryEventRepository([event]),
+            RegistrationCatalog(events, tables, showcase),
+        ),
         users,
         FailingTransport(),
         max_seconds=2,
@@ -116,5 +122,5 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     with pytest.raises(RuntimeError, match="transport unavailable"):
         await worker.run()
     assert consumer.deleted == []
-    registration = await tables.find_registration(event, "a" * 43)
+    registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None

@@ -19,7 +19,6 @@ class Settings(BaseModel):
     telegram_egress_url: str
     inline_safety_margin_ms: int = Field(default=100, ge=50, le=500)
     worker_max_seconds: float = Field(default=40.0, ge=1, le=300)
-    workbook_scan_concurrency: int = Field(default=3, ge=1, le=5)
     app_log_level: str = "INFO"
 
     @classmethod
@@ -42,6 +41,5 @@ class Settings(BaseModel):
             ymq_endpoint=os.getenv("YMQ_ENDPOINT", "https://message-queue.api.cloud.yandex.net"),
             inline_safety_margin_ms=int(os.getenv("INLINE_SAFETY_MARGIN_MS", "100")),
             worker_max_seconds=float(os.getenv("WORKER_MAX_SECONDS", "40")),
-            workbook_scan_concurrency=int(os.getenv("WORKBOOK_SCAN_CONCURRENCY", "3")),
             app_log_level=os.getenv("APP_LOG_LEVEL", "INFO"),
         )

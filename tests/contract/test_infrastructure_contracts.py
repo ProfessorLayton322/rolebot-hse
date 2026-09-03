@@ -6,10 +6,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_exactly_three_ydb_tables() -> None:
+def test_ydb_tables_include_registration_source_of_truth() -> None:
     terraform = "\n".join(path.read_text() for path in (ROOT / "infra/terraform").glob("*.tf"))
     resources = re.findall(r'resource\s+"yandex_ydb_table"\s+"([^"]+)"', terraform)
-    assert sorted(resources) == ["events", "tg_users", "vk_users"]
+    assert sorted(resources) == ["events", "registrations", "tg_users", "vk_users"]
+    ydb = (ROOT / "infra/terraform/ydb.tf").read_text()
+    assert 'primary_key = ["event_id", "participant_key"]' in ydb
 
 
 def test_no_fifo_native_trigger() -> None:
@@ -34,9 +36,9 @@ def test_cloudflare_workers_are_separate() -> None:
 
 def test_runtime_ydb_endpoint_enables_tls() -> None:
     functions = (ROOT / "infra/terraform/functions.tf").read_text()
-    assert (
-        'YDB_ENDPOINT              = "grpcs://${yandex_ydb_database_serverless.application.ydb_api_endpoint}"'
-        in functions
+    assert re.search(
+        r'YDB_ENDPOINT\s*=\s*"grpcs://\$\{yandex_ydb_database_serverless\.application\.ydb_api_endpoint\}"',
+        functions,
     )
 
 

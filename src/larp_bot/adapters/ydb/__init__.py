@@ -1,3 +1,3 @@
-from .repositories import YdbEventRepository, YdbExecutor, YdbUserRepository
+from .repositories import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 
-__all__ = ["YdbEventRepository", "YdbExecutor", "YdbUserRepository"]
+__all__ = ["YdbEventRepository", "YdbExecutor", "YdbRegistrationRepository", "YdbUserRepository"]
