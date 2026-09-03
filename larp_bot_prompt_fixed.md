@@ -97,7 +97,7 @@ At minimum separate:
 - Telegram adapter;
 - VK adapter;
 - YDB repositories;
-- Yandex Disk XLSX registration repository;
+- Yandex Disk XLSX showcase repository;
 - ordered-command publisher;
 - FIFO registration worker;
 - admin configuration provider;
@@ -143,19 +143,19 @@ Do not use Telegram or VK long polling in production.
 
 ---
 
-# 3. YDB HARD STORAGE CONSTRAINT
+# 3. YDB STORAGE MODEL
 
-There must be **exactly three application tables in YDB Serverless**:
+There must be **exactly four application tables in YDB Serverless**:
 
 1. `tg_users`
 2. `vk_users`
 3. `events`
+4. `registrations`
 
 There MUST NOT be any other application YDB table.
 
 Do not create:
 
-- registrations;
 - attendance;
 - character wishes;
 - commands;
@@ -170,7 +170,7 @@ Do not create:
 
 tables.
 
-Game registration data belongs in each game's public XLSX workbook, NOT YDB.
+Game registration data belongs in `registrations`, keyed by `(event_id, participant_key)`. YDB is authoritative. Each public XLSX is only a derived showcase of those rows.
 
 ---
 
@@ -334,15 +334,15 @@ Clear temporary dialog data after:
 
 Each game has exactly one XLSX registration workbook stored on Yandex Disk.
 
-Interpret “Yandex table” for this project as:
+Store authoritative per-game registration rows in the YDB `registrations` table. Use the composite primary key `(event_id, participant_key)` so participant lookup is a point read and listing all registrations for a game is a primary-key prefix read.
 
-**a Yandex Disk XLSX file published through a stable public read-only URL.**
+The XLSX file is a public read-only showcase regenerated from YDB.
 
 The public URL must remain stable for the lifetime of the game.
 
 Do not invent an undocumented Yandex Sheets editing API.
 
-Use XLSX because that follows the existing application's storage model.
+Never use XLSX contents as runtime registration state after migration.
 
 ---
 
@@ -367,7 +367,7 @@ disk:/larp-bot/events/<event-id>-<slug>.xlsx
 
 If XLSX creation succeeds but the YDB event insert fails, delete the orphaned workbook.
 
-Normal registration changes MUST update/overwrite the **same Yandex Disk resource**.
+After a successful YDB registration change, regenerate and overwrite the **same Yandex Disk resource** from the authoritative game rows.
 
 Never implement ordinary updates by deleting the old file and publishing a new one.
 
@@ -379,7 +379,7 @@ Store the stable public sharing URL.
 
 ---
 
-# 10. Registration workbook schema
+# 10. Registration showcase schema
 
 Suggested visible columns:
 
@@ -393,17 +393,7 @@ Suggested visible columns:
 Текущий статус
 ```
 
-Technical columns:
-
-```text
-participant_key
-last_operation_id
-updated_at
-```
-
-Technical columns may be hidden in the workbook.
-
-However, never treat XLSX column hiding as a security feature.
+Do not include technical columns. `participant_key`, `last_operation_id`, and timestamps remain private in YDB.
 
 ## `participant_key`
 
@@ -423,7 +413,9 @@ HMAC(secret, platform + ":" + platform_user_id + ":" + event_id)
 The secret belongs in an encrypted Cloudflare Worker binding and is returned to
 the Yandex runtime only through the OIDC-protected runtime-config endpoint.
 
-This lets the backend reliably find a participant row without publicly revealing the platform ID.
+This lets the backend reliably find a YDB participant row without publicly revealing the platform ID.
+
+For an existing deployment, import legacy technical workbook rows idempotently on first access, regenerate a visible-only showcase, and store a migration timestamp on the event. Never read the showcase as state after that marker is set.
 
 ---
 
@@ -447,7 +439,7 @@ These values must be independent.
 
 Changing Game B MUST NOT affect Game A or Game C.
 
-Because each game has its own workbook, the durable character-wish value lives in the participant's row of that game's workbook.
+The durable character-wish value lives in the participant's YDB row for that game. The workbook only displays a projection of it.
 
 ## Initial enlistment
 
@@ -498,7 +490,7 @@ The CONFIRM mutation must atomically update:
 Статус = Подтверждено
 ```
 
-in the same workbook operation.
+in the same YDB row mutation.
 
 Do not first write the character idea and later send a separate confirmation command.
 
@@ -920,19 +912,17 @@ Do not delete the participant row.
 
 # 21. Listing a user's registered games
 
-There is intentionally NO registration index in YDB.
-
-Therefore do NOT solve:
+The registration table intentionally needs no secondary index. To solve:
 
 ```text
 Which games has this user registered for?
 ```
 
-by adding:
+do not add:
 
 - registration IDs to the user row;
 - participant arrays to `events`;
-- a registration-index table.
+- another registration-index table.
 
 When a per-user game list is required for:
 
@@ -940,7 +930,7 @@ When a per-user game list is required for:
 - cancellation;
 - character-wish editing;
 
-derive it from event workbooks.
+derive it from exact YDB point reads.
 
 Use bounded pagination.
 
@@ -948,25 +938,23 @@ Recommended approach:
 
 1. page through event metadata in YDB;
 2. process at most 10 candidate events per page;
-3. inspect those workbooks for the user's deterministic `participant_key`;
+3. query `registrations` by each `(event_id, participant_key)`;
 4. return matching registrations;
 5. offer next/previous pagination.
 
-Limit concurrent Yandex Disk workbook reads to a small configurable number such as 3.
+Limit concurrent YDB point reads to a small number such as 3.
 
-This operation may be slower than a normal YDB query.
-
-That is acceptable.
+This keeps lookup cost bounded without duplicating registration state.
 
 For Telegram, if it cannot safely complete inside the inline-response deadline, use deferred delivery through `telegram-egress`.
 
-Under NO circumstances create another YDB table merely to optimize this query.
+Under NO circumstances duplicate authoritative registration state merely to optimize this query.
 
 ---
 
 # 22. Ordered operations — HARD REQUIREMENT
 
-All mutations to an event registration workbook that can conflict with another mutation must be serialized.
+All registration mutations that can conflict for an event must be serialized. Commit YDB first, then regenerate the XLSX showcase from YDB before acknowledging success.
 
 Ordered command types:
 
@@ -1103,7 +1091,7 @@ When invoked:
 2. poll `registration-commands.fifo`;
 3. receive one or a small bounded batch;
 4. process FIFO commands;
-5. mutate corresponding Yandex Disk workbook;
+5. mutate the authoritative YDB registration row and regenerate the corresponding XLSX showcase;
 6. update YDB event status where required;
 7. send final bot response;
 8. delete FIFO message only when state mutation has completed correctly;
@@ -1119,13 +1107,13 @@ Never depend on:
 - process-local state;
 - one Function instance.
 
-Correctness comes from FIFO/message-group semantics plus idempotent workbook mutation.
+Correctness comes from FIFO/message-group semantics plus idempotent YDB mutation.
 
 ---
 
 # 26. FIFO visibility and retries
 
-Configure visibility timeout safely above normal workbook-processing time.
+Configure visibility timeout safely above normal YDB mutation and showcase-projection time.
 
 Configure suitable:
 
@@ -1162,7 +1150,7 @@ Additionally store:
 last_operation_id
 ```
 
-on the affected workbook participant row.
+on the affected YDB registration row.
 
 For event-level commands such as CLOSE/DELETE, use appropriate event-state preconditions.
 
@@ -1217,7 +1205,7 @@ character_wish = supplied normalized value
 status = Подтверждено
 ```
 
-as one logical workbook mutation.
+as one logical YDB mutation.
 
 ## UPDATE_CHARACTER_WISH
 
@@ -1736,7 +1724,7 @@ The backend may return `inline` only if:
 - no durable ordered operation is outstanding;
 - current time remains safely before the backend inline deadline.
 
-Operations involving FIFO workbook mutation MUST NOT block waiting for completion inside the Telegram webhook HTTP request.
+Operations involving FIFO registration mutation MUST NOT block waiting for completion inside the Telegram webhook HTTP request.
 
 ---
 
@@ -1997,7 +1985,7 @@ The final success:
 "Участие подтверждено"
 ```
 
-must only be sent after the FIFO worker successfully commits the XLSX change.
+must only be sent after the FIFO worker successfully commits the YDB change and refreshes the showcase.
 
 Do not tell a user that a registration succeeded merely because the command was placed in the queue.
 
@@ -2060,7 +2048,8 @@ BotAction
 BotResponse
 UserRepository
 EventRepository
-RegistrationTableRepository
+RegistrationRepository
+RegistrationShowcaseRepository
 OrderedCommandPublisher
 AdminConfigProvider
 ```
@@ -2124,33 +2113,39 @@ Add tests preventing accidental reintroduction of a global character-wish field.
 
 ---
 
-# 54. Registration-table repository
+# 54. Registration and showcase repositories
 
 Provide explicit operations such as:
 
 ```text
-find_registration(event, participant_key)
+get(event_id, participant_key)
+list_for_event(event_id)
 enlist(...)
 confirm(...)
 update_character_wish(...)
 cancel(...)
+delete_for_event(...)
+```
+
+The separate showcase repository should provide:
+
+```text
+replace(event, registrations)
 create_event_workbook(...)
 delete_event_workbook(...)
 ```
 
-Do not expose arbitrary raw workbook edits throughout the codebase.
+Do not expose arbitrary raw YDB or workbook edits throughout the codebase.
 
-The workbook repository should own:
+The showcase repository should own:
 
 - download;
 - integrity checks;
-- row lookup;
-- mutation;
 - temp-file management;
 - upload/replace;
 - public-resource handling.
 
-If XLSX is malformed:
+If a legacy stateful XLSX is malformed during migration:
 
 - do not replace it with an empty workbook;
 - return an error;
@@ -2191,7 +2186,7 @@ Document this fact clearly in README.
 
 Design for partial failure.
 
-## Workbook download fails
+## Legacy workbook download fails during migration
 
 Do not mutate anything.
 
@@ -2199,7 +2194,7 @@ Do not delete FIFO message.
 
 Retry.
 
-## Workbook upload fails
+## Showcase upload fails
 
 Do not acknowledge command completion.
 
@@ -2207,7 +2202,7 @@ Retry safely.
 
 ## Mutation succeeds but response delivery fails
 
-Do NOT reverse the workbook mutation merely because Telegram/VK delivery failed.
+Do NOT reverse the YDB mutation merely because showcase or Telegram/VK delivery failed.
 
 The registration state is authoritative.
 
@@ -2271,6 +2266,7 @@ Process in exactly that order.
 After DELETE_EVENT:
 
 - workbook gone;
+- registration rows gone;
 - event metadata gone.
 
 ENLIST B fails cleanly.
@@ -2456,7 +2452,7 @@ Manage at minimum:
 - service accounts;
 - IAM bindings;
 - YDB Serverless database;
-- exactly three application YDB tables;
+- exactly four application YDB tables;
 - FIFO command queue;
 - standard kick queue;
 - Cloud Functions;
@@ -2794,7 +2790,7 @@ Test re-confirming a cancelled participant presents/preserves the old value unle
 
 Test a second ENLIST update does not erase existing character wishes.
 
-Test editing one game's wish cannot modify another game's workbook.
+Test editing one game's wish cannot modify another game's YDB rows or showcase.
 
 ## Registration
 
@@ -3137,7 +3133,8 @@ flowchart LR
     TRIGGER --> WORKER[Ordered Worker]
 
     WORKER --> FIFO
-    WORKER --> DISK[Yandex Disk XLSX]
+    WORKER --> YDB
+    WORKER --> DISK[Yandex Disk XLSX showcase]
 
     WORKER --> CFE[Cloudflare telegram-egress]
     CFE --> TGAPI[Telegram Bot API]
@@ -3265,9 +3262,9 @@ Do NOT:
 - configure Telegram webhook directly to Yandex;
 - depend on Cloudflare `waitUntil()` for durable work;
 - directly attach FIFO queue to a Yandex Function Message Queue trigger;
-- bypass FIFO for workbook mutations;
+- bypass FIFO for YDB registration mutations or showcase refreshes;
 - use process-local locks as correctness mechanism;
-- create a registrations YDB table;
+- store registration state in XLSX;
 - create an idempotency YDB table;
 - create a character-wishes YDB table;
 - store admins in code;
@@ -3333,10 +3330,10 @@ The project is complete only when:
 - slow Telegram responses receive immediate HTTP 200 empty webhook acknowledgment;
 - slow Telegram responses are later delivered through telegram-egress;
 - VK Callback API works through Yandex;
-- exactly three YDB application tables exist;
+- exactly four YDB application tables exist;
 - Telegram and VK users use separate tables;
 - event metadata uses one events table;
-- registration data is absent from YDB;
+- registration data is authoritative in YDB;
 - every game owns one public stable Yandex Disk XLSX;
 - ENLIST does NOT request character wishes;
 - ENLIST creates blank character wishes;
@@ -3348,7 +3345,7 @@ The project is complete only when:
 - editing Game A never affects Game B;
 - CANCEL preserves character wishes;
 - re-confirmation can preserve or replace prior character wishes;
-- workbook mutations are ordered through FIFO per event;
+- YDB registration mutations and showcase refreshes are ordered through FIFO per event;
 - UPDATE_CHARACTER_WISH is also ordered;
 - FIFO queue is not directly attached to a native Function trigger;
 - standard kick queue wakes the FIFO worker;

@@ -41,7 +41,8 @@ locals {
   ]
 }
 
-# HARD STORAGE INVARIANT: these are the only three application YDB tables.
+# Application tables. Registrations are clustered by event for inexpensive
+# point lookups and full-game showcase projections.
 resource "yandex_ydb_table" "tg_users" {
   path              = "tg_users"
   connection_string = yandex_ydb_database_serverless.application.ydb_full_endpoint
@@ -124,6 +125,10 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   column {
+    name = "registrations_migrated_at"
+    type = "Timestamp"
+  }
+  column {
     name     = "created_at"
     type     = "Timestamp"
     not_null = true
@@ -134,6 +139,68 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   primary_key = ["event_id"]
+
+  depends_on = [time_sleep.ydb_ready]
+}
+
+resource "yandex_ydb_table" "registrations" {
+  path              = "registrations"
+  connection_string = yandex_ydb_database_serverless.application.ydb_full_endpoint
+
+  column {
+    name     = "event_id"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "participant_key"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "display_name"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "wish_play"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name = "larp_experience"
+    type = "Bool"
+  }
+  column {
+    name = "crossplay"
+    type = "Bool"
+  }
+  column {
+    name     = "character_wish"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "attendance_status"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "last_operation_id"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "created_at"
+    type     = "Timestamp"
+    not_null = true
+  }
+  column {
+    name     = "updated_at"
+    type     = "Timestamp"
+    not_null = true
+  }
+  primary_key = ["event_id", "participant_key"]
 
   depends_on = [time_sleep.ydb_ready]
 }

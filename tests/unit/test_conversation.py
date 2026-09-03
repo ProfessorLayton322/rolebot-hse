@@ -7,10 +7,11 @@ import pytest
 from larp_bot.adapters.memory import (
     MemoryCommandPublisher,
     MemoryEventRepository,
+    MemoryRegistrationRepository,
     MemoryUserRepository,
     StaticAdminProvider,
 )
-from larp_bot.adapters.yandex_disk.repository import YandexDiskRegistrationRepository
+from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADMIN,
     CHANGE_STATUS,
@@ -24,7 +25,11 @@ from larp_bot.application.conversation import (
     STATUS_REGISTRATION,
     ConversationEngine,
 )
-from larp_bot.application.services import EventAdministrationService, RegistrationService
+from larp_bot.application.services import (
+    EventAdministrationService,
+    RegistrationCatalog,
+    RegistrationService,
+)
 from larp_bot.domain.models import (
     BotIdentity,
     EnlistPayload,
@@ -55,7 +60,7 @@ async def engine_setup(
     ConversationEngine,
     MemoryUserRepository,
     MemoryCommandPublisher,
-    YandexDiskRegistrationRepository,
+    MemoryRegistrationRepository,
 ]:
     users = MemoryUserRepository()
     await users.save(
@@ -69,15 +74,17 @@ async def engine_setup(
         )
     )
     events = MemoryEventRepository([event])
-    tables = YandexDiskRegistrationRepository(store)
-    await tables.create_event_workbook(event.disk_resource_path)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    catalog = RegistrationCatalog(events, tables, showcase)
     publisher = MemoryCommandPublisher()
-    registrations = RegistrationService(events, tables, publisher, "participant-secret")
+    registrations = RegistrationService(events, catalog, publisher, "participant-secret")
     conversation = ConversationEngine(
         users,
         events,
         registrations,
-        EventAdministrationService(events, tables),
+        EventAdministrationService(events, showcase),
         StaticAdminProvider(tg_ids={1} if admin else set()),
     )
     return conversation, users, publisher, tables
@@ -141,7 +148,7 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     engine, _, publisher, tables = await engine_setup(disk_store, event)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
     await tables.enlist(
-        event,
+        event.event_id,
         operation_id="existing-enlist",
         participant_key=key,
         display_name="Иван Иванов",
@@ -166,7 +173,7 @@ async def test_created_game_accepts_signup_but_does_not_offer_confirmation(
     assert any(button.value == f"select:enlist:{event.event_id}" for button in enlist_games.buttons)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
     await tables.enlist(
-        event,
+        event.event_id,
         operation_id="existing-enlist",
         participant_key=key,
         display_name="Иван Иванов",
@@ -186,14 +193,14 @@ async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
     engine, _, publisher, tables = await engine_setup(disk_store, event)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
     await tables.enlist(
-        event,
+        event.event_id,
         operation_id="existing-enlist",
         participant_key=key,
         display_name="Иван",
         wish_play="A",
     )
-    await tables.confirm(event, operation_id="confirm", participant_key=key, character_wish="Doctor")
-    await tables.cancel(event, operation_id="cancel", participant_key=key)
+    await tables.confirm(event.event_id, operation_id="confirm", participant_key=key, character_wish="Doctor")
+    await tables.cancel(event.event_id, operation_id="cancel", participant_key=key)
     await engine.handle(inbound(1, CONFIRM))
     selected = await engine.handle(inbound(2, f"select:confirm:{event.event_id}", callback=True))
     assert any(button.value == KEEP for button in selected.buttons)
@@ -206,14 +213,16 @@ async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
 async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDiskStore, event: Event) -> None:
     users = MemoryUserRepository()
     events = MemoryEventRepository([event])
-    tables = YandexDiskRegistrationRepository(disk_store)
-    await tables.create_event_workbook(event.disk_resource_path)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    catalog = RegistrationCatalog(events, tables, showcase)
     publisher = MemoryCommandPublisher()
     engine = ConversationEngine(
         users,
         events,
-        RegistrationService(events, tables, publisher, "secret"),
-        EventAdministrationService(events, tables),
+        RegistrationService(events, catalog, publisher, "secret"),
+        EventAdministrationService(events, showcase),
         StaticAdminProvider(vk_ids={7}),
     )
 
@@ -241,7 +250,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     assert isinstance(enlist.payload, EnlistPayload)
     assert enlist.participant_key is not None
     await tables.enlist(
-        event,
+        event.event_id,
         operation_id=enlist.operation_id,
         participant_key=enlist.participant_key,
         display_name=enlist.payload.display_name,
@@ -258,7 +267,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     assert confirmation.participant_key is not None
     assert hasattr(confirmation.payload, "character_wish")
     await tables.confirm(
-        event,
+        event.event_id,
         operation_id=confirmation.operation_id,
         participant_key=confirmation.participant_key,
         character_wish=confirmation.payload.character_wish,
@@ -279,7 +288,7 @@ async def test_waiting_blank_character_menu_routes_to_confirmation(disk_store: M
     engine, _, _, tables = await engine_setup(disk_store, event)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
     await tables.enlist(
-        event,
+        event.event_id,
         operation_id="existing-enlist",
         participant_key=key,
         display_name="Иван",
@@ -294,13 +303,15 @@ async def test_waiting_blank_character_menu_routes_to_confirmation(disk_store: M
 async def test_incomplete_profile_cannot_enlist(disk_store: MemoryDiskStore, event: Event) -> None:
     users = MemoryUserRepository()
     events = MemoryEventRepository([event])
-    tables = YandexDiskRegistrationRepository(disk_store)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    catalog = RegistrationCatalog(events, tables, showcase)
     publisher = MemoryCommandPublisher()
     engine = ConversationEngine(
         users,
         events,
-        RegistrationService(events, tables, publisher, "secret"),
-        EventAdministrationService(events, tables),
+        RegistrationService(events, catalog, publisher, "secret"),
+        EventAdministrationService(events, showcase),
         StaticAdminProvider(),
     )
     response = await engine.handle(inbound(1, ENLIST))
@@ -387,12 +398,14 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
         )
     )
     event_repository = MemoryEventRepository(events)
-    tables = YandexDiskRegistrationRepository(disk_store)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    catalog = RegistrationCatalog(event_repository, tables, showcase)
     engine = ConversationEngine(
         users,
         event_repository,
-        RegistrationService(event_repository, tables, MemoryCommandPublisher(), "secret"),
-        EventAdministrationService(event_repository, tables),
+        RegistrationService(event_repository, catalog, MemoryCommandPublisher(), "secret"),
+        EventAdministrationService(event_repository, showcase),
         StaticAdminProvider(tg_ids={1}),
     )
     page = await engine.handle(inbound(1, "📋 Список игр"))

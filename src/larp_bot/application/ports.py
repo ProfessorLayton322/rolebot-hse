@@ -32,6 +32,8 @@ class EventRepository(Protocol):
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool: ...
 
+    async def mark_registrations_migrated(self, event_id: str, migrated_at: datetime) -> None: ...
+
     async def delete(self, event_id: str) -> bool: ...
 
     async def list_page(
@@ -43,12 +45,16 @@ class EventRepository(Protocol):
     ) -> Sequence[Event]: ...
 
 
-class RegistrationTableRepository(Protocol):
-    async def find_registration(self, event: Event, participant_key: str) -> Registration | None: ...
+class RegistrationRepository(Protocol):
+    async def get(self, event_id: str, participant_key: str) -> Registration | None: ...
+
+    async def list_for_event(self, event_id: str) -> Sequence[Registration]: ...
+
+    async def import_missing(self, registrations: Sequence[Registration]) -> None: ...
 
     async def enlist(
         self,
-        event: Event,
+        event_id: str,
         *,
         operation_id: str,
         participant_key: str,
@@ -60,7 +66,7 @@ class RegistrationTableRepository(Protocol):
 
     async def confirm(
         self,
-        event: Event,
+        event_id: str,
         *,
         operation_id: str,
         participant_key: str,
@@ -69,14 +75,22 @@ class RegistrationTableRepository(Protocol):
 
     async def update_character_wish(
         self,
-        event: Event,
+        event_id: str,
         *,
         operation_id: str,
         participant_key: str,
         character_wish: str,
     ) -> bool: ...
 
-    async def cancel(self, event: Event, *, operation_id: str, participant_key: str) -> bool: ...
+    async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool: ...
+
+    async def delete_for_event(self, event_id: str) -> None: ...
+
+
+class RegistrationShowcaseRepository(Protocol):
+    async def read_legacy_registrations(self, event: Event) -> Sequence[Registration]: ...
+
+    async def replace(self, event: Event, registrations: Sequence[Registration]) -> None: ...
 
     async def create_event_workbook(self, disk_path: str) -> str: ...
 

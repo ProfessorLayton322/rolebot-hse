@@ -154,6 +154,7 @@ class Event(StrictModel):
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
     status: EventStatus = EventStatus.CREATED
+    registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -163,9 +164,12 @@ class Registration(StrictModel):
     participant_key: str = Field(min_length=43, max_length=64)
     display_name: str
     wish_play: str
+    larp_experience: bool | None = None
+    crossplay: bool | None = None
     character_wish: str = ""
     attendance_status: AttendanceStatus = AttendanceStatus.WAITING
     last_operation_id: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 

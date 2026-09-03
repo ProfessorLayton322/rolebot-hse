@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import Protocol
@@ -12,7 +12,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
-from larp_bot.application.services import OperationNotAllowed, RegistrationNotFound
 from larp_bot.domain.models import AttendanceStatus, Event, Registration
 
 VISIBLE_HEADERS = (
@@ -24,14 +23,17 @@ VISIBLE_HEADERS = (
     "Пожелания по персонажу",
     "Текущий статус",
 )
-TECHNICAL_HEADERS = ("participant_key", "last_operation_id", "updated_at")
-ALL_HEADERS = VISIBLE_HEADERS + TECHNICAL_HEADERS
+# These layouts are read only while migrating deployments that used XLSX as
+# storage. Newly generated showcase files contain VISIBLE_HEADERS exclusively.
+STATEFUL_HEADERS = (*VISIBLE_HEADERS, "participant_key", "last_operation_id", "updated_at")
 LEGACY_HEADERS = (
     "Имя",
     "С кем хочу играть",
     "Пожелания по персонажу",
     "Статус",
-    *TECHNICAL_HEADERS,
+    "participant_key",
+    "last_operation_id",
+    "updated_at",
 )
 
 
@@ -73,6 +75,15 @@ def _bool_cell(value: bool | None) -> str:
     return "Да" if value else "Нет"
 
 
+def _parse_bool(value: object) -> bool | None:
+    text = _cell_text(value)
+    if text == "Да":
+        return True
+    if text == "Нет":
+        return False
+    return None
+
+
 def _format_sheet(sheet: Worksheet) -> None:
     for cell in sheet[1]:
         cell.font = Font(bold=True)
@@ -81,15 +92,25 @@ def _format_sheet(sheet: Worksheet) -> None:
     widths = (8, 30, 25, 26, 35, 45, 18)
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
-    for index in range(8, 11):
-        sheet.column_dimensions[sheet.cell(1, index).column_letter].hidden = True
 
 
-def empty_workbook_bytes() -> bytes:
+def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Регистрация"
-    sheet.append(ALL_HEADERS)
+    sheet.append(VISIBLE_HEADERS)
+    for number, registration in enumerate(registrations, start=1):
+        sheet.append(
+            (
+                number,
+                safe_cell(registration.display_name),
+                _bool_cell(registration.larp_experience),
+                _bool_cell(registration.crossplay),
+                safe_cell(registration.wish_play),
+                safe_cell(registration.character_wish),
+                registration.attendance_status.value,
+            )
+        )
     _format_sheet(sheet)
     output = BytesIO()
     workbook.save(output)
@@ -97,63 +118,49 @@ def empty_workbook_bytes() -> bytes:
     return output.getvalue()
 
 
-def _open_checked(content: bytes) -> tuple[Workbook, Worksheet]:
+def _legacy_registrations(event_id: str, content: bytes) -> list[Registration]:
     try:
-        workbook = load_workbook(BytesIO(content))
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=False)
     except Exception as exc:
         raise WorkbookIntegrityError("registration resource is not a valid XLSX") from exc
-    sheet = workbook.active
-    actual = tuple(_cell_text(sheet.cell(1, column).value) for column in range(1, sheet.max_column + 1))
-    if actual == LEGACY_HEADERS:
-        # Existing public workbooks are migrated in memory and persisted by the
-        # next mutation, so queued commands survive a rolling deployment.
-        sheet.insert_cols(1)
-        sheet.insert_cols(3, amount=2)
-        for column, header in enumerate(ALL_HEADERS, start=1):
-            sheet.cell(1, column, header)
-        for row in range(2, sheet.max_row + 1):
-            sheet.cell(row, 1, row - 1)
-            sheet.cell(row, 3, "Не указано")
-            sheet.cell(row, 4, "Не указано")
-        _format_sheet(sheet)
-    elif actual != ALL_HEADERS:
-        workbook.close()
-        raise WorkbookIntegrityError(
-            f"unexpected registration workbook schema: {json.dumps(actual, ensure_ascii=False)}"
-        )
-    return workbook, sheet
-
-
-def _serialize(workbook: Workbook) -> bytes:
-    output = BytesIO()
-    workbook.save(output)
-    workbook.close()
-    return output.getvalue()
-
-
-def _find_row(sheet: Worksheet, key: str) -> int | None:
-    for row in range(2, sheet.max_row + 1):
-        if _cell_text(sheet.cell(row, 8).value) == key:
-            return row
-    return None
-
-
-def _registration(event_id: str, sheet: Worksheet, row: int) -> Registration:
-    updated_raw = _cell_text(sheet.cell(row, 10).value)
     try:
-        updated = datetime.fromisoformat(updated_raw)
-    except ValueError:
-        updated = datetime.now(UTC)
-    return Registration(
-        event_id=event_id,
-        participant_key=_cell_text(sheet.cell(row, 8).value),
-        display_name=display_cell(sheet.cell(row, 2).value),
-        wish_play=display_cell(sheet.cell(row, 5).value),
-        character_wish=display_cell(sheet.cell(row, 6).value),
-        attendance_status=AttendanceStatus(_cell_text(sheet.cell(row, 7).value)),
-        last_operation_id=_cell_text(sheet.cell(row, 9).value),
-        updated_at=updated,
-    )
+        sheet = workbook.active
+        actual = tuple(_cell_text(cell.value) for cell in next(sheet.iter_rows(min_row=1, max_row=1)))
+        if actual not in {STATEFUL_HEADERS, LEGACY_HEADERS}:
+            raise WorkbookIntegrityError(
+                f"unexpected legacy registration workbook schema: {json.dumps(actual, ensure_ascii=False)}"
+            )
+        registrations: list[Registration] = []
+        stateful = actual == STATEFUL_HEADERS
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            key_index = 7 if stateful else 4
+            participant = _cell_text(row[key_index] if len(row) > key_index else None)
+            if not participant:
+                continue
+            updated_index = 9 if stateful else 6
+            updated_raw = _cell_text(row[updated_index] if len(row) > updated_index else None)
+            try:
+                updated_at = datetime.fromisoformat(updated_raw)
+            except ValueError:
+                updated_at = datetime.now(UTC)
+            registrations.append(
+                Registration(
+                    event_id=event_id,
+                    participant_key=participant,
+                    display_name=display_cell(row[1] if stateful else row[0]),
+                    larp_experience=_parse_bool(row[2]) if stateful else None,
+                    crossplay=_parse_bool(row[3]) if stateful else None,
+                    wish_play=display_cell(row[4] if stateful else row[1]),
+                    character_wish=display_cell(row[5] if stateful else row[2]),
+                    attendance_status=AttendanceStatus(_cell_text(row[6] if stateful else row[3])),
+                    last_operation_id=_cell_text(row[8] if stateful else row[5]),
+                    created_at=updated_at,
+                    updated_at=updated_at,
+                )
+            )
+        return registrations
+    finally:
+        workbook.close()
 
 
 class YandexDiskRestClient:
@@ -210,7 +217,6 @@ class YandexDiskRestClient:
         await self._upload(path, content, overwrite=False)
 
     async def replace(self, path: str, content: bytes) -> None:
-        # overwrite=true updates the same Disk resource; it does not delete/re-publish it.
         await self._upload(path, content, overwrite=True)
 
     async def publish(self, path: str) -> str:
@@ -235,12 +241,12 @@ class YandexDiskRestClient:
             response.raise_for_status()
 
 
-class YandexDiskRegistrationRepository:
+class YandexDiskShowcaseRepository:
     def __init__(self, store: DiskObjectStore) -> None:
         self.store = store
 
     async def create_event_workbook(self, disk_path: str) -> str:
-        await self.store.upload_new(disk_path, empty_workbook_bytes())
+        await self.store.upload_new(disk_path, showcase_workbook_bytes())
         try:
             return await self.store.publish(disk_path)
         except Exception:
@@ -250,111 +256,10 @@ class YandexDiskRegistrationRepository:
     async def delete_event_workbook(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
 
-    async def find_registration(self, event: Event, participant_key: str) -> Registration | None:
+    async def read_legacy_registrations(self, event: Event) -> Sequence[Registration]:
         content = await self.store.download(event.disk_resource_path)
-        workbook, sheet = await asyncio.to_thread(_open_checked, content)
-        try:
-            row = _find_row(sheet, participant_key)
-            return None if row is None else _registration(event.event_id, sheet, row)
-        finally:
-            workbook.close()
+        return await asyncio.to_thread(_legacy_registrations, event.event_id, content)
 
-    async def _mutate(
-        self,
-        event: Event,
-        participant_key: str,
-        operation_id: str,
-        mutation: Callable[[Worksheet, int | None], None],
-    ) -> bool:
-        content = await self.store.download(event.disk_resource_path)
-        workbook, sheet = await asyncio.to_thread(_open_checked, content)
-        row = _find_row(sheet, participant_key)
-        if row is not None and _cell_text(sheet.cell(row, 9).value) == operation_id:
-            workbook.close()
-            return False
-        try:
-            mutation(sheet, row)
-            new_row = _find_row(sheet, participant_key)
-            if new_row is None:
-                raise WorkbookIntegrityError("mutation did not produce a participant row")
-            sheet.cell(new_row, 9, operation_id)
-            sheet.cell(new_row, 10, datetime.now(UTC).isoformat())
-            serialized = await asyncio.to_thread(_serialize, workbook)
-        except Exception:
-            workbook.close()
-            raise
-        await self.store.replace(event.disk_resource_path, serialized)
-        return True
-
-    async def enlist(
-        self,
-        event: Event,
-        *,
-        operation_id: str,
-        participant_key: str,
-        display_name: str,
-        wish_play: str,
-        larp_experience: bool | None = None,
-        crossplay: bool | None = None,
-    ) -> bool:
-        def mutation(sheet: Worksheet, row: int | None) -> None:
-            target = row or sheet.max_row + 1
-            existing_status = AttendanceStatus(_cell_text(sheet.cell(target, 7).value)) if row else None
-            sheet.cell(target, 1, target - 1)
-            sheet.cell(target, 2, safe_cell(display_name))
-            sheet.cell(target, 3, _bool_cell(larp_experience))
-            sheet.cell(target, 4, _bool_cell(crossplay))
-            sheet.cell(target, 5, safe_cell(wish_play))
-            if row is None:
-                sheet.cell(target, 6, "")
-                sheet.cell(target, 7, AttendanceStatus.WAITING.value)
-                sheet.cell(target, 8, participant_key)
-            elif existing_status is AttendanceStatus.CANCELLED:
-                sheet.cell(target, 7, AttendanceStatus.WAITING.value)
-
-        return await self._mutate(event, participant_key, operation_id, mutation)
-
-    async def confirm(
-        self,
-        event: Event,
-        *,
-        operation_id: str,
-        participant_key: str,
-        character_wish: str,
-    ) -> bool:
-        def mutation(sheet: Worksheet, row: int | None) -> None:
-            if row is None:
-                raise RegistrationNotFound("registration row does not exist")
-            # Both values are written to the local workbook before one replacement upload.
-            sheet.cell(row, 6, safe_cell(character_wish))
-            sheet.cell(row, 7, AttendanceStatus.CONFIRMED.value)
-
-        return await self._mutate(event, participant_key, operation_id, mutation)
-
-    async def update_character_wish(
-        self,
-        event: Event,
-        *,
-        operation_id: str,
-        participant_key: str,
-        character_wish: str,
-    ) -> bool:
-        def mutation(sheet: Worksheet, row: int | None) -> None:
-            if row is None:
-                raise RegistrationNotFound("registration row does not exist")
-            status = AttendanceStatus(_cell_text(sheet.cell(row, 7).value))
-            if status is AttendanceStatus.CANCELLED:
-                raise OperationNotAllowed("character wish cannot be edited while cancelled")
-            if status is AttendanceStatus.WAITING and not _cell_text(sheet.cell(row, 6).value):
-                raise OperationNotAllowed("first character wish must be supplied with confirmation")
-            sheet.cell(row, 6, safe_cell(character_wish))
-
-        return await self._mutate(event, participant_key, operation_id, mutation)
-
-    async def cancel(self, event: Event, *, operation_id: str, participant_key: str) -> bool:
-        def mutation(sheet: Worksheet, row: int | None) -> None:
-            if row is None:
-                raise RegistrationNotFound("registration row does not exist")
-            sheet.cell(row, 7, AttendanceStatus.CANCELLED.value)
-
-        return await self._mutate(event, participant_key, operation_id, mutation)
+    async def replace(self, event: Event, registrations: Sequence[Registration]) -> None:
+        content = await asyncio.to_thread(showcase_workbook_bytes, registrations)
+        await self.store.replace(event.disk_resource_path, content)

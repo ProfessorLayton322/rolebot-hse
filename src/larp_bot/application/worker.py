@@ -42,7 +42,7 @@ class OrderedWorker:
             text=text,
         )
         # Mark only after the transport accepted the message. If delivery fails, the FIFO
-        # message remains retryable and the already-authoritative workbook mutation is not undone.
+        # message remains retryable and the already-authoritative YDB mutation is not undone.
         await self.users.claim_delivery(command.platform, command.platform_user_id, command.operation_id)
 
     async def run(self) -> int:

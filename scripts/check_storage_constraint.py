@@ -7,14 +7,14 @@ ROOT = Path(__file__).resolve().parents[1]
 terraform = "\n".join(path.read_text() for path in (ROOT / "infra/terraform").glob("*.tf"))
 resource_pattern = re.compile(r'resource\s+"yandex_ydb_table"\s+"([^"]+)"\s*\{')
 resources = resource_pattern.findall(terraform)
-if sorted(resources) != ["events", "tg_users", "vk_users"]:
-    raise SystemExit(
-        f"Exactly three yandex_ydb_table resources are allowed: tg_users, vk_users, events; found {resources}"
-    )
+if sorted(resources) != ["events", "registrations", "tg_users", "vk_users"]:
+    raise SystemExit(f"Expected tg_users, vk_users, events, and registrations YDB tables; found {resources}")
 
 path_pattern = re.compile(r'\bpath\s*=\s*"([^"]+)"')
 ydb_file = (ROOT / "infra/terraform/ydb.tf").read_text()
-paths = [value for value in path_pattern.findall(ydb_file) if value in {"tg_users", "vk_users", "events"}]
-if sorted(paths) != ["events", "tg_users", "vk_users"]:
+paths = [
+    value for value in path_pattern.findall(ydb_file) if value in {"tg_users", "vk_users", "events", "registrations"}
+]
+if sorted(paths) != ["events", "registrations", "tg_users", "vk_users"]:
     raise SystemExit(f"Unexpected application YDB paths: {paths}")
-print("YDB storage constraint OK: tg_users, vk_users, events")
+print("YDB storage constraint OK: tg_users, vk_users, events, registrations")

@@ -6,17 +6,16 @@ locals {
     # The Python YDB driver requires the TLS scheme. ydb_api_endpoint contains
     # only host:port; passing it through unchanged makes every driver wait time
     # out before a real bot update can be handled.
-    YDB_ENDPOINT              = "grpcs://${yandex_ydb_database_serverless.application.ydb_api_endpoint}"
-    YDB_DATABASE              = yandex_ydb_database_serverless.application.database_path
-    YMQ_ENDPOINT              = "https://message-queue.api.cloud.yandex.net"
-    YMQ_FIFO_URL              = yandex_message_queue.registration_commands.id
-    YMQ_KICK_URL              = yandex_message_queue.worker_kicks.id
-    RUNTIME_CONFIG_URL        = local.runtime_config_url
-    RUNTIME_CONFIG_AUDIENCE   = local.runtime_config_url
-    TELEGRAM_EGRESS_URL       = local.telegram_egress_url
-    INLINE_SAFETY_MARGIN_MS   = "100"
-    WORKBOOK_SCAN_CONCURRENCY = "3"
-    APP_LOG_LEVEL             = "INFO"
+    YDB_ENDPOINT            = "grpcs://${yandex_ydb_database_serverless.application.ydb_api_endpoint}"
+    YDB_DATABASE            = yandex_ydb_database_serverless.application.database_path
+    YMQ_ENDPOINT            = "https://message-queue.api.cloud.yandex.net"
+    YMQ_FIFO_URL            = yandex_message_queue.registration_commands.id
+    YMQ_KICK_URL            = yandex_message_queue.worker_kicks.id
+    RUNTIME_CONFIG_URL      = local.runtime_config_url
+    RUNTIME_CONFIG_AUDIENCE = local.runtime_config_url
+    TELEGRAM_EGRESS_URL     = local.telegram_egress_url
+    INLINE_SAFETY_MARGIN_MS = "100"
+    APP_LOG_LEVEL           = "INFO"
   }
 }
 
@@ -66,7 +65,7 @@ resource "yandex_function" "gateway" {
 
 resource "yandex_function" "ordered_worker" {
   name               = "${var.project_name}-ordered-worker"
-  description        = "Bounded FIFO drainer and XLSX mutation worker"
+  description        = "Bounded FIFO drainer, YDB registration writer, and XLSX projector"
   folder_id          = var.yandex_folder_id
   runtime            = "python312"
   entrypoint         = "ordered_worker.handler"

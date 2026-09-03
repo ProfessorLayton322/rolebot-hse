@@ -1,3 +1,3 @@
-from .repository import YandexDiskRegistrationRepository
+from .repository import YandexDiskShowcaseRepository
 
-__all__ = ["YandexDiskRegistrationRepository"]
+__all__ = ["YandexDiskShowcaseRepository"]

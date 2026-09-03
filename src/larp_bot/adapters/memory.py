@@ -5,11 +5,13 @@ from copy import deepcopy
 from datetime import datetime
 
 from larp_bot.domain.models import (
+    AttendanceStatus,
     Button,
     Event,
     EventStatus,
     OrderedRegistrationCommand,
     Platform,
+    Registration,
     User,
 )
 
@@ -59,6 +61,11 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 
+    async def mark_registrations_migrated(self, event_id: str, migrated_at: datetime) -> None:
+        event = self.rows[event_id]
+        event.registrations_migrated_at = migrated_at
+        event.updated_at = migrated_at
+
     async def delete(self, event_id: str) -> bool:
         return self.rows.pop(event_id, None) is not None
 
@@ -76,6 +83,111 @@ class MemoryEventRepository:
         if after is not None:
             values = [event for event in values if (event.created_at, event.event_id) > after]
         return deepcopy(values[:limit])
+
+
+class MemoryRegistrationRepository:
+    def __init__(self, registrations: Sequence[Registration] = ()) -> None:
+        self.rows = {
+            (registration.event_id, registration.participant_key): deepcopy(registration)
+            for registration in registrations
+        }
+
+    async def get(self, event_id: str, participant_key: str) -> Registration | None:
+        value = self.rows.get((event_id, participant_key))
+        return None if value is None else deepcopy(value)
+
+    async def list_for_event(self, event_id: str) -> Sequence[Registration]:
+        values = [value for (stored_event_id, _), value in self.rows.items() if stored_event_id == event_id]
+        return deepcopy(sorted(values, key=lambda item: (item.created_at, item.participant_key)))
+
+    async def import_missing(self, registrations: Sequence[Registration]) -> None:
+        for registration in registrations:
+            self.rows.setdefault(
+                (registration.event_id, registration.participant_key),
+                deepcopy(registration),
+            )
+
+    async def enlist(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        display_name: str,
+        wish_play: str,
+        larp_experience: bool | None = None,
+        crossplay: bool | None = None,
+    ) -> bool:
+        key = (event_id, participant_key)
+        registration = self.rows.get(key)
+        if registration is not None and registration.last_operation_id == operation_id:
+            return False
+        if registration is None:
+            registration = Registration(
+                event_id=event_id,
+                participant_key=participant_key,
+                display_name=display_name,
+                wish_play=wish_play,
+                larp_experience=larp_experience,
+                crossplay=crossplay,
+            )
+            self.rows[key] = registration
+        else:
+            registration.display_name = display_name
+            registration.wish_play = wish_play
+            registration.larp_experience = larp_experience
+            registration.crossplay = crossplay
+            if registration.attendance_status is AttendanceStatus.CANCELLED:
+                registration.attendance_status = AttendanceStatus.WAITING
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+        return True
+
+    async def confirm(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        character_wish: str,
+    ) -> bool:
+        registration = self.rows[(event_id, participant_key)]
+        if registration.last_operation_id == operation_id:
+            return False
+        registration.character_wish = character_wish
+        registration.attendance_status = AttendanceStatus.CONFIRMED
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+        return True
+
+    async def update_character_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        character_wish: str,
+    ) -> bool:
+        registration = self.rows[(event_id, participant_key)]
+        if registration.last_operation_id == operation_id:
+            return False
+        registration.character_wish = character_wish
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+        return True
+
+    async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool:
+        registration = self.rows[(event_id, participant_key)]
+        if registration.last_operation_id == operation_id:
+            return False
+        registration.attendance_status = AttendanceStatus.CANCELLED
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+        return True
+
+    async def delete_for_event(self, event_id: str) -> None:
+        for key in [key for key in self.rows if key[0] == event_id]:
+            del self.rows[key]
 
 
 class MemoryCommandPublisher:

@@ -9,10 +9,12 @@ from typing import Any, TypeVar, cast
 import ydb
 
 from larp_bot.domain.models import (
+    AttendanceStatus,
     Event,
     EventStatus,
     PassDetails,
     Platform,
+    Registration,
     TelegramUser,
     User,
     VkUser,
@@ -91,6 +93,27 @@ class YdbExecutor:
                 {"$user_id": user_id, "$operation_id": operation_id},
                 commit_tx=True,
             )
+            return True
+
+        return cast(bool, await asyncio.to_thread(self.pool.retry_operation_sync, operation))
+
+    async def insert_if_absent(
+        self,
+        *,
+        select_yql: str,
+        select_params: dict[str, Any],
+        insert_yql: str,
+        insert_params: dict[str, Any],
+    ) -> bool:
+        """Serialize a migration insert against concurrent normal mutations."""
+
+        def operation(session: Any) -> bool:
+            transaction = session.transaction(ydb.SerializableReadWrite()).begin()
+            rows = _rows(transaction.execute(session.prepare(select_yql), select_params))
+            if rows:
+                transaction.commit()
+                return False
+            transaction.execute(session.prepare(insert_yql), insert_params, commit_tx=True)
             return True
 
         return cast(bool, await asyncio.to_thread(self.pool.retry_operation_sync, operation))
@@ -245,6 +268,9 @@ class YdbEventRepository:
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
             status=status,
+            registrations_migrated_at=(
+                _dt(row["registrations_migrated_at"]) if row.get("registrations_migrated_at") is not None else None
+            ),
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
         )
@@ -254,7 +280,7 @@ class YdbEventRepository:
             """
             DECLARE $event_id AS Utf8;
             SELECT event_id, name, disk_resource_path, public_registration_url,
-                   status, created_at, updated_at
+                   status, registrations_migrated_at, created_at, updated_at
             FROM `events` WHERE event_id = $event_id;
             """,
             {"$event_id": event_id},
@@ -268,13 +294,14 @@ class YdbEventRepository:
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
+            DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             INSERT INTO `events` (
                 event_id, name, disk_resource_path, public_registration_url,
-                status, created_at, updated_at
+                status, registrations_migrated_at, created_at, updated_at
             ) VALUES (
                 $event_id, $name, $disk_resource_path, $public_url,
-                $status, $created_at, $updated_at
+                $status, $registrations_migrated_at, $created_at, $updated_at
             );
             """,
             {
@@ -283,6 +310,7 @@ class YdbEventRepository:
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
                 "$status": event.status.value,
+                "$registrations_migrated_at": event.registrations_migrated_at,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
             },
@@ -308,6 +336,17 @@ class YdbEventRepository:
             },
         )
         return True
+
+    async def mark_registrations_migrated(self, event_id: str, migrated_at: datetime) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $migrated_at AS Timestamp;
+            UPDATE `events`
+            SET registrations_migrated_at = $migrated_at, updated_at = $migrated_at
+            WHERE event_id = $event_id;
+            """,
+            {"$event_id": event_id, "$migrated_at": migrated_at},
+        )
 
     async def delete(self, event_id: str) -> bool:
         exists = await self.get(event_id)
@@ -350,10 +389,272 @@ class YdbEventRepository:
         query = f"""
             {" ".join(declarations)}
             SELECT event_id, name, disk_resource_path, public_registration_url,
-                   status, created_at, updated_at
+                   status, registrations_migrated_at, created_at, updated_at
             FROM `events` {where}
             ORDER BY created_at ASC, event_id ASC
             LIMIT $limit;
         """
         rows = await self.db.query(query, params, read_only=True)
         return [self._from_row(row) for row in rows]
+
+
+class YdbRegistrationRepository:
+    COLUMNS = """
+        event_id, participant_key, display_name, wish_play, larp_experience,
+        crossplay, character_wish, attendance_status, last_operation_id,
+        created_at, updated_at
+    """
+    INSERT = """
+        DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+        DECLARE $display_name AS Utf8; DECLARE $wish_play AS Utf8;
+        DECLARE $larp_experience AS Optional<Bool>; DECLARE $crossplay AS Optional<Bool>;
+        DECLARE $character_wish AS Utf8; DECLARE $attendance_status AS Utf8;
+        DECLARE $last_operation_id AS Utf8; DECLARE $created_at AS Timestamp;
+        DECLARE $updated_at AS Timestamp;
+        INSERT INTO `registrations` (
+            event_id, participant_key, display_name, wish_play, larp_experience,
+            crossplay, character_wish, attendance_status, last_operation_id,
+            created_at, updated_at
+        ) VALUES (
+            $event_id, $participant_key, $display_name, $wish_play, $larp_experience,
+            $crossplay, $character_wish, $attendance_status, $last_operation_id,
+            $created_at, $updated_at
+        );
+    """
+
+    def __init__(self, executor: YdbExecutor) -> None:
+        self.db = executor
+
+    @staticmethod
+    def _from_row(row: dict[str, Any]) -> Registration:
+        return Registration(
+            event_id=row["event_id"],
+            participant_key=row["participant_key"],
+            display_name=row["display_name"],
+            wish_play=row["wish_play"],
+            larp_experience=row.get("larp_experience"),
+            crossplay=row.get("crossplay"),
+            character_wish=row.get("character_wish") or "",
+            attendance_status=AttendanceStatus(row["attendance_status"]),
+            last_operation_id=row.get("last_operation_id") or "",
+            created_at=_dt(row["created_at"]),
+            updated_at=_dt(row["updated_at"]),
+        )
+
+    async def get(self, event_id: str, participant_key: str) -> Registration | None:
+        rows = await self.db.query(
+            f"""
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            SELECT {self.COLUMNS} FROM `registrations`
+            WHERE event_id = $event_id AND participant_key = $participant_key;
+            """,
+            {"$event_id": event_id, "$participant_key": participant_key},
+            read_only=True,
+        )
+        return None if not rows else self._from_row(rows[0])
+
+    async def list_for_event(self, event_id: str) -> Sequence[Registration]:
+        rows = await self.db.query(
+            f"""
+            DECLARE $event_id AS Utf8;
+            SELECT {self.COLUMNS} FROM `registrations`
+            WHERE event_id = $event_id
+            ORDER BY event_id, participant_key;
+            """,
+            {"$event_id": event_id},
+            read_only=True,
+        )
+        registrations = [self._from_row(row) for row in rows]
+        return sorted(registrations, key=lambda item: (item.created_at, item.participant_key))
+
+    async def _save(self, registration: Registration) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DECLARE $display_name AS Utf8; DECLARE $wish_play AS Utf8;
+            DECLARE $larp_experience AS Optional<Bool>; DECLARE $crossplay AS Optional<Bool>;
+            DECLARE $character_wish AS Utf8; DECLARE $attendance_status AS Utf8;
+            DECLARE $last_operation_id AS Utf8; DECLARE $created_at AS Timestamp;
+            DECLARE $updated_at AS Timestamp;
+            UPSERT INTO `registrations` (
+                event_id, participant_key, display_name, wish_play, larp_experience,
+                crossplay, character_wish, attendance_status, last_operation_id,
+                created_at, updated_at
+            ) VALUES (
+                $event_id, $participant_key, $display_name, $wish_play, $larp_experience,
+                $crossplay, $character_wish, $attendance_status, $last_operation_id,
+                $created_at, $updated_at
+            );
+            """,
+            {
+                "$event_id": registration.event_id,
+                "$participant_key": registration.participant_key,
+                "$display_name": registration.display_name,
+                "$wish_play": registration.wish_play,
+                "$larp_experience": registration.larp_experience,
+                "$crossplay": registration.crossplay,
+                "$character_wish": registration.character_wish,
+                "$attendance_status": registration.attendance_status.value,
+                "$last_operation_id": registration.last_operation_id,
+                "$created_at": registration.created_at,
+                "$updated_at": registration.updated_at,
+            },
+        )
+
+    @staticmethod
+    def _params(registration: Registration) -> dict[str, Any]:
+        return {
+            "$event_id": registration.event_id,
+            "$participant_key": registration.participant_key,
+            "$display_name": registration.display_name,
+            "$wish_play": registration.wish_play,
+            "$larp_experience": registration.larp_experience,
+            "$crossplay": registration.crossplay,
+            "$character_wish": registration.character_wish,
+            "$attendance_status": registration.attendance_status.value,
+            "$last_operation_id": registration.last_operation_id,
+            "$created_at": registration.created_at,
+            "$updated_at": registration.updated_at,
+        }
+
+    async def import_missing(self, registrations: Sequence[Registration]) -> None:
+        for registration in registrations:
+            await self.db.insert_if_absent(
+                select_yql="""
+                    DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+                    SELECT participant_key FROM `registrations`
+                    WHERE event_id = $event_id AND participant_key = $participant_key;
+                """,
+                select_params={
+                    "$event_id": registration.event_id,
+                    "$participant_key": registration.participant_key,
+                },
+                insert_yql=self.INSERT,
+                insert_params=self._params(registration),
+            )
+
+    async def enlist(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        display_name: str,
+        wish_play: str,
+        larp_experience: bool | None = None,
+        crossplay: bool | None = None,
+    ) -> bool:
+        registration = await self.get(event_id, participant_key)
+        if registration is not None and registration.last_operation_id == operation_id:
+            return False
+        if registration is None:
+            registration = Registration(
+                event_id=event_id,
+                participant_key=participant_key,
+                display_name=display_name,
+                wish_play=wish_play,
+                larp_experience=larp_experience,
+                crossplay=crossplay,
+            )
+        else:
+            registration.display_name = display_name
+            registration.wish_play = wish_play
+            registration.larp_experience = larp_experience
+            registration.crossplay = crossplay
+            if registration.attendance_status is AttendanceStatus.CANCELLED:
+                registration.attendance_status = AttendanceStatus.WAITING
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(UTC)
+        await self._save(registration)
+        return True
+
+    async def confirm(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        character_wish: str,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DECLARE $operation_id AS Utf8; DECLARE $character_wish AS Utf8;
+            DECLARE $attendance_status AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET character_wish = $character_wish,
+                attendance_status = $attendance_status,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $participant_key
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$character_wish": character_wish,
+                "$attendance_status": AttendanceStatus.CONFIRMED.value,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def update_character_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        character_wish: str,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DECLARE $operation_id AS Utf8; DECLARE $character_wish AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET character_wish = $character_wish,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $participant_key
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$character_wish": character_wish,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DECLARE $operation_id AS Utf8; DECLARE $attendance_status AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET attendance_status = $attendance_status,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $participant_key
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$attendance_status": AttendanceStatus.CANCELLED.value,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def delete_for_event(self, event_id: str) -> None:
+        await self.db.query(
+            "DECLARE $event_id AS Utf8; DELETE FROM `registrations` WHERE event_id = $event_id;",
+            {"$event_id": event_id},
+        )
