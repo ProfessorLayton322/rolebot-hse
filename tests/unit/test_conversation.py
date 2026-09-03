@@ -48,13 +48,21 @@ from larp_bot.domain.models import (
 from tests.conftest import MemoryDiskStore
 
 
-def inbound(update: int, value: str, *, callback: bool = False, user_id: int = 1) -> InboundMessage:
+def inbound(
+    update: int,
+    value: str,
+    *,
+    callback: bool = False,
+    user_id: int = 1,
+    telegram_username: str | None = None,
+) -> InboundMessage:
     return InboundMessage(
         identity=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id),
         update_id=str(update),
         text="" if callback else value,
         callback=value if callback else None,
         chat_id=user_id,
+        telegram_username=telegram_username,
     )
 
 
@@ -100,7 +108,7 @@ async def test_enlist_never_asks_character_wishes(disk_store: MemoryDiskStore, e
     responses = [await engine.handle(inbound(1, ENLIST))]
     responses.append(await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True)))
     responses.append(await engine.handle(inbound(3, "Алиса")))
-    responses.append(await engine.handle(inbound(4, "enlist:confirm", callback=True)))
+    responses.append(await engine.handle(inbound(4, "enlist:confirm", callback=True, telegram_username="ivan_player")))
     prompts_before_enqueue = " ".join(response.text.casefold() for response in responses[:-1])
     assert "пожелания по персонажу" not in prompts_before_enqueue
     assert "не хотел" not in prompts_before_enqueue
@@ -111,6 +119,8 @@ async def test_enlist_never_asks_character_wishes(disk_store: MemoryDiskStore, e
     assert not hasattr(queued.payload, "character_wish")
     assert queued.payload.larp_experience is True
     assert queued.payload.crossplay is True
+    assert queued.payload.vk_profile == "https://vk.com/id1"
+    assert queued.payload.telegram_profile == "https://t.me/ivan_player"
     assert responses[-1].deferred
 
 
@@ -253,6 +263,8 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     assert enlist.operation is Operation.ENLIST
     assert isinstance(enlist.payload, EnlistPayload)
     assert enlist.participant_key is not None
+    assert enlist.payload.vk_profile == "https://vk.com/id7"
+    assert enlist.payload.telegram_profile is None
     await tables.enlist(
         event.event_id,
         operation_id=enlist.operation_id,

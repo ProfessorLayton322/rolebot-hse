@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from larp_bot.adapters.memory import MemoryDeferredTransport
+from larp_bot.adapters.telegram import parse_telegram_update
 from larp_bot.domain.models import BotResponse, Button
 from larp_bot.domain.security import sign_request
 from larp_bot.functions.gateway.handler import (
@@ -50,6 +51,21 @@ def telegram_body() -> bytes:
             "message": {"from": {"id": 1}, "chat": {"id": 1}, "text": "/start"},
         }
     ).encode()
+
+
+def test_telegram_username_is_collected_when_available() -> None:
+    inbound = parse_telegram_update(
+        {
+            "update_id": 10,
+            "callback_query": {
+                "from": {"id": 1, "username": "ivan_player"},
+                "message": {"chat": {"id": 1}},
+                "data": "enlist:confirm",
+            },
+        }
+    )
+
+    assert inbound.telegram_username == "ivan_player"
 
 
 def signed_event(body: bytes, *, deadline_ms: int, timestamp: int | None = None) -> dict[str, Any]:

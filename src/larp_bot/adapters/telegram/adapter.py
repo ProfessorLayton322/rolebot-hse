@@ -28,6 +28,7 @@ def parse_telegram_update(update: dict[str, Any]) -> InboundMessage:
             update_id=str(update_id),
             callback=data,
             chat_id=chat_id,
+            telegram_username=sender.get("username"),
         )
     message = update.get("message")
     if not isinstance(message, dict):
@@ -44,6 +45,7 @@ def parse_telegram_update(update: dict[str, Any]) -> InboundMessage:
         update_id=str(update_id),
         text=message_text,
         chat_id=chat_id,
+        telegram_username=sender.get("username"),
     )
 
 

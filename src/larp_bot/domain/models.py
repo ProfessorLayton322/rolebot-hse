@@ -166,6 +166,8 @@ class Registration(StrictModel):
     event_id: str
     participant_key: str = Field(min_length=43, max_length=64)
     display_name: str
+    vk_profile: str = ""
+    telegram_profile: str | None = None
     wish_play: str
     larp_experience: bool | None = None
     crossplay: bool | None = None
@@ -183,6 +185,8 @@ class EnlistPayload(StrictModel):
     # readable while the worker is being rolled forward.
     larp_experience: bool | None = None
     crossplay: bool | None = None
+    vk_profile: str = ""
+    telegram_profile: str | None = None
 
 
 class CharacterWishPayload(StrictModel):
@@ -300,6 +304,7 @@ class InboundMessage(StrictModel):
     callback: str | None = None
     chat_id: int | None = None
     peer_id: int | None = None
+    telegram_username: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_]{5,32}$")
 
 
 EnlistPayloadT = Annotated[EnlistPayload, Field()]

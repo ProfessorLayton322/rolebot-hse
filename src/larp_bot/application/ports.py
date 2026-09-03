@@ -66,6 +66,8 @@ class RegistrationRepository(Protocol):
         wish_play: str,
         larp_experience: bool | None = None,
         crossplay: bool | None = None,
+        vk_profile: str = "",
+        telegram_profile: str | None = None,
     ) -> bool: ...
 
     async def confirm(

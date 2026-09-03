@@ -83,8 +83,38 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
 
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
-        assert workbook.active["C2"].value == "Да"
-        assert workbook.active["D2"].value == "Нет"
+        assert workbook.active["C2"].value == "https://vk.com/player"
+        assert workbook.active["D2"].value is None
+        assert workbook.active["E2"].value == "Да"
+        assert workbook.active["F2"].value == "Нет"
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_enlist_persists_both_profiles_in_showcase(disk_store: MemoryDiskStore, event: Event) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    payload = EnlistPayload(
+        display_name="Player",
+        wish_play="A",
+        vk_profile="https://vk.com/player",
+        telegram_profile="https://t.me/player",
+    )
+
+    await mutations.apply(command(event, Operation.ENLIST, payload))
+
+    registration = await tables.get(event.event_id, "a" * 43)
+    assert registration is not None
+    assert registration.vk_profile == "https://vk.com/player"
+    assert registration.telegram_profile == "https://t.me/player"
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert workbook.active["C2"].value == "https://vk.com/player"
+        assert workbook.active["D2"].value == "https://t.me/player"
     finally:
         workbook.close()
 

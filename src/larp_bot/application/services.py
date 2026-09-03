@@ -420,11 +420,19 @@ class OrderedMutationService:
             assert isinstance(command.payload, EnlistPayload)
             larp_experience = command.payload.larp_experience
             crossplay = command.payload.crossplay
-            if (larp_experience is None or crossplay is None) and self.users is not None:
+            vk_profile = command.payload.vk_profile
+            telegram_profile = command.payload.telegram_profile
+            if self.users is not None and (larp_experience is None or crossplay is None or not vk_profile):
                 user = await self.users.get(command.platform, command.platform_user_id)
                 if user is not None:
                     larp_experience = user.larp_experience
                     crossplay = user.crossplay
+                    if isinstance(user, TelegramUser):
+                        vk_profile = user.vk_url or ""
+                    else:
+                        vk_profile = f"https://vk.com/id{user.vk_id}"
+                        if telegram_profile is None and user.telegram_handle is not None:
+                            telegram_profile = f"https://t.me/{user.telegram_handle.removeprefix('@')}"
             await self.catalog.registrations.enlist(
                 event.event_id,
                 operation_id=command.operation_id,
@@ -433,6 +441,8 @@ class OrderedMutationService:
                 wish_play=command.payload.wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,
+                vk_profile=vk_profile,
+                telegram_profile=telegram_profile,
             )
             await self.catalog.refresh(event)
             return "Заявка на игру записана"

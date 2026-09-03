@@ -125,6 +125,8 @@ async def test_ydb_enlist_uses_composite_key_and_persists_showcase_fields() -> N
         wish_play="Anyone",
         larp_experience=True,
         crossplay=False,
+        vk_profile="https://vk.com/player",
+        telegram_profile="https://t.me/player",
     )
 
     lookup, upsert = executor.queries
@@ -133,6 +135,8 @@ async def test_ydb_enlist_uses_composite_key_and_persists_showcase_fields() -> N
     assert upsert[1]["$event_id"] == "event-a1"
     assert upsert[1]["$larp_experience"] is True
     assert upsert[1]["$crossplay"] is False
+    assert upsert[1]["$vk_profile"] == "https://vk.com/player"
+    assert upsert[1]["$telegram_profile"] == "https://t.me/player"
 
 
 @pytest.mark.asyncio

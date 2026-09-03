@@ -572,6 +572,13 @@ class ConversationEngine:
                 return BotResponse(text="Нажмите «Подтвердить» или «Отмена».")
             context = user.dialog_context.copy()
             await self._clear(user)
+            if isinstance(user, TelegramUser):
+                vk_profile = user.vk_url or ""
+                telegram_handle = normalize_telegram_handle(message.telegram_username)
+            else:
+                vk_profile = f"https://vk.com/id{user.vk_id}"
+                telegram_handle = user.telegram_handle
+            telegram_profile = None if telegram_handle is None else f"https://t.me/{telegram_handle.removeprefix('@')}"
             await self.registrations.enqueue(
                 operation=Operation.ENLIST,
                 event_id=str(context["event_id"]),
@@ -582,6 +589,8 @@ class ConversationEngine:
                     wish_play=str(context["wish_play"]),
                     larp_experience=user.larp_experience,
                     crossplay=user.crossplay,
+                    vk_profile=vk_profile,
+                    telegram_profile=telegram_profile,
                 ),
                 reply_context=ReplyContext(
                     chat_id=message.chat_id,
