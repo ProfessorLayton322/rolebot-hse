@@ -97,12 +97,12 @@ class RegistrationCatalog:
         rows = await self.registrations.list_for_event(event.event_id)
         await self.showcase.replace(event, rows)
 
+    async def archive(self, event: Event) -> None:
+        await self.events.set_status(event.event_id, EventStatus.CLOSED)
+
     async def delete(self, event: Event) -> None:
-        await self.showcase.delete_event_workbook(event.disk_resource_path)
-        pass_table_path = event.pass_table_resource_path or f"disk:/larp-bot/passes/{event.event_id}.xlsx"
-        await self.showcase.delete_pass_table(pass_table_path)
-        await self.registrations.delete_for_event(event.event_id)
-        await self.events.delete(event.event_id)
+        """Archive legacy delete requests without removing permanent game data."""
+        await self.archive(event)
 
 
 class RegistrationService:
@@ -437,7 +437,7 @@ class OrderedMutationService:
         event = await self.events.get(command.event_id)
         if event is None:
             if command.operation is Operation.DELETE_EVENT:
-                return "Игра и таблицы уже удалены"
+                return "Игра уже отсутствует в постоянном списке"
             raise EventNotFound("Игра уже удалена или не существует")
 
         status_operations = {
@@ -462,8 +462,12 @@ class OrderedMutationService:
             await self.events.set_status(event.event_id, status)
             return message
         if command.operation is Operation.DELETE_EVENT:
-            await self.catalog.delete(event)
-            return "Игра и таблицы удалены"
+            # DELETE_EVENT can still be present in FIFO or in a stale admin
+            # keyboard from an older deployment. Treat it as archival so a
+            # published workbook, its registrations, and its permanent game
+            # entry can never be removed by an old command.
+            await self.catalog.archive(event)
+            return "Игра архивирована; таблицы и записи сохранены"
 
         assert command.participant_key is not None
         await self.catalog.ensure_migrated(event)

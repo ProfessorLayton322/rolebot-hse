@@ -104,7 +104,7 @@ The composite registration key makes exact participant lookups constant-cost and
 
 ### XLSX
 
-Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once, published once, and overwritten in place from the current YDB registration rows after ordinary mutations, preserving the public URL. It is a disposable read-only showcase, never application state.
+Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once, published once, and overwritten in place from the current YDB registration rows after ordinary mutations, preserving the public URL. Workbooks attached to successfully created games are permanent read-only showcases: archiving a game closes registration but retains the game record, registration rows, workbook, and public URL.
 
 Visible columns:
 
@@ -132,7 +132,7 @@ Every profile collects the player's Cyrillic surname and name as separate valida
 
 Russian citizens provide only Cyrillic name fields; their Latin cells are blank. A missing Cyrillic patronym is stored as `-`. Foreign citizens also provide Latin name fields, and a missing patronym is `-` in both scripts.
 
-Admins can create a pass table once for any game and list all stored pass-table links. Creation takes a one-time snapshot containing only YDB registrations in `Подтверждено` whose current YDB profile requests a pass. The deterministic resource is `disk:/larp-bot/passes/<event_id>.xlsx`; its public Yandex Disk URL is stored on the event and reused by later requests. Both the resource and link remain until the game is deleted.
+Admins can create a pass table once for any game and list all stored pass-table links. Creation takes a one-time snapshot containing only YDB registrations in `Подтверждено` whose current YDB profile requests a pass. The deterministic resource is `disk:/larp-bot/passes/<event_id>.xlsx`; its public Yandex Disk URL is stored on the event and reused by later requests. Both the resource and link remain permanently with the archived game.
 
 The pass workbook copies the venue template's header wording and theme-color fill exactly:
 
@@ -179,7 +179,7 @@ bounded ordered FIFO drainer
 
 Do not attach the trigger directly to FIFO unless Yandex officially adds support and this architecture is deliberately migrated. The kick has no business-ordering role. The publisher first makes the FIFO command durable, then emits a kick. If kick publishing fails, the platform retry uses the same operation ID: FIFO deduplicates the command while the retry emits another kick.
 
-YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Participant notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys. Confirmation-open and reminder messages select only `Ожидается` registrations; arbitrary admin broadcasts select only `Подтверждено` registrations. All admin status changes, reminders, broadcasts, and deletion share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
+YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Participant notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys. Confirmation-open and reminder messages select only `Ожидается` registrations; arbitrary admin broadcasts select only `Подтверждено` registrations. All admin status changes, reminders, broadcasts, and archival share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
 
 ## Telegram transport
 
@@ -480,7 +480,7 @@ terraform plan
 
 ## Tests and enforced contracts
 
-Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, confirmed-only broadcasts and chat-link expansion, duplicate operation IDs, formula injection, close/delete ordering, exact-name deletion, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
+Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, confirmed-only broadcasts and chat-link expansion, duplicate operation IDs, formula injection, permanent game archival, exact-name archival, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
 Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the four-table YDB model, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
 

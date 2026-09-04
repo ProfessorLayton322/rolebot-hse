@@ -14,6 +14,7 @@ from larp_bot.adapters.memory import (
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADMIN,
+    ARCHIVE_GAME,
     CHANGE_STATUS,
     CHARACTER,
     CONFIRM,
@@ -71,7 +72,7 @@ def inbound(
 
 
 async def engine_setup(
-    store: MemoryDiskStore, event: Event, *, admin: bool = False
+    store: MemoryDiskStore, event: Event, *additional_events: Event, admin: bool = False
 ) -> tuple[
     ConversationEngine,
     MemoryUserRepository,
@@ -89,7 +90,7 @@ async def engine_setup(
             needs_pass=False,
         )
     )
-    events = MemoryEventRepository([event])
+    events = MemoryEventRepository([event, *additional_events])
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(store)
     await showcase.create_event_workbook(event.disk_resource_path)
@@ -483,17 +484,46 @@ async def test_foreign_profile_collects_separate_pass_fields(disk_store: MemoryD
 
 
 @pytest.mark.asyncio
-async def test_admin_delete_requires_exact_case_but_trims_whitespace(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_admin_archive_requires_exact_case_but_trims_whitespace(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
     menu = await engine.handle(inbound(1, ADMIN))
-    assert "🗑 Удалить игру" in [button.value for button in menu.buttons]
-    await engine.handle(inbound(2, "🗑 Удалить игру", callback=True))
-    await engine.handle(inbound(3, f"select:admin-delete:{event.event_id}", callback=True))
+    assert ARCHIVE_GAME in [button.value for button in menu.buttons]
+    await engine.handle(inbound(2, ARCHIVE_GAME, callback=True))
+    await engine.handle(inbound(3, f"select:admin-archive:{event.event_id}", callback=True))
     wrong = await engine.handle(inbound(4, event.name.casefold()))
     assert "не совпало" in wrong.text
     accepted = await engine.handle(inbound(5, f"  {event.name}  "))
     assert accepted.deferred
-    assert publisher.commands[-1].operation is Operation.DELETE_EVENT
+    assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
+
+
+@pytest.mark.asyncio
+async def test_admin_archive_game_buttons_are_paginated(disk_store: MemoryDiskStore) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        Event(
+            event_id=f"event-{index:04d}",
+            name=f"Game {index}",
+            disk_resource_path=f"disk:/larp-bot/events/event-{index:04d}-game.xlsx",
+            public_registration_url=f"https://disk.example/{index}",
+            created_at=base + timedelta(seconds=index),
+            updated_at=base + timedelta(seconds=index),
+        )
+        for index in range(11)
+    ]
+    engine, _, _, _ = await engine_setup(disk_store, *events, admin=True)
+
+    first = await engine.handle(inbound(1, ARCHIVE_GAME))
+    game_buttons = [button for button in first.buttons if button.value.startswith("select:admin-archive:")]
+    next_button = next(button for button in first.buttons if button.label == "➡️ Далее")
+    assert len(game_buttons) == 10
+
+    second = await engine.handle(inbound(2, next_button.value, callback=True))
+    assert [button.label for button in second.buttons if button.value.startswith("select:admin-archive:")] == [
+        "Game 10"
+    ]
 
 
 @pytest.mark.asyncio
