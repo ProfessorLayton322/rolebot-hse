@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from larp_bot.domain.models import (
     AttendanceStatus,
+    Button,
     Event,
     EventStatus,
     PassDetails,
@@ -86,12 +87,14 @@ class YdbExecutor:
                 return False
             update = (
                 "DECLARE $user_id AS Uint64; DECLARE $operation_id AS Utf8; "
-                f"UPDATE `{table}` SET last_delivery_operation_id = $operation_id "
+                "DECLARE $last_bot_buttons AS Utf8; "
+                f"UPDATE `{table}` SET last_delivery_operation_id = $operation_id, "
+                "last_bot_buttons_json = $last_bot_buttons "
                 f"WHERE {id_column} = $user_id;"
             )
             transaction.execute(
                 session.prepare(update),
-                {"$user_id": user_id, "$operation_id": operation_id},
+                {"$user_id": user_id, "$operation_id": operation_id, "$last_bot_buttons": "[]"},
                 commit_tx=True,
             )
             return True
@@ -141,6 +144,18 @@ def _context(raw: object) -> dict[str, Any]:
     return parsed
 
 
+def _buttons(raw: object) -> list[Button]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+        if not isinstance(parsed, list):
+            return []
+        return [Button.model_validate(item) for item in parsed]
+    except (json.JSONDecodeError, TypeError, ValidationError, ValueError):
+        return []
+
+
 def _dt(value: object) -> datetime:
     if isinstance(value, datetime):
         return value.replace(tzinfo=value.tzinfo or UTC)
@@ -155,7 +170,7 @@ class YdbUserRepository:
     COMMON_COLUMNS = """
         full_name, crossplay, larp_experience, needs_pass, pass_details_json,
         dialog_state, dialog_context_json, last_update_id, last_update_at,
-        last_delivery_operation_id, created_at, updated_at
+        last_delivery_operation_id, last_bot_buttons_json, created_at, updated_at
     """
 
     def __init__(self, executor: YdbExecutor) -> None:
@@ -194,6 +209,7 @@ class YdbUserRepository:
             "last_update_id": row.get("last_update_id"),
             "last_update_at": _dt(row["last_update_at"]) if row.get("last_update_at") is not None else None,
             "last_delivery_operation_id": row.get("last_delivery_operation_id"),
+            "last_bot_buttons": _buttons(row.get("last_bot_buttons_json")),
             "created_at": _dt(row["created_at"]),
             "updated_at": _dt(row["updated_at"]),
         }
@@ -237,17 +253,18 @@ class YdbUserRepository:
             DECLARE $last_update_id AS Optional<Utf8>;
             DECLARE $last_update_at AS Optional<Timestamp>;
             DECLARE $last_delivery_operation_id AS Optional<Utf8>;
+            DECLARE $last_bot_buttons AS Utf8;
             DECLARE $created_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             UPSERT INTO `{table}` (
                 {id_column}, {contact_column}, full_name, crossplay, larp_experience,
                 needs_pass, pass_details_json, dialog_state, dialog_context_json,
-                last_update_id, last_update_at, last_delivery_operation_id,
+                last_update_id, last_update_at, last_delivery_operation_id, last_bot_buttons_json,
                 created_at, updated_at
             ) VALUES (
                 $user_id, $contact, $full_name, $crossplay, $larp_experience,
                 $needs_pass, $pass_details, $dialog_state, $dialog_context,
-                $last_update_id, $last_update_at, $last_delivery_operation_id,
+                $last_update_id, $last_update_at, $last_delivery_operation_id, $last_bot_buttons,
                 $created_at, $updated_at
             );
         """
@@ -266,6 +283,11 @@ class YdbUserRepository:
                 "$last_update_id": user.last_update_id,
                 "$last_update_at": user.last_update_at,
                 "$last_delivery_operation_id": user.last_delivery_operation_id,
+                "$last_bot_buttons": json.dumps(
+                    [button.model_dump() for button in user.last_bot_buttons],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 "$created_at": user.created_at,
                 "$updated_at": user.updated_at,
             },

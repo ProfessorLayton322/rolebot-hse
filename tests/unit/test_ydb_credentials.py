@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from larp_bot.adapters.ydb.repositories import YdbExecutor, YdbUserRepository, _dt, _optional_pass
-from larp_bot.domain.models import PassDetails, Platform, TelegramUser, VkUser
+from larp_bot.domain.models import Button, PassDetails, Platform, TelegramUser, VkUser
 
 
 def test_ydb_uses_function_context_token_instead_of_metadata() -> None:
@@ -78,7 +78,7 @@ async def test_delivery_claim_prepares_both_transaction_queries() -> None:
     transaction.execute.assert_any_call(prepared_select, {"$user_id": 42})
     transaction.execute.assert_any_call(
         prepared_update,
-        {"$user_id": 42, "$operation_id": "operation-1"},
+        {"$user_id": 42, "$operation_id": "operation-1", "$last_bot_buttons": "[]"},
         commit_tx=True,
     )
 
@@ -106,6 +106,7 @@ async def test_user_repository_decodes_optional_ydb_timestamp() -> None:
                     "last_update_id": "update-1",
                     "last_update_at": raw_timestamp,
                     "last_delivery_operation_id": None,
+                    "last_bot_buttons_json": '[{"label":"Visible","value":"callback:value"}]',
                     "created_at": raw_timestamp,
                     "updated_at": raw_timestamp,
                 }
@@ -117,6 +118,7 @@ async def test_user_repository_decodes_optional_ydb_timestamp() -> None:
 
     assert user is not None
     assert user.last_update_at == _dt(raw_timestamp)
+    assert user.last_bot_buttons == [Button(label="Visible", value="callback:value")]
     assert user.created_at == _dt(raw_timestamp)
     assert user.updated_at == _dt(raw_timestamp)
 
@@ -135,6 +137,7 @@ async def test_user_repository_lists_both_platforms_for_notification_resolution(
         "last_update_id": None,
         "last_update_at": None,
         "last_delivery_operation_id": None,
+        "last_bot_buttons_json": None,
         "created_at": timestamp,
         "updated_at": timestamp,
     }
@@ -152,6 +155,21 @@ async def test_user_repository_lists_both_platforms_for_notification_resolution(
     assert len(users) == 2
     assert isinstance(users[0], TelegramUser) and users[0].tg_id == 42
     assert isinstance(users[1], VkUser) and users[1].vk_id == 84
+
+
+@pytest.mark.asyncio
+async def test_user_repository_serializes_the_last_bot_keyboard() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+    user = TelegramUser(
+        tg_id=42,
+        last_bot_buttons=[Button(label="Visible", value="callback:value")],
+    )
+
+    await YdbUserRepository(executor).save(user)
+
+    query, params = executor.query.await_args.args
+    assert "last_bot_buttons_json" in query
+    assert params["$last_bot_buttons"] == '[{"label":"Visible","value":"callback:value"}]'
 
 
 def test_legacy_pass_json_makes_profile_incomplete_until_refilled() -> None:

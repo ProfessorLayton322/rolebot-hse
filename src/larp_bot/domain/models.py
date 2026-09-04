@@ -85,6 +85,11 @@ class Operation(StrEnum):
     DELETE_EVENT = "DELETE_EVENT"
 
 
+class Button(StrictModel):
+    label: str
+    value: str
+
+
 class BotIdentity(StrictModel):
     platform: Platform
     platform_user_id: int = Field(gt=0)
@@ -178,6 +183,7 @@ class UserBase(StrictModel):
     last_update_id: str | None = None
     last_update_at: datetime | None = None
     last_delivery_operation_id: str | None = None
+    last_bot_buttons: list[Button] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -369,11 +375,6 @@ class OrderedRegistrationCommand(StrictModel):
         if self.operation in empty_payload_operations and not isinstance(self.payload, EmptyPayload):
             raise ValueError(f"{self.operation} requires EmptyPayload")
         return self
-
-
-class Button(StrictModel):
-    label: str
-    value: str
 
 
 class BotResponse(StrictModel):
