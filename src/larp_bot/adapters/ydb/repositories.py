@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, TypeVar, cast
 
 import ydb
+from pydantic import ValidationError
 
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -122,7 +123,13 @@ class YdbExecutor:
 def _optional_pass(raw: object) -> PassDetails | None:
     if not raw:
         return None
-    return PassDetails.model_validate_json(str(raw))
+    try:
+        return PassDetails.model_validate_json(str(raw))
+    except (ValidationError, ValueError):
+        # Profiles saved before the structured pass schema do not contain all
+        # mandatory fields. Keep the user row readable but make the profile
+        # incomplete until the player fills it in again.
+        return None
 
 
 def _context(raw: object) -> dict[str, Any]:
@@ -272,6 +279,12 @@ class YdbUserRepository:
 
 
 class YdbEventRepository:
+    COLUMNS = """
+        event_id, name, disk_resource_path, public_registration_url,
+        status, confirmation_deadline, registrations_migrated_at,
+        pass_table_resource_path, pass_table_public_url, created_at, updated_at
+    """
+
     def __init__(self, executor: YdbExecutor) -> None:
         self.db = executor
 
@@ -293,16 +306,17 @@ class YdbEventRepository:
             registrations_migrated_at=(
                 _dt(row["registrations_migrated_at"]) if row.get("registrations_migrated_at") is not None else None
             ),
+            pass_table_resource_path=row.get("pass_table_resource_path"),
+            pass_table_public_url=row.get("pass_table_public_url"),
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
         )
 
     async def get(self, event_id: str) -> Event | None:
         rows = await self.db.query(
-            """
+            f"""
             DECLARE $event_id AS Utf8;
-            SELECT event_id, name, disk_resource_path, public_registration_url,
-                   status, confirmation_deadline, registrations_migrated_at, created_at, updated_at
+            SELECT {self.COLUMNS}
             FROM `events` WHERE event_id = $event_id;
             """,
             {"$event_id": event_id},
@@ -318,13 +332,17 @@ class YdbEventRepository:
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
             DECLARE $confirmation_deadline AS Optional<Timestamp>;
             DECLARE $registrations_migrated_at AS Timestamp;
+            DECLARE $pass_table_resource_path AS Optional<Utf8>;
+            DECLARE $pass_table_public_url AS Optional<Utf8>;
             DECLARE $updated_at AS Timestamp;
             INSERT INTO `events` (
                 event_id, name, disk_resource_path, public_registration_url,
-                status, confirmation_deadline, registrations_migrated_at, created_at, updated_at
+                status, confirmation_deadline, registrations_migrated_at,
+                pass_table_resource_path, pass_table_public_url, created_at, updated_at
             ) VALUES (
                 $event_id, $name, $disk_resource_path, $public_url,
-                $status, $confirmation_deadline, $registrations_migrated_at, $created_at, $updated_at
+                $status, $confirmation_deadline, $registrations_migrated_at,
+                $pass_table_resource_path, $pass_table_public_url, $created_at, $updated_at
             );
             """,
             {
@@ -335,6 +353,8 @@ class YdbEventRepository:
                 "$status": event.status.value,
                 "$confirmation_deadline": event.confirmation_deadline,
                 "$registrations_migrated_at": event.registrations_migrated_at,
+                "$pass_table_resource_path": event.pass_table_resource_path,
+                "$pass_table_public_url": event.pass_table_public_url,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
             },
@@ -395,6 +415,29 @@ class YdbEventRepository:
             {"$event_id": event_id, "$migrated_at": migrated_at},
         )
 
+    async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.pass_table_public_url is not None:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $resource_path AS Utf8;
+            DECLARE $public_url AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET pass_table_resource_path = $resource_path,
+                pass_table_public_url = $public_url,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND pass_table_public_url IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$resource_path": resource_path,
+                "$public_url": public_url,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def delete(self, event_id: str) -> bool:
         exists = await self.get(event_id)
         if exists is None:
@@ -435,13 +478,41 @@ class YdbEventRepository:
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query = f"""
             {" ".join(declarations)}
-            SELECT event_id, name, disk_resource_path, public_registration_url,
-                   status, confirmation_deadline, registrations_migrated_at, created_at, updated_at
+            SELECT {self.COLUMNS}
             FROM `events` {where}
             ORDER BY created_at ASC, event_id ASC
             LIMIT $limit;
         """
         rows = await self.db.query(query, params, read_only=True)
+        return [self._from_row(row) for row in rows]
+
+    async def list_pass_tables_page(
+        self,
+        *,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> Sequence[Event]:
+        if limit < 1 or limit > 10:
+            raise ValueError("event page size must be between 1 and 10")
+        params: dict[str, Any] = {"$limit": limit}
+        declarations = ["DECLARE $limit AS Uint64;"]
+        after_condition = ""
+        if after is not None:
+            declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_id AS Utf8;"])
+            params.update({"$after_time": after[0], "$after_id": after[1]})
+            after_condition = "AND (created_at > $after_time OR (created_at = $after_time AND event_id > $after_id))"
+        rows = await self.db.query(
+            f"""
+            {" ".join(declarations)}
+            SELECT {self.COLUMNS}
+            FROM `events`
+            WHERE pass_table_public_url IS NOT NULL {after_condition}
+            ORDER BY created_at ASC, event_id ASC
+            LIMIT $limit;
+            """,
+            params,
+            read_only=True,
+        )
         return [self._from_row(row) for row in rows]
 
 

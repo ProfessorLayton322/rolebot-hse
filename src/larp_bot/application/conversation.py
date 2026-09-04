@@ -22,8 +22,11 @@ from larp_bot.domain.models import (
     ReplyContext,
     TelegramUser,
     User,
+    normalize_mobile_phone,
     normalize_telegram_handle,
     normalize_vk_url,
+    validate_cyrillic_name,
+    validate_latin_name,
     validate_pass_email,
 )
 
@@ -51,6 +54,8 @@ NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
+CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
+LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
@@ -304,32 +309,110 @@ class ConversationEngine:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
             context["needs_pass"] = value == "Да"
             if value == "Да":
-                user.dialog_state = "PROFILE_PASS_CYRILLIC"
-                return BotResponse(text="Введите полное ФИО кириллицей:")
+                user.dialog_state = "PROFILE_PASS_FOREIGNER"
+                return BotResponse(text="Вы иностранный гражданин?", buttons=yes_no_buttons())
             return await self._finish_profile(user)
-        prompts = {
-            "PROFILE_PASS_CYRILLIC": ("legal_name_cyrillic", "PROFILE_PASS_LATIN", "Введите полное ФИО латиницей:"),
-            "PROFILE_PASS_LATIN": ("legal_name_latin", "PROFILE_PASS_EMAIL", "Введите email:"),
+        if state in {"PROFILE_PASS_CYRILLIC", "PROFILE_PASS_LATIN", "PROFILE_PASS_EMAIL", "PROFILE_PASS_CITIZEN"}:
+            user.dialog_state = "PROFILE_PASS_FOREIGNER"
+            for key in tuple(context):
+                if key.startswith(("legal_name_", "surname_", "name_", "patronym_")) or key in {
+                    "email",
+                    "russian_citizen",
+                    "foreigner",
+                    "mobile_phone",
+                }:
+                    context.pop(key, None)
+            return BotResponse(
+                text="Формат данных для пропуска обновился. Вы иностранный гражданин?",
+                buttons=yes_no_buttons(),
+            )
+        if state == "PROFILE_PASS_FOREIGNER":
+            if value not in {"Да", "Нет"}:
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
+            context["foreigner"] = value == "Да"
+            user.dialog_state = "PROFILE_PASS_SURNAME_CYRILLIC"
+            return BotResponse(text="Введите фамилию кириллицей:")
+        cyrillic_steps = {
+            "PROFILE_PASS_SURNAME_CYRILLIC": (
+                "surname_cyrillic",
+                "PROFILE_PASS_NAME_CYRILLIC",
+                "Введите имя кириллицей:",
+                False,
+            ),
+            "PROFILE_PASS_NAME_CYRILLIC": (
+                "name_cyrillic",
+                "PROFILE_PASS_PATRONYM_CYRILLIC",
+                "Введите отчество кириллицей или «-», если отчества нет:",
+                False,
+            ),
+            "PROFILE_PASS_PATRONYM_CYRILLIC": (
+                "patronym_cyrillic",
+                "PROFILE_PASS_SURNAME_LATIN" if context.get("foreigner") else "PROFILE_PASS_PHONE",
+                "Введите фамилию латиницей:" if context.get("foreigner") else "Введите мобильный телефон:",
+                True,
+            ),
         }
-        if state in prompts:
-            if len(value) < 2:
-                return BotResponse(text="Значение слишком короткое. Попробуйте ещё раз:")
-            key, next_state, prompt = prompts[state]
-            context[key] = value[:300]
+        if state in cyrillic_steps:
+            key, next_state, prompt, patronym = cyrillic_steps[state]
+            try:
+                context[key] = validate_cyrillic_name(value, patronym=patronym)
+            except ValueError:
+                suffix = " или «-»" if patronym else ""
+                return BotResponse(text=f"Используйте только кириллицу{suffix}. Попробуйте ещё раз:")
             user.dialog_state = next_state
-            return BotResponse(text=prompt)
-        if state == "PROFILE_PASS_EMAIL":
+            buttons = (
+                [Button(label="Нет отчества", value="-")] if next_state == "PROFILE_PASS_PATRONYM_CYRILLIC" else []
+            )
+            return BotResponse(text=prompt, buttons=buttons)
+        latin_steps = {
+            "PROFILE_PASS_SURNAME_LATIN": (
+                "surname_latin",
+                "PROFILE_PASS_NAME_LATIN",
+                "Введите имя латиницей:",
+                False,
+            ),
+            "PROFILE_PASS_NAME_LATIN": (
+                "name_latin",
+                "PROFILE_PASS_PATRONYM_LATIN",
+                "Введите отчество латиницей или «-», если отчества нет:",
+                False,
+            ),
+            "PROFILE_PASS_PATRONYM_LATIN": (
+                "patronym_latin",
+                "PROFILE_PASS_PHONE",
+                "Введите мобильный телефон:",
+                True,
+            ),
+        }
+        if state in latin_steps:
+            key, next_state, prompt, patronym = latin_steps[state]
+            try:
+                latin_value = validate_latin_name(value, patronym=patronym)
+            except ValueError:
+                suffix = " или «-»" if patronym else ""
+                return BotResponse(text=f"Используйте только латиницу{suffix}. Попробуйте ещё раз:")
+            if patronym and (context.get("patronym_cyrillic") == "-") != (latin_value == "-"):
+                return BotResponse(
+                    text="Если отчества нет, укажите «-» и в кириллическом, и в латинском поле. Попробуйте ещё раз:",
+                    buttons=[Button(label="Нет отчества", value="-")],
+                )
+            context[key] = latin_value
+            user.dialog_state = next_state
+            buttons = [Button(label="Нет отчества", value="-")] if next_state == "PROFILE_PASS_PATRONYM_LATIN" else []
+            return BotResponse(text=prompt, buttons=buttons)
+        if state == "PROFILE_PASS_PHONE":
+            try:
+                context["mobile_phone"] = normalize_mobile_phone(value)
+            except ValueError:
+                return BotResponse(text="Некорректный номер. Введите мобильный телефон ещё раз:")
+            user.dialog_state = "PROFILE_PASS_EMAIL_ADDRESS"
+            return BotResponse(text="Введите email:")
+        if state == "PROFILE_PASS_EMAIL_ADDRESS":
             try:
                 email = validate_pass_email(value)
             except ValidationError:
                 return BotResponse(text="Некорректный email. Введите email ещё раз:")
             context["email"] = email
-            user.dialog_state = "PROFILE_PASS_CITIZEN"
-            return BotResponse(text="Являетесь ли вы гражданином РФ?", buttons=yes_no_buttons())
-        if state == "PROFILE_PASS_CITIZEN":
-            if value not in {"Да", "Нет"}:
-                return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
-            context["russian_citizen"] = value == "Да"
             return await self._finish_profile(user)
         raise AssertionError(f"unknown profile state: {state}")
 
@@ -338,16 +421,24 @@ class ConversationEngine:
         user.full_name = str(context["full_name"])
         user.crossplay = bool(context["crossplay"])
         user.larp_experience = bool(context["larp_experience"])
-        user.needs_pass = bool(context["needs_pass"])
-        if user.needs_pass:
-            user.pass_details = PassDetails(
-                legal_name_cyrillic=str(context["legal_name_cyrillic"]),
-                legal_name_latin=str(context["legal_name_latin"]),
+        needs_pass = bool(context["needs_pass"])
+        if needs_pass:
+            details = PassDetails(
+                surname_cyrillic=str(context["surname_cyrillic"]),
+                name_cyrillic=str(context["name_cyrillic"]),
+                patronym_cyrillic=str(context["patronym_cyrillic"]),
+                foreigner=bool(context["foreigner"]),
+                surname_latin=(str(context["surname_latin"]) if context.get("foreigner") else None),
+                name_latin=(str(context["name_latin"]) if context.get("foreigner") else None),
+                patronym_latin=(str(context["patronym_latin"]) if context.get("foreigner") else None),
+                mobile_phone=str(context["mobile_phone"]),
                 email=str(context["email"]),
-                russian_citizen=bool(context["russian_citizen"]),
             )
+            user.needs_pass = True
+            user.pass_details = details
         else:
             user.pass_details = None
+            user.needs_pass = False
         if isinstance(user, TelegramUser):
             user.vk_url = str(context["contact"])
         else:
@@ -397,6 +488,8 @@ class ConversationEngine:
         if len(parts) != 4 or not parts[2].isdigit():
             return BotResponse(text="Некорректная страница.")
         _, flow, micros, event_id = parts
+        if flow.startswith("admin-") and not await self._require_admin(user):
+            return BotResponse(text="Недостаточно прав.")
         after = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
         event_flow_statuses = {
             "enlist": REGISTRATION_OPEN_STATUSES,
@@ -404,11 +497,14 @@ class ConversationEngine:
             "admin-delete": None,
             "admin-reminder": frozenset({EventStatus.CONFIRMATION_OPEN}),
             "admin-notification": None,
+            "admin-pass-create": None,
         }
         if flow in event_flow_statuses:
             return await self._show_events(flow, event_flow_statuses[flow], after=after)
         if flow == "admin-list":
             return await self._admin_list(after)
+        if flow == "admin-pass-list":
+            return await self._admin_pass_list(after)
         return await self._show_registered(user, flow, after=after)
 
     async def _show_registered(
@@ -463,6 +559,11 @@ class ConversationEngine:
         platform = message.identity.platform
         uid = message.identity.platform_user_id
         if flow == "enlist":
+            if not is_profile_complete(user):
+                return BotResponse(
+                    text="Сначала полностью заполните профиль.",
+                    buttons=[Button(label=PROFILE, value=PROFILE)],
+                )
             if event.status is EventStatus.CLOSED:
                 return BotResponse(text="Регистрация на эту игру уже закрыта.")
             user.dialog_context = {"event_id": event_id, "event_name": event.name}
@@ -478,7 +579,7 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if flow in {"admin-status", "admin-delete", "admin-reminder", "admin-notification"}:
+        if flow in {"admin-status", "admin-delete", "admin-reminder", "admin-notification", "admin-pass-create"}:
             return await self._admin_select(user, message, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
@@ -541,6 +642,12 @@ class ConversationEngine:
         return BotResponse(text="Некорректное действие.")
 
     async def _enlist_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        if not is_profile_complete(user):
+            await self._clear(user)
+            return BotResponse(
+                text="Сначала полностью заполните профиль.",
+                buttons=[Button(label=PROFILE, value=PROFILE)],
+            )
         if not value:
             return BotResponse(text="Введите ответ текстом.")
         if user.dialog_state == "ENLIST_WISH_PLAY":
@@ -677,6 +784,8 @@ class ConversationEngine:
             CHANGE_STATUS,
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_NOTIFICATION,
+            CREATE_PASS_TABLE,
+            LIST_PASS_TABLES,
             "🗑 Удалить игру",
             "📋 Список игр",
             BACK,
@@ -844,10 +953,21 @@ class ConversationEngine:
         if flow == "admin-notification":
             user.dialog_state = "ADMIN_NOTIFICATION_TEXT"
             return _confirmed_notification_prompt(event.name)
+        if flow == "admin-pass-create":
+            await self._clear(user)
+            result = await self.administration.create_pass_table(event.event_id)
+            if result.created:
+                return BotResponse(
+                    text=(
+                        f"✅ Таблица пропусков для игры «{event.name}» создана.\n"
+                        f"Участников: {result.row_count}\n\n{result.public_url}"
+                    )
+                )
+            return BotResponse(text=f"Таблица пропусков для игры «{event.name}» уже создана.\n\n{result.public_url}")
         user.dialog_state = "ADMIN_DELETE_NAME"
         return BotResponse(
             text=(
-                "⚠️ Это действие необратимо. Будут удалены игра, публичная таблица и все записи.\n\n"
+                "⚠️ Это действие необратимо. Будут удалены игра, таблицы регистрации и пропусков и все записи.\n\n"
                 f"Для подтверждения введите точное название:\n\n{event.name}"
             )
         )
@@ -871,6 +991,20 @@ class ConversationEngine:
         buttons.append(Button(label=BACK, value=BACK))
         return BotResponse(text="📋 Список игр\n\n" + "\n\n".join(lines), buttons=buttons)
 
+    async def _admin_pass_list(self, after: tuple[datetime, str] | None = None) -> BotResponse:
+        events = list(await self.events.list_pass_tables_page(after=after, limit=10))
+        if not events:
+            return BotResponse(text="Таблицы пропусков ещё не создавались.", buttons=[Button(label=BACK, value=BACK)])
+        lines = [f"{event.name}\n{event.pass_table_public_url}" for event in events]
+        buttons: list[Button] = []
+        if len(events) == 10:
+            last = events[-1]
+            more = await self.events.list_pass_tables_page(after=(last.created_at, last.event_id), limit=1)
+            if more:
+                buttons.append(Button(label="➡️ Далее", value=self._cursor("admin-pass-list", last)))
+        buttons.append(Button(label=BACK, value=BACK))
+        return BotResponse(text="🔗 Таблицы пропусков\n\n" + "\n\n".join(lines), buttons=buttons)
+
     async def _admin_start(self, user: User, value: str) -> BotResponse:
         if not await self._require_admin(user):
             return BotResponse(text="Недостаточно прав.")
@@ -887,6 +1021,10 @@ class ConversationEngine:
             )
         if value == SEND_CONFIRMED_NOTIFICATION:
             return await self._show_events("admin-notification", None, empty_text="Игр нет.")
+        if value == CREATE_PASS_TABLE:
+            return await self._show_events("admin-pass-create", None, empty_text="Игр нет.")
+        if value == LIST_PASS_TABLES:
+            return await self._admin_pass_list()
         if value == "🗑 Удалить игру":
             events = list(await self.events.list_page(limit=10))
             return BotResponse(text="Выберите игру:", buttons=_event_buttons(events, "admin-delete"))
@@ -901,6 +1039,8 @@ class ConversationEngine:
             CHANGE_STATUS,
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_NOTIFICATION,
+            CREATE_PASS_TABLE,
+            LIST_PASS_TABLES,
             "🗑 Удалить игру",
             "📋 Список игр",
         }

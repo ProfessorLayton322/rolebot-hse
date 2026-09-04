@@ -16,14 +16,42 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
-PassEmail = Annotated[str, StringConstraints(max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")]
+PassEmail = Annotated[str, StringConstraints(max_length=254, pattern=r"^[^=\s@][^\s@]*@[^\s@]+\.[^\s@]+$")]
 _PASS_EMAIL_ADAPTER = TypeAdapter(PassEmail)
+_CYRILLIC_NAME_RE = re.compile(r"^[А-ЯЁа-яё](?:[А-ЯЁа-яё -]{0,98}[А-ЯЁа-яё])?$")
+_LATIN_NAME_RE = re.compile(r"^[A-Za-z](?:[A-Za-z '\-]{0,98}[A-Za-z])?$")
+_PHONE_RE = re.compile(r"^\+?[0-9][0-9 ()\-]{7,23}$")
 
 
 def validate_pass_email(value: str) -> str:
     """Validate an email before a dialogue is allowed to leave its email step."""
 
-    return _PASS_EMAIL_ADAPTER.validate_python(value)
+    return _PASS_EMAIL_ADAPTER.validate_python(value.strip())
+
+
+def validate_cyrillic_name(value: str, *, patronym: bool = False) -> str:
+    clean = value.strip()
+    if patronym and clean == "-":
+        return clean
+    if not _CYRILLIC_NAME_RE.fullmatch(clean):
+        raise ValueError("Используйте только кириллицу")
+    return clean
+
+
+def validate_latin_name(value: str, *, patronym: bool = False) -> str:
+    clean = value.strip()
+    if patronym and clean == "-":
+        return clean
+    if not _LATIN_NAME_RE.fullmatch(clean):
+        raise ValueError("Используйте только латиницу")
+    return clean
+
+
+def normalize_mobile_phone(value: str) -> str:
+    clean = value.strip()
+    if not _PHONE_RE.fullmatch(clean) or not 10 <= sum(character.isdigit() for character in clean) <= 15:
+        raise ValueError("Некорректный номер телефона")
+    return clean
 
 
 class Platform(StrEnum):
@@ -63,10 +91,51 @@ class BotIdentity(StrictModel):
 
 
 class PassDetails(StrictModel):
-    legal_name_cyrillic: str = Field(min_length=2, max_length=300)
-    legal_name_latin: str = Field(min_length=2, max_length=300)
+    surname_cyrillic: str = Field(min_length=1, max_length=100)
+    name_cyrillic: str = Field(min_length=1, max_length=100)
+    patronym_cyrillic: str = Field(min_length=1, max_length=100)
+    foreigner: bool
+    surname_latin: str | None = Field(default=None, min_length=1, max_length=100)
+    name_latin: str | None = Field(default=None, min_length=1, max_length=100)
+    patronym_latin: str | None = Field(default=None, min_length=1, max_length=100)
+    mobile_phone: str = Field(min_length=8, max_length=25)
     email: PassEmail
-    russian_citizen: bool
+
+    @field_validator("surname_cyrillic", "name_cyrillic")
+    @classmethod
+    def validate_cyrillic_part(cls, value: str) -> str:
+        return validate_cyrillic_name(value)
+
+    @field_validator("patronym_cyrillic")
+    @classmethod
+    def validate_cyrillic_patronym(cls, value: str) -> str:
+        return validate_cyrillic_name(value, patronym=True)
+
+    @field_validator("surname_latin", "name_latin")
+    @classmethod
+    def validate_latin_part(cls, value: str | None) -> str | None:
+        return None if value is None else validate_latin_name(value)
+
+    @field_validator("patronym_latin")
+    @classmethod
+    def validate_latin_patronym(cls, value: str | None) -> str | None:
+        return None if value is None else validate_latin_name(value, patronym=True)
+
+    @field_validator("mobile_phone")
+    @classmethod
+    def validate_phone(cls, value: str) -> str:
+        return normalize_mobile_phone(value)
+
+    @model_validator(mode="after")
+    def names_match_citizenship(self) -> PassDetails:
+        latin = (self.surname_latin, self.name_latin, self.patronym_latin)
+        if not self.foreigner and any(value is not None for value in latin):
+            raise ValueError("latin name fields must be empty for a Russian citizen")
+        if self.foreigner and any(value is None for value in latin):
+            raise ValueError("latin name fields are required for a foreign citizen")
+        if self.foreigner and (self.patronym_cyrillic == "-") != (self.patronym_latin == "-"):
+            raise ValueError("both patronym fields must use '-' when a foreign citizen has no patronym")
+        return self
 
 
 _VK_HOSTS = {"vk.com", "www.vk.com", "m.vk.com", "vk.ru", "www.vk.ru", "m.vk.ru"}
@@ -168,8 +237,16 @@ class Event(StrictModel):
     status: EventStatus = EventStatus.CREATED
     confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
+    pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
+    pass_table_public_url: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def pass_table_fields_are_atomic(self) -> Event:
+        if (self.pass_table_resource_path is None) != (self.pass_table_public_url is None):
+            raise ValueError("pass table resource path and public URL must be set together")
+        return self
 
 
 class Registration(StrictModel):

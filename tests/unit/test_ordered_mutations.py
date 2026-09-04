@@ -92,6 +92,21 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
 
 
 @pytest.mark.asyncio
+async def test_worker_rejects_enlist_when_ydb_profile_is_missing(disk_store: MemoryDiskStore, event: Event) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    users = MemoryUserRepository()
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase), users)
+
+    with pytest.raises(OperationNotAllowed, match="полностью заполните профиль"):
+        await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A")))
+
+    assert await tables.get(event.event_id, "a" * 43) is None
+
+
+@pytest.mark.asyncio
 async def test_enlist_persists_both_profiles_in_showcase(disk_store: MemoryDiskStore, event: Event) -> None:
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)

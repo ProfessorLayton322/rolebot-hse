@@ -72,3 +72,34 @@ async def test_open_confirmation_persists_deadline_with_status() -> None:
     assert "confirmation_deadline = $deadline" in executor.query_text
     assert executor.params["$status"] == EventStatus.CONFIRMATION_OPEN.value
     assert executor.params["$deadline"] == deadline
+
+
+@pytest.mark.asyncio
+async def test_pass_table_link_is_persisted_once_on_the_event() -> None:
+    executor = RecordingExecutor([event_row("CLOSED")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.set_pass_table(
+        "event-a1",
+        "disk:/larp-bot/passes/event-a1.xlsx",
+        "https://disk.example/pass",
+    )
+
+    assert "pass_table_public_url IS NULL" in executor.query_text
+    assert executor.params["$resource_path"] == "disk:/larp-bot/passes/event-a1.xlsx"
+    assert executor.params["$public_url"] == "https://disk.example/pass"
+
+
+@pytest.mark.asyncio
+async def test_pass_table_listing_filters_events_with_stored_links() -> None:
+    row = event_row("CLOSED") | {
+        "pass_table_resource_path": "disk:/larp-bot/passes/event-a1.xlsx",
+        "pass_table_public_url": "https://disk.example/pass",
+    }
+    executor = RecordingExecutor([row])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    events = await repository.list_pass_tables_page(limit=10)
+
+    assert events[0].pass_table_public_url == "https://disk.example/pass"
+    assert "WHERE pass_table_public_url IS NOT NULL" in executor.query_text

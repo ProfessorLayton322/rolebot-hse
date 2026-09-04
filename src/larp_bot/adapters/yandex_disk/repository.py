@@ -9,10 +9,10 @@ from typing import Protocol
 
 import httpx
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font
+from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
 from openpyxl.worksheet.worksheet import Worksheet
 
-from larp_bot.domain.models import AttendanceStatus, Event, Registration
+from larp_bot.domain.models import AttendanceStatus, Event, PassDetails, Registration
 
 VISIBLE_HEADERS = (
     "№",
@@ -47,6 +47,17 @@ LEGACY_HEADERS = (
     "participant_key",
     "last_operation_id",
     "updated_at",
+)
+PASS_TABLE_HEADERS = (
+    "Фамилия (Кириллицей)",
+    "Имя (Кириллицей)",
+    "Отчество (Кириллицей)",
+    "Иностранный гражданин (Да/Нет)",
+    "Фамилия (Латиницей)",
+    "Имя (Латиницей)",
+    "Отчество (Латиницей)",
+    "Телефон",
+    "E-mail",
 )
 
 
@@ -127,6 +138,52 @@ def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes
             )
         )
     _format_sheet(sheet)
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def pass_table_workbook_bytes(profiles: Sequence[PassDetails] = ()) -> bytes:
+    """Render the pass-list schema and header style used by the supplied venue template."""
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Лист1"
+    sheet.append(PASS_TABLE_HEADERS)
+    thin = Side(style="thin", color="000000")
+    header_fill = PatternFill(fill_type="solid", fgColor=Color(theme=5))
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(name="Calibri Light", size=14)
+        cell.alignment = Alignment(wrap_text=True)
+        cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        cell.number_format = "@"
+    sheet.row_dimensions[1].height = 57
+    widths = (24.85546875, 22.140625, 24.28515625, 13, 40.28515625, 22.140625, 13, 33.85546875, 43.7109375)
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
+
+    for profile in profiles:
+        sheet.append(
+            (
+                profile.surname_cyrillic,
+                profile.name_cyrillic,
+                profile.patronym_cyrillic,
+                "Да" if profile.foreigner else "Нет",
+                profile.surname_latin if profile.foreigner else None,
+                profile.name_latin if profile.foreigner else None,
+                profile.patronym_latin if profile.foreigner else None,
+                profile.mobile_phone,
+                profile.email,
+            )
+        )
+        sheet.row_dimensions[sheet.max_row].height = 19.5
+        for cell in sheet[sheet.max_row]:
+            cell.font = Font(name="Calibri Light", size=14)
+            cell.alignment = Alignment(wrap_text=True)
+            cell.number_format = "@"
+
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -269,6 +326,18 @@ class YandexDiskShowcaseRepository:
             raise
 
     async def delete_event_workbook(self, disk_path: str) -> None:
+        await self.store.delete(disk_path)
+
+    async def create_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> str:
+        content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)
+        await self.store.upload_new(disk_path, content)
+        try:
+            return await self.store.publish(disk_path)
+        except Exception:
+            await self.store.delete(disk_path)
+            raise
+
+    async def delete_pass_table(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
 
     async def read_legacy_registrations(self, event: Event) -> Sequence[Registration]:
