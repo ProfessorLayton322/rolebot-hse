@@ -10,7 +10,6 @@ from openpyxl import load_workbook
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.services import (
-    EventNotFound,
     OperationNotAllowed,
     OrderedMutationService,
     RegistrationCatalog,
@@ -256,7 +255,9 @@ async def test_admin_status_commands_allow_any_transition(disk_store: MemoryDisk
 
 
 @pytest.mark.asyncio
-async def test_delete_prevents_later_character_update(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_legacy_delete_command_archives_without_deleting_game_data(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)
@@ -264,13 +265,11 @@ async def test_delete_prevents_later_character_update(disk_store: MemoryDiskStor
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
     await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
-    await mutations.apply(command(event, Operation.DELETE_EVENT, EmptyPayload()))
-    with pytest.raises(EventNotFound):
-        await mutations.apply(
-            command(
-                event,
-                Operation.UPDATE_CHARACTER_WISH,
-                CharacterWishPayload(character_wish="New"),
-            )
-        )
-    assert event.disk_resource_path not in disk_store.files
+    result = await mutations.apply(command(event, Operation.DELETE_EVENT, EmptyPayload()))
+
+    stored_event = await events.get(event.event_id)
+    stored_registration = await tables.get(event.event_id, "a" * 43)
+    assert result == "Игра архивирована; таблицы и записи сохранены"
+    assert stored_event is not None and stored_event.status is EventStatus.CLOSED
+    assert stored_registration is not None and stored_registration.character_wish == "Doctor"
+    assert event.disk_resource_path in disk_store.files

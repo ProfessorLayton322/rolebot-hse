@@ -8,7 +8,15 @@ from openpyxl import load_workbook
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
 from larp_bot.adapters.yandex_disk.repository import PASS_TABLE_HEADERS, YandexDiskShowcaseRepository
 from larp_bot.application.services import EventAdministrationService, RegistrationCatalog
-from larp_bot.domain.models import AttendanceStatus, PassDetails, Platform, Registration, TelegramUser, VkUser
+from larp_bot.domain.models import (
+    AttendanceStatus,
+    EventStatus,
+    PassDetails,
+    Platform,
+    Registration,
+    TelegramUser,
+    VkUser,
+)
 from larp_bot.domain.security import participant_key
 from tests.conftest import MemoryDiskStore
 
@@ -165,7 +173,7 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
 
 
 @pytest.mark.asyncio
-async def test_deleting_game_removes_its_registration_and_pass_tables(disk_store: MemoryDiskStore, event) -> None:
+async def test_archived_game_keeps_its_registration_and_pass_tables(disk_store: MemoryDiskStore, event) -> None:
     events = MemoryEventRepository([event])
     tables = MemoryRegistrationRepository()
     users = MemoryUserRepository()
@@ -177,8 +185,9 @@ async def test_deleting_game_removes_its_registration_and_pass_tables(disk_store
     stored_event = await events.get(event.event_id)
     assert stored_event is not None and stored_event.pass_table_resource_path is not None
 
-    await catalog.delete(stored_event)
+    await catalog.archive(stored_event)
 
-    assert event.disk_resource_path not in disk_store.files
-    assert stored_event.pass_table_resource_path not in disk_store.files
-    assert await events.get(event.event_id) is None
+    archived_event = await events.get(event.event_id)
+    assert event.disk_resource_path in disk_store.files
+    assert stored_event.pass_table_resource_path in disk_store.files
+    assert archived_event is not None and archived_event.status is EventStatus.CLOSED

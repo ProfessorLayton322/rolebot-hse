@@ -56,6 +56,8 @@ SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтвержден�
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
+ARCHIVE_GAME = "📦 Архивировать игру"
+LEGACY_DELETE_GAME = "🗑 Удалить игру"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
@@ -91,6 +93,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_NAME",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_TEXT",
+        "ADMIN_ARCHIVE_NAME",
         "ADMIN_DELETE_NAME",
     }
 )
@@ -527,6 +530,7 @@ class ConversationEngine:
         event_flow_statuses = {
             "enlist": REGISTRATION_OPEN_STATUSES,
             "admin-status": None,
+            "admin-archive": None,
             "admin-delete": None,
             "admin-reminder": frozenset({EventStatus.CONFIRMATION_OPEN}),
             "admin-notification": None,
@@ -612,7 +616,14 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if flow in {"admin-status", "admin-delete", "admin-reminder", "admin-notification", "admin-pass-create"}:
+        if flow in {
+            "admin-status",
+            "admin-archive",
+            "admin-delete",
+            "admin-reminder",
+            "admin-notification",
+            "admin-pass-create",
+        }:
             return await self._admin_select(user, message, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
@@ -812,7 +823,7 @@ class ConversationEngine:
             SEND_CONFIRMED_NOTIFICATION,
             CREATE_PASS_TABLE,
             LIST_PASS_TABLES,
-            "🗑 Удалить игру",
+            ARCHIVE_GAME,
             "📋 Список игр",
             BACK,
         ]
@@ -921,22 +932,26 @@ class ConversationEngine:
                 deferred=True,
                 command_enqueued=True,
             )
-        if user.dialog_state == "ADMIN_DELETE_NAME":
+        if user.dialog_state in {"ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"}:
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
                 return BotResponse(text=f"Название не совпало. Введите точно:\n\n{expected}")
             event_id = str(user.dialog_context["event_id"])
             await self._clear(user)
             await self.registrations.enqueue(
-                operation=Operation.DELETE_EVENT,
+                operation=Operation.CLOSE_EVENT,
                 event_id=event_id,
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
-                reply_context=ReplyContext(text_success=f"🗑 Игра «{expected}» удалена."),
-                idempotency_key=f"{message.update_id}:DELETE_EVENT",
+                reply_context=ReplyContext(
+                    text_success=(
+                        f"📦 Игра «{expected}» архивирована. Игра, записи и XLSX-таблицы сохранены в постоянном списке."
+                    )
+                ),
+                idempotency_key=f"{message.update_id}:ARCHIVE_EVENT",
             )
-            return BotResponse(text="⏳ Удаление принято в обработку.", deferred=True, command_enqueued=True)
+            return BotResponse(text="⏳ Архивация принята в обработку.", deferred=True, command_enqueued=True)
         await self._clear(user)
         return BotResponse(text="Административный диалог сброшен.")
 
@@ -990,10 +1005,11 @@ class ConversationEngine:
                     )
                 )
             return BotResponse(text=f"Таблица пропусков для игры «{event.name}» уже создана.\n\n{result.public_url}")
-        user.dialog_state = "ADMIN_DELETE_NAME"
+        user.dialog_state = "ADMIN_ARCHIVE_NAME"
         return BotResponse(
             text=(
-                "⚠️ Это действие необратимо. Будут удалены игра, таблицы регистрации и пропусков и все записи.\n\n"
+                "Игра будет закрыта для новых регистраций и останется в постоянном списке. "
+                "Таблицы регистрации и пропусков и все записи будут сохранены.\n\n"
                 f"Для подтверждения введите точное название:\n\n{event.name}"
             )
         )
@@ -1051,9 +1067,8 @@ class ConversationEngine:
             return await self._show_events("admin-pass-create", None, empty_text="Игр нет.")
         if value == LIST_PASS_TABLES:
             return await self._admin_pass_list()
-        if value == "🗑 Удалить игру":
-            events = list(await self.events.list_page(limit=10))
-            return BotResponse(text="Выберите игру:", buttons=_event_buttons(events, "admin-delete"))
+        if value in {ARCHIVE_GAME, LEGACY_DELETE_GAME}:
+            return await self._show_events("admin-archive", None, empty_text="Игр нет.")
         if value == "📋 Список игр":
             return await self._admin_list()
         return await self._admin_menu(user)
@@ -1067,7 +1082,8 @@ class ConversationEngine:
             SEND_CONFIRMED_NOTIFICATION,
             CREATE_PASS_TABLE,
             LIST_PASS_TABLES,
-            "🗑 Удалить игру",
+            ARCHIVE_GAME,
+            LEGACY_DELETE_GAME,
             "📋 Список игр",
         }
         if value in admin_actions or value in LEGACY_STATUS_ACTIONS:
