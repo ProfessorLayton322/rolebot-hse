@@ -128,7 +128,7 @@ Malformed legacy XLSX aborts migration without setting the migration timestamp. 
 
 ### Pass profiles and pass tables
 
-A completed pass profile stores separate Cyrillic surname, name, and patronym; foreign-citizen choice; optional Latin surname, name, and patronym; mobile phone; and email in `pass_details_json` in the platform's YDB user table. The bot validates each field before advancing. A player who requests a pass cannot enlist until every required field is present. Profiles saved under the older combined-name schema remain readable but are treated as incomplete and must be filled in again before enlistment.
+Every profile collects the player's Cyrillic surname and name as separate validated dialogue steps, then combines them into the existing `full_name` field. Players requesting a pass additionally provide their Cyrillic patronym, foreign-citizen choice, applicable Latin name fields, mobile phone, and email. Those pass fields remain stored in `pass_details_json` in the platform's YDB user table. A player who requests a pass cannot enlist until every required field is present. Pass profiles saved under the older combined legal-name schema remain readable but are treated as incomplete and must be filled in again before enlistment.
 
 Russian citizens provide only Cyrillic name fields; their Latin cells are blank. A missing Cyrillic patronym is stored as `-`. Foreign citizens also provide Latin name fields, and a missing patronym is `-` in both scripts.
 

@@ -242,10 +242,10 @@ class ConversationEngine:
         return await self._main(user)
 
     async def _begin_profile(self, user: User) -> BotResponse:
-        user.dialog_state = "PROFILE_NAME"
+        user.dialog_state = "PROFILE_SURNAME_CYRILLIC"
         user.dialog_context = {}
         return BotResponse(
-            text="Введите ваши Фамилию и Имя:",
+            text="Введите фамилию кириллицей:",
             buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
         )
 
@@ -270,9 +270,26 @@ class ConversationEngine:
         context = user.dialog_context
         state = user.dialog_state
         if state == "PROFILE_NAME":
-            if len(value) < 2:
-                return BotResponse(text="Введите непустые Фамилию и Имя:")
-            context["full_name"] = value[:300]
+            user.dialog_state = "PROFILE_SURNAME_CYRILLIC"
+            user.dialog_context = {}
+            return BotResponse(text="Формат профиля обновился. Введите фамилию кириллицей:")
+        if state not in {"PROFILE_SURNAME_CYRILLIC", "PROFILE_NAME_CYRILLIC"} and (
+            "surname_cyrillic" not in context or "name_cyrillic" not in context
+        ):
+            user.dialog_state = "PROFILE_SURNAME_CYRILLIC"
+            user.dialog_context = {}
+            return BotResponse(text="Формат профиля обновился. Введите фамилию кириллицей:")
+        if state in {"PROFILE_SURNAME_CYRILLIC", "PROFILE_NAME_CYRILLIC"}:
+            try:
+                clean_name = validate_cyrillic_name(value)
+            except ValueError:
+                field = "фамилию" if state == "PROFILE_SURNAME_CYRILLIC" else "имя"
+                return BotResponse(text=f"Введите {field}, используя только кириллицу:")
+            if state == "PROFILE_SURNAME_CYRILLIC":
+                context["surname_cyrillic"] = clean_name
+                user.dialog_state = "PROFILE_NAME_CYRILLIC"
+                return BotResponse(text="Введите имя кириллицей:")
+            context["name_cyrillic"] = clean_name
             user.dialog_state = "PROFILE_CONTACT"
             if isinstance(user, TelegramUser):
                 return BotResponse(text="Введите обязательную ссылку на вашу страницу VK:")
@@ -309,46 +326,30 @@ class ConversationEngine:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
             context["needs_pass"] = value == "Да"
             if value == "Да":
-                user.dialog_state = "PROFILE_PASS_FOREIGNER"
-                return BotResponse(text="Вы иностранный гражданин?", buttons=yes_no_buttons())
+                user.dialog_state = "PROFILE_PASS_PATRONYM_CYRILLIC"
+                return BotResponse(
+                    text="Введите отчество кириллицей или «-», если отчества нет:",
+                    buttons=[Button(label="Нет отчества", value="-")],
+                )
             return await self._finish_profile(user)
         if state in {"PROFILE_PASS_CYRILLIC", "PROFILE_PASS_LATIN", "PROFILE_PASS_EMAIL", "PROFILE_PASS_CITIZEN"}:
-            user.dialog_state = "PROFILE_PASS_FOREIGNER"
-            for key in tuple(context):
-                if key.startswith(("legal_name_", "surname_", "name_", "patronym_")) or key in {
-                    "email",
-                    "russian_citizen",
-                    "foreigner",
-                    "mobile_phone",
-                }:
-                    context.pop(key, None)
-            return BotResponse(
-                text="Формат данных для пропуска обновился. Вы иностранный гражданин?",
-                buttons=yes_no_buttons(),
-            )
+            user.dialog_state = "PROFILE_SURNAME_CYRILLIC"
+            user.dialog_context = {}
+            return BotResponse(text="Формат профиля обновился. Введите фамилию кириллицей:")
         if state == "PROFILE_PASS_FOREIGNER":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
             context["foreigner"] = value == "Да"
-            user.dialog_state = "PROFILE_PASS_SURNAME_CYRILLIC"
-            return BotResponse(text="Введите фамилию кириллицей:")
+            if context["foreigner"]:
+                user.dialog_state = "PROFILE_PASS_SURNAME_LATIN"
+                return BotResponse(text="Введите фамилию латиницей:")
+            user.dialog_state = "PROFILE_PASS_PHONE"
+            return BotResponse(text="Введите мобильный телефон:")
         cyrillic_steps = {
-            "PROFILE_PASS_SURNAME_CYRILLIC": (
-                "surname_cyrillic",
-                "PROFILE_PASS_NAME_CYRILLIC",
-                "Введите имя кириллицей:",
-                False,
-            ),
-            "PROFILE_PASS_NAME_CYRILLIC": (
-                "name_cyrillic",
-                "PROFILE_PASS_PATRONYM_CYRILLIC",
-                "Введите отчество кириллицей или «-», если отчества нет:",
-                False,
-            ),
             "PROFILE_PASS_PATRONYM_CYRILLIC": (
                 "patronym_cyrillic",
-                "PROFILE_PASS_SURNAME_LATIN" if context.get("foreigner") else "PROFILE_PASS_PHONE",
-                "Введите фамилию латиницей:" if context.get("foreigner") else "Введите мобильный телефон:",
+                "PROFILE_PASS_FOREIGNER",
+                "Вы иностранный гражданин?",
                 True,
             ),
         }
@@ -360,9 +361,7 @@ class ConversationEngine:
                 suffix = " или «-»" if patronym else ""
                 return BotResponse(text=f"Используйте только кириллицу{suffix}. Попробуйте ещё раз:")
             user.dialog_state = next_state
-            buttons = (
-                [Button(label="Нет отчества", value="-")] if next_state == "PROFILE_PASS_PATRONYM_CYRILLIC" else []
-            )
+            buttons = yes_no_buttons() if next_state == "PROFILE_PASS_FOREIGNER" else []
             return BotResponse(text=prompt, buttons=buttons)
         latin_steps = {
             "PROFILE_PASS_SURNAME_LATIN": (
@@ -418,7 +417,7 @@ class ConversationEngine:
 
     async def _finish_profile(self, user: User) -> BotResponse:
         context = user.dialog_context
-        user.full_name = str(context["full_name"])
+        user.full_name = f"{context['surname_cyrillic']} {context['name_cyrillic']}"
         user.crossplay = bool(context["crossplay"])
         user.larp_experience = bool(context["larp_experience"])
         needs_pass = bool(context["needs_pass"])
