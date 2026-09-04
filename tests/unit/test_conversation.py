@@ -105,15 +105,17 @@ async def engine_setup(
 
 
 @pytest.mark.asyncio
-async def test_enlist_never_asks_character_wishes(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_enlist_finishes_without_confirmation_or_character_wishes(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
     engine, _, publisher, _ = await engine_setup(disk_store, event)
     responses = [await engine.handle(inbound(1, ENLIST))]
     responses.append(await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True)))
-    responses.append(await engine.handle(inbound(3, "Алиса")))
-    responses.append(await engine.handle(inbound(4, "enlist:confirm", callback=True, telegram_username="ivan_player")))
-    prompts_before_enqueue = " ".join(response.text.casefold() for response in responses[:-1])
-    assert "пожелания по персонажу" not in prompts_before_enqueue
-    assert "не хотел" not in prompts_before_enqueue
+    responses.append(await engine.handle(inbound(3, "Алиса", telegram_username="ivan_player")))
+    prompts = " ".join(response.text.casefold() for response in responses)
+    assert "пожелания по персонажу" not in prompts
+    assert "подтвердить запись" not in prompts
+    assert not any(button.value == "enlist:confirm" for response in responses for button in response.buttons)
     assert len(publisher.commands) == 1
     queued = publisher.commands[0]
     assert queued.operation is Operation.ENLIST
@@ -140,8 +142,8 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     assert "текущую клавиатуру" in stale.text
     assert not publisher.commands
 
-    await engine.handle(inbound(4, "enlist:wish-play:skip", callback=True))
-    await engine.handle(inbound(5, "enlist:confirm", callback=True))
+    response = await engine.handle(inbound(4, "enlist:wish-play:skip", callback=True))
+    assert response.deferred
     assert isinstance(publisher.commands[-1].payload, EnlistPayload)
     assert publisher.commands[-1].payload.wish_play == "Без пожеланий"
 
@@ -151,8 +153,7 @@ async def test_duplicate_update_does_not_enqueue_twice(disk_store: MemoryDiskSto
     engine, _, publisher, _ = await engine_setup(disk_store, event)
     await engine.handle(inbound(1, ENLIST))
     await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
-    await engine.handle(inbound(3, "Алиса"))
-    final = inbound(4, "enlist:confirm", callback=True)
+    final = inbound(3, "Алиса")
     await engine.handle(final)
     duplicate = await engine.handle(final)
     assert duplicate.silent
@@ -261,7 +262,6 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     await engine.handle(vk(10, ENLIST))
     await engine.handle(vk(11, f"select:enlist:{event.event_id}", callback=True))
     await engine.handle(vk(12, "Алиса"))
-    await engine.handle(vk(13, "enlist:confirm", callback=True))
     enlist = publisher.commands[-1]
     assert enlist.operation is Operation.ENLIST
     assert isinstance(enlist.payload, EnlistPayload)

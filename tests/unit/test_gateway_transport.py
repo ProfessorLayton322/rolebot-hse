@@ -60,7 +60,7 @@ def test_telegram_username_is_collected_when_available() -> None:
             "callback_query": {
                 "from": {"id": 1, "username": "ivan_player"},
                 "message": {"chat": {"id": 1}},
-                "data": "enlist:confirm",
+                "data": "enlist:wish-play:skip",
             },
         }
     )

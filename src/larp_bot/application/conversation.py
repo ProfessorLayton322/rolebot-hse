@@ -662,56 +662,49 @@ class ConversationEngine:
                     ],
                 )
             user.dialog_context["wish_play"] = NO_CO_PLAYER_WISH if value == "enlist:wish-play:skip" else value[:2000]
-            user.dialog_state = "ENLIST_CONFIRM"
-            return BotResponse(
-                text=(
-                    f"Игра: «{user.dialog_context['event_name']}»\n\n"
-                    f"Хочу играть: {user.dialog_context['wish_play']}\n\n"
-                    "Подтвердить запись?"
-                ),
-                buttons=[
-                    Button(label="Подтвердить", value="enlist:confirm"),
-                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
-                ],
-            )
+            return await self._enqueue_enlist(user, message)
         if user.dialog_state == "ENLIST_CONFIRM":
+            # Complete signups started before the confirmation step was removed.
             if value != "enlist:confirm":
                 return BotResponse(text="Нажмите «Подтвердить» или «Отмена».")
-            context = user.dialog_context.copy()
-            await self._clear(user)
-            if isinstance(user, TelegramUser):
-                vk_profile = user.vk_url or ""
-                telegram_handle = normalize_telegram_handle(message.telegram_username)
-            else:
-                vk_profile = f"https://vk.com/id{user.vk_id}"
-                telegram_handle = user.telegram_handle
-            telegram_profile = None if telegram_handle is None else f"https://t.me/{telegram_handle.removeprefix('@')}"
-            await self.registrations.enqueue(
-                operation=Operation.ENLIST,
-                event_id=str(context["event_id"]),
-                platform=message.identity.platform,
-                user_id=message.identity.platform_user_id,
-                payload=EnlistPayload(
-                    display_name=user.full_name or "",
-                    wish_play=str(context["wish_play"]),
-                    larp_experience=user.larp_experience,
-                    crossplay=user.crossplay,
-                    vk_profile=vk_profile,
-                    telegram_profile=telegram_profile,
-                ),
-                reply_context=ReplyContext(
-                    chat_id=message.chat_id,
-                    peer_id=message.peer_id,
-                    text_success=(
-                        f"🎲 Вы записаны на игру «{context['event_name']}».\n\n"
-                        "Когда придёт время окончательно подтвердить участие, выберите "
-                        "«✅ Подтвердить участие». Тогда бот попросит пожелания по персонажу."
-                    ),
-                ),
-                idempotency_key=f"{message.update_id}:ENLIST",
-            )
-            return BotResponse(text="⏳ Запись принята в обработку.", deferred=True, command_enqueued=True)
+            return await self._enqueue_enlist(user, message)
         raise AssertionError("unknown enlist state")
+
+    async def _enqueue_enlist(self, user: User, message: InboundMessage) -> BotResponse:
+        context = user.dialog_context.copy()
+        await self._clear(user)
+        if isinstance(user, TelegramUser):
+            vk_profile = user.vk_url or ""
+            telegram_handle = normalize_telegram_handle(message.telegram_username)
+        else:
+            vk_profile = f"https://vk.com/id{user.vk_id}"
+            telegram_handle = user.telegram_handle
+        telegram_profile = None if telegram_handle is None else f"https://t.me/{telegram_handle.removeprefix('@')}"
+        await self.registrations.enqueue(
+            operation=Operation.ENLIST,
+            event_id=str(context["event_id"]),
+            platform=message.identity.platform,
+            user_id=message.identity.platform_user_id,
+            payload=EnlistPayload(
+                display_name=user.full_name or "",
+                wish_play=str(context["wish_play"]),
+                larp_experience=user.larp_experience,
+                crossplay=user.crossplay,
+                vk_profile=vk_profile,
+                telegram_profile=telegram_profile,
+            ),
+            reply_context=ReplyContext(
+                chat_id=message.chat_id,
+                peer_id=message.peer_id,
+                text_success=(
+                    f"🎲 Вы записаны на игру «{context['event_name']}».\n\n"
+                    "Когда придёт время окончательно подтвердить участие, выберите "
+                    "«✅ Подтвердить участие». Тогда бот попросит пожелания по персонажу."
+                ),
+            ),
+            idempotency_key=f"{message.update_id}:ENLIST",
+        )
+        return BotResponse(text="⏳ Запись принята в обработку.", deferred=True, command_enqueued=True)
 
     async def _character_command(
         self,
