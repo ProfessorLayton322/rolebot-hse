@@ -104,7 +104,7 @@ The composite registration key makes exact participant lookups constant-cost and
 
 ### XLSX
 
-Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once, published once, and overwritten in place from the current YDB registration rows after ordinary mutations, preserving the public URL. Workbooks attached to successfully created games are permanent read-only showcases: archiving a game closes registration but retains the game record, registration rows, workbook, and public URL.
+Every event owns `disk:/larp-bot/events/<uuid>-<slug>.xlsx`. It is uploaded once, published once, and overwritten in place from the current YDB registration rows after ordinary mutations, preserving the public URL. Registration rows are projected in first-signup order, with newly registered people at the bottom even if YDB returns rows in an arbitrary order; later profile or attendance updates do not move an existing row. Pass-table row order is intentionally unspecified. Workbooks attached to successfully created games are permanent read-only showcases: archiving a game closes registration but retains the game record, registration rows, workbook, and public URL.
 
 Visible columns:
 

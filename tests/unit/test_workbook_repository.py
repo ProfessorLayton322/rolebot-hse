@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
 import httpx
@@ -75,6 +75,51 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
             AttendanceStatus.CONFIRMED.value,
         )
         assert workbook.active.max_column == 9
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    showcase = await initialized(disk_store, event)
+    first_signup = datetime(2026, 9, 1, 10, tzinfo=UTC)
+    registrations = [
+        Registration(
+            event_id=event.event_id,
+            participant_key="c" * 43,
+            display_name="Newest",
+            wish_play="Anyone",
+            created_at=first_signup + timedelta(hours=2),
+        ),
+        Registration(
+            event_id=event.event_id,
+            participant_key="a" * 43,
+            display_name="Oldest, recently updated",
+            wish_play="Anyone",
+            created_at=first_signup,
+            updated_at=first_signup + timedelta(days=1),
+        ),
+        Registration(
+            event_id=event.event_id,
+            participant_key="b" * 43,
+            display_name="Middle",
+            wish_play="Anyone",
+            created_at=first_signup + timedelta(hours=1),
+        ),
+    ]
+
+    await showcase.replace(event, registrations)
+
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
+        assert rows == [
+            (1, "Oldest, recently updated"),
+            (2, "Middle"),
+            (3, "Newest"),
+        ]
     finally:
         workbook.close()
 
