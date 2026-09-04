@@ -103,9 +103,9 @@ def yes_no_buttons() -> list[Button]:
     return [Button(label="Да", value="Да"), Button(label="Нет", value="Нет")]
 
 
-def main_buttons(is_admin: bool) -> list[Button]:
+def main_buttons(has_admin_access: bool) -> list[Button]:
     labels = [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
-    if is_admin:
+    if has_admin_access:
         labels.append(ADMIN)
     return [Button(label=label, value=label) for label in labels]
 
@@ -184,10 +184,7 @@ class ConversationEngine:
         self.admins = admins
 
     async def _main(self, user: User, text: str = "Выберите действие:") -> BotResponse:
-        admin = await self.admins.is_admin(
-            Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK, user_id(user)
-        )
-        return BotResponse(text=text, buttons=main_buttons(admin))
+        return BotResponse(text=text, buttons=main_buttons(await self._has_admin_access(user)))
 
     async def _save(self, user: User, message: InboundMessage) -> None:
         user.last_update_id = message.update_id
@@ -524,7 +521,9 @@ class ConversationEngine:
         if len(parts) != 4 or not parts[2].isdigit():
             return BotResponse(text="Некорректная страница.")
         _, flow, micros, event_id = parts
-        if flow.startswith("admin-") and not await self._require_admin(user):
+        if flow in {"admin-archive", "admin-delete"} and not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        if flow.startswith("admin-") and not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
         after = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
         event_flow_statuses = {
@@ -813,8 +812,7 @@ class ConversationEngine:
         return BotResponse(text="⏳ Отмена принята в обработку.", deferred=True, command_enqueued=True)
 
     async def _admin_menu(self, user: User) -> BotResponse:
-        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        if not await self.admins.is_admin(platform, user_id(user)):
+        if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
         labels = [
             "➕ Создать игру",
@@ -823,18 +821,25 @@ class ConversationEngine:
             SEND_CONFIRMED_NOTIFICATION,
             CREATE_PASS_TABLE,
             LIST_PASS_TABLES,
-            ARCHIVE_GAME,
             "📋 Список игр",
             BACK,
         ]
+        if await self._is_admin(user):
+            labels.insert(-2, ARCHIVE_GAME)
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
-    async def _require_admin(self, user: User) -> bool:
+    async def _is_admin(self, user: User) -> bool:
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         return await self.admins.is_admin(platform, user_id(user))
 
+    async def _has_admin_access(self, user: User) -> bool:
+        if await self._is_admin(user):
+            return True
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        return await self.admins.is_gamemaster(platform, user_id(user))
+
     async def _admin_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
-        if not await self._require_admin(user):
+        if not await self._has_admin_access(user):
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
         if user.dialog_state == "ADMIN_CREATE_NAME":
@@ -933,6 +938,9 @@ class ConversationEngine:
                 command_enqueued=True,
             )
         if user.dialog_state in {"ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"}:
+            if not await self._is_admin(user):
+                await self._clear(user)
+                return BotResponse(text="Недостаточно прав.")
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
                 return BotResponse(text=f"Название не совпало. Введите точно:\n\n{expected}")
@@ -962,7 +970,9 @@ class ConversationEngine:
         event: Event,
         flow: str,
     ) -> BotResponse:
-        if not await self._require_admin(user):
+        if flow in {"admin-archive", "admin-delete"} and not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
         user.dialog_context = {
             "event_id": event.event_id,
@@ -1048,7 +1058,7 @@ class ConversationEngine:
         return BotResponse(text="🔗 Таблицы пропусков\n\n" + "\n\n".join(lines), buttons=buttons)
 
     async def _admin_start(self, user: User, value: str) -> BotResponse:
-        if not await self._require_admin(user):
+        if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
         if value == "➕ Создать игру":
             user.dialog_state = "ADMIN_CREATE_NAME"
@@ -1068,6 +1078,8 @@ class ConversationEngine:
         if value == LIST_PASS_TABLES:
             return await self._admin_pass_list()
         if value in {ARCHIVE_GAME, LEGACY_DELETE_GAME}:
+            if not await self._is_admin(user):
+                return BotResponse(text="Недостаточно прав.")
             return await self._show_events("admin-archive", None, empty_text="Игр нет.")
         if value == "📋 Список игр":
             return await self._admin_list()

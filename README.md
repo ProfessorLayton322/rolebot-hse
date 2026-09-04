@@ -346,6 +346,8 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
+| `TG_GAMEMASTER_IDS` | Public JSON array of Telegram gamemaster user IDs; gamemasters have administrative access except game archival |
+| `VK_GAMEMASTER_IDS` | Public JSON array of stable numeric VK gamemaster user IDs; gamemasters have administrative access except game archival |
 
 ### OIDC-protected runtime configuration
 
@@ -359,6 +361,8 @@ VK_CONFIRMATION_STRING
 VK_GROUP_ID
 TG_ADMIN_IDS
 VK_ADMIN_IDS
+TG_GAMEMASTER_IDS
+VK_GAMEMASTER_IDS
 PARTICIPANT_KEY_HMAC_SECRET
 CF_TO_YANDEX_HMAC_SECRET
 YANDEX_TO_CF_EGRESS_HMAC_SECRET
@@ -388,6 +392,8 @@ VK_CONFIRMATION_STRING
 VK_GROUP_ID
 TG_ADMIN_IDS
 VK_ADMIN_IDS
+TG_GAMEMASTER_IDS
+VK_GAMEMASTER_IDS
 PARTICIPANT_KEY_HMAC_SECRET
 CF_TO_YANDEX_HMAC_SECRET
 YMQ_ACCESS_KEY_ID
@@ -401,7 +407,7 @@ YANDEX_SERVICE_ACCOUNT_IDS
 1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Cloudflare account, and active Yandex billing folder.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
-4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the nine GitHub Variables above.
+4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the eleven GitHub Variables above.
 5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, four YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, injects every application secret into Workers, calls Telegram `setWebhook`, and runs live Telegram/VK smoke tests.
@@ -430,9 +436,9 @@ Use the Terraform `vk_callback_url`, numeric `VK_GROUP_ID`, matching `VK_CALLBAC
 
 ## Admin management
 
-Update the public GitHub Actions repository variable `TG_ADMIN_IDS` or `VK_ADMIN_IDS` and rerun `deploy.yml`. Values must be JSON arrays of stable numeric platform IDs—not usernames. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. The workflow replaces the Worker binding and warm Functions refresh within 60 seconds.
+Update the public GitHub Actions repository variables `TG_ADMIN_IDS`, `VK_ADMIN_IDS`, `TG_GAMEMASTER_IDS`, or `VK_GAMEMASTER_IDS` and rerun `deploy.yml`. Values must be JSON arrays of stable numeric platform IDs—not usernames. Empty gamemaster lists are represented as `[]`. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. The workflow replaces the Worker bindings and warm Functions refresh within 60 seconds.
 
-Every privileged request rechecks the latest admin set. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Deletion requires the exact case-sensitive game name after trimming outer whitespace. Admin listing is oldest-first with exactly ten entries per page.
+Every privileged request rechecks the latest role sets. Gamemasters receive the same administrative interface and functions as admins except that they cannot see or invoke game archival, including through stale buttons. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Archival requires the exact case-sensitive game name after trimming outer whitespace and remains admin-only. Admin listing is oldest-first with exactly ten entries per page.
 
 ## Secret rotation
 

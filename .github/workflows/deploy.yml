@@ -103,6 +103,8 @@ jobs:
           VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
           TG_ADMIN_IDS: ${{ vars.TG_ADMIN_IDS }}
           VK_ADMIN_IDS: ${{ vars.VK_ADMIN_IDS }}
+          TG_GAMEMASTER_IDS: ${{ vars.TG_GAMEMASTER_IDS }}
+          VK_GAMEMASTER_IDS: ${{ vars.VK_GAMEMASTER_IDS }}
           PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
           YANDEX_GATEWAY_URL: ${{ steps.outputs.outputs.yandex_gateway_url }}
           YANDEX_OIDC_AUDIENCE: ${{ steps.outputs.outputs.telegram_egress_url }}/runtime/config
