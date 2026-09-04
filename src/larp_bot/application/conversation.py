@@ -74,6 +74,26 @@ ADMIN_STATUS_CHOICES = {
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
+FREE_TEXT_DIALOG_STATES = frozenset(
+    {
+        "PROFILE_SURNAME_CYRILLIC",
+        "PROFILE_NAME_CYRILLIC",
+        "PROFILE_CONTACT",
+        "PROFILE_PASS_PATRONYM_CYRILLIC",
+        "PROFILE_PASS_SURNAME_LATIN",
+        "PROFILE_PASS_NAME_LATIN",
+        "PROFILE_PASS_PATRONYM_LATIN",
+        "PROFILE_PASS_PHONE",
+        "PROFILE_PASS_EMAIL_ADDRESS",
+        "ENLIST_WISH_PLAY",
+        "CONFIRM_WISH",
+        "CHARACTER_EDIT",
+        "ADMIN_CREATE_NAME",
+        "ADMIN_CONFIRMATION_DEADLINE",
+        "ADMIN_NOTIFICATION_TEXT",
+        "ADMIN_DELETE_NAME",
+    }
+)
 
 
 def yes_no_buttons() -> list[Button]:
@@ -184,7 +204,20 @@ class ConversationEngine:
             return BotResponse(text="", silent=True, deferred=platform is Platform.TELEGRAM)
 
         value = (message.callback or message.text).strip()
-        if value in {"/start", "/menu", BACK}:
+        current_button_values = {button.value for button in user.last_bot_buttons}
+        if (
+            user.dialog_state in FREE_TEXT_DIALOG_STATES
+            and message.callback is not None
+            and value not in current_button_values
+        ):
+            response = BotResponse(
+                text=(
+                    "Эта кнопка устарела. Используйте текущую клавиатуру из последнего сообщения бота "
+                    "или отправьте ответ текстом."
+                ),
+                buttons=user.last_bot_buttons,
+            )
+        elif value in {"/start", "/menu", BACK}:
             await self._clear(user)
             response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на LARP-игры.")
         elif value == CANCEL_DIALOG:
@@ -194,6 +227,7 @@ class ConversationEngine:
             response = await self._continue(user, message, value)
         else:
             response = await self._start(user, message, value)
+        user.last_bot_buttons = response.buttons.copy()
         await self._save(user, message)
         return response
 

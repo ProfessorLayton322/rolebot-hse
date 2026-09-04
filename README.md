@@ -77,7 +77,7 @@ stateDiagram-v2
     Cancelled --> Confirmed: CONFIRM / keep or replace old wish
 ```
 
-`ENLIST` asks only whom the player wants to play with. The prompt explicitly offers `Пропустить`; stale event-selection callbacks are rejected instead of being stored as player text. A new YDB row is `Ожидается` with an empty character wish. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` to the authoritative row before regenerating the showcase. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
+`ENLIST` asks only whom the player wants to play with. The prompt explicitly offers `Пропустить`. For every free-text prompt, the bot persists the buttons from its most recent Telegram or VK response and rejects any callback from an older keyboard instead of storing its value as profile, registration, character-wish, or administrative text. A new YDB row is `Ожидается` with an empty character wish. `CONFIRM` is the first normal place that asks for character wishes and writes the wish plus `Подтверждено` to the authoritative row before regenerating the showcase. `Без пожеланий` is stored literally, so it remains distinct from “not asked yet.”
 
 The same user has a different deterministic participant key for every event. Registrations are keyed by event in YDB, therefore:
 

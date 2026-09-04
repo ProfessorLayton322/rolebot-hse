@@ -24,6 +24,7 @@ from larp_bot.application.services import (
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
+    Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
     EmptyPayload,
@@ -92,7 +93,7 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     users = MemoryUserRepository()
-    await users.save(TelegramUser(tg_id=1))
+    await users.save(TelegramUser(tg_id=1, last_bot_buttons=[Button(label="Old", value="old:button")]))
     envelopes = [
         queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A"), 1),
         queued(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A"), 2),
@@ -115,6 +116,8 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     assert result.attendance_status is AttendanceStatus.CANCELLED
     assert consumer.deleted == [f"receipt-{index}" for index in range(1, 5)]
     assert len(transport.sent) == 4
+    saved_user = await users.get(Platform.TELEGRAM, 1)
+    assert saved_user is not None and saved_user.last_bot_buttons == []
 
 
 @pytest.mark.asyncio

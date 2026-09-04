@@ -36,6 +36,7 @@ locals {
     { name = "last_update_id", type = "Utf8", not_null = false },
     { name = "last_update_at", type = "Timestamp", not_null = false },
     { name = "last_delivery_operation_id", type = "Utf8", not_null = false },
+    { name = "last_bot_buttons_json", type = "Utf8", not_null = false },
     { name = "created_at", type = "Timestamp", not_null = true },
     { name = "updated_at", type = "Timestamp", not_null = true },
   ]

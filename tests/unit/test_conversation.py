@@ -19,6 +19,7 @@ from larp_bot.application.conversation import (
     CONFIRM,
     CREATE_PASS_TABLE,
     ENLIST,
+    FREE_TEXT_DIALOG_STATES,
     KEEP,
     LIST_PASS_TABLES,
     PROFILE,
@@ -36,6 +37,7 @@ from larp_bot.application.services import (
 )
 from larp_bot.domain.models import (
     BotIdentity,
+    Button,
     ConfirmationDeadlinePayload,
     EnlistPayload,
     Event,
@@ -175,8 +177,38 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     assert any(button.value == f"select:confirm:{event.event_id}" for button in listing.buttons)
     selection = await engine.handle(inbound(2, f"select:confirm:{event.event_id}", callback=True))
     assert "пожелания" in selection.text.casefold()
-    await engine.handle(inbound(3, "Doctor"))
+    stale = await engine.handle(inbound(3, f"select:confirm:{event.event_id}", callback=True))
+    assert "кнопка устарела" in stale.text.casefold()
+    assert stale.buttons == selection.buttons
+    assert not publisher.commands
+    await engine.handle(inbound(4, "Doctor"))
     assert publisher.commands[-1].operation is Operation.CONFIRM
+
+
+@pytest.mark.asyncio
+async def test_every_free_text_state_rejects_a_button_absent_from_the_last_bot_message(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event, admin=True)
+    current_button = Button(label="Текущая кнопка", value="current:button")
+
+    for update, state in enumerate(sorted(FREE_TEXT_DIALOG_STATES), start=1):
+        user = await users.get(Platform.TELEGRAM, 1)
+        assert user is not None
+        user.dialog_state = state
+        user.dialog_context = {"sentinel": state}
+        user.last_bot_buttons = [current_button]
+        await users.save(user)
+
+        response = await engine.handle(inbound(update, "stale:button", callback=True))
+        saved = await users.get(Platform.TELEGRAM, 1)
+
+        assert "кнопка устарела" in response.text.casefold()
+        assert response.buttons == [current_button]
+        assert saved is not None and saved.dialog_state == state
+        assert saved.dialog_context == {"sentinel": state}
+
+    assert not publisher.commands
 
 
 @pytest.mark.asyncio
@@ -280,7 +312,11 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     await engine.handle(vk(14, CONFIRM))
     prompt = await engine.handle(vk(15, f"select:confirm:{event.event_id}", callback=True))
     assert "пожелания" in prompt.text.casefold()
-    await engine.handle(vk(16, "Doctor"))
+    stale = await engine.handle(vk(16, f"select:confirm:{event.event_id}", callback=True))
+    assert "кнопка устарела" in stale.text.casefold()
+    assert stale.buttons == prompt.buttons
+    assert not publisher.commands[1:]
+    await engine.handle(vk(17, "Doctor"))
     confirmation = publisher.commands[-1]
     assert confirmation.operation is Operation.CONFIRM
     assert confirmation.participant_key is not None
@@ -292,13 +328,13 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         character_wish=confirmation.payload.character_wish,
     )
 
-    await engine.handle(vk(17, CHARACTER))
-    edit_prompt = await engine.handle(vk(18, f"select:character:{event.event_id}", callback=True))
+    await engine.handle(vk(18, CHARACTER))
+    edit_prompt = await engine.handle(vk(19, f"select:character:{event.event_id}", callback=True))
     assert "Отправьте новый вариант" in edit_prompt.text
-    await engine.handle(vk(19, "Medic"))
+    await engine.handle(vk(20, "Medic"))
     assert publisher.commands[-1].operation is Operation.UPDATE_CHARACTER_WISH
 
-    menu = await engine.handle(vk(20, ADMIN))
+    menu = await engine.handle(vk(21, ADMIN))
     assert "Администрирование" in menu.text
 
 
@@ -576,7 +612,8 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
     assert "бот сам добавит её и название игры" in prompt.text
 
     stale_button = await engine.handle(inbound(4, CHANGE_STATUS, callback=True))
-    assert "обычным текстовым сообщением" in stale_button.text
+    assert "кнопка устарела" in stale_button.text.casefold()
+    assert stale_button.buttons == prompt.buttons
     assert not publisher.commands
 
     queued = await engine.handle(inbound(5, "https://t.me/+GameChat_123"))

@@ -39,6 +39,7 @@ class MemoryUserRepository:
         if user.last_delivery_operation_id == operation_id:
             return False
         user.last_delivery_operation_id = operation_id
+        user.last_bot_buttons = []
         return True
 
 

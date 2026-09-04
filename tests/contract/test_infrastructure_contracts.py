@@ -17,6 +17,7 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "telegram_profile"' in ydb
     assert 'name = "pass_table_resource_path"' in ydb
     assert 'name = "pass_table_public_url"' in ydb
+    assert 'name = "last_bot_buttons_json"' in ydb
 
 
 def test_no_fifo_native_trigger() -> None:
