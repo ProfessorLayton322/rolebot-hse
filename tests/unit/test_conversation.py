@@ -157,9 +157,7 @@ async def test_only_idle_buttonless_user_responses_get_main_menu_navigation(
 
 
 @pytest.mark.asyncio
-async def test_terminal_navigation_buttons_leave_active_text_dialogs(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_terminal_navigation_buttons_leave_active_text_dialogs(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
     await engine.handle(inbound(1, PROFILE, user_id=2))
 

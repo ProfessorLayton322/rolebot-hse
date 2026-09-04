@@ -234,8 +234,7 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
         (Platform.VK, 3, expected_text),
     }
     assert all(
-        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)]
-        for sent in transport.sent
+        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)] for sent in transport.sent
     )
     assert consumer.deleted == ["receipt-1"]
 
@@ -348,7 +347,6 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
         (Platform.VK, 4, expected_text),
     }
     assert all(
-        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)]
-        for sent in transport.sent
+        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)] for sent in transport.sent
     )
     assert consumer.deleted == ["receipt-1"]
