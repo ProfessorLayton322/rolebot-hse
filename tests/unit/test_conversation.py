@@ -14,6 +14,7 @@ from larp_bot.adapters.memory import (
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADMIN,
+    ADMIN_MENU,
     ARCHIVE_GAME,
     CHANGE_STATUS,
     CHARACTER,
@@ -24,6 +25,7 @@ from larp_bot.application.conversation import (
     KEEP,
     LEGACY_DELETE_GAME,
     LIST_PASS_TABLES,
+    MAIN_MENU,
     PROFILE,
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_NOTIFICATION,
@@ -136,7 +138,44 @@ async def test_enlist_finishes_without_confirmation_or_character_wishes(
     assert queued.payload.crossplay is True
     assert queued.payload.vk_profile == "https://vk.com/id1"
     assert queued.payload.telegram_profile == "https://t.me/ivan_player"
+    assert [(button.label, button.value) for button in queued.reply_context.buttons] == [(MAIN_MENU, MAIN_MENU)]
+    assert [(button.label, button.value) for button in responses[-1].buttons] == [(MAIN_MENU, MAIN_MENU)]
     assert responses[-1].deferred
+
+
+@pytest.mark.asyncio
+async def test_only_idle_buttonless_user_responses_get_main_menu_navigation(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event)
+
+    prompt = await engine.handle(inbound(1, PROFILE, user_id=2))
+    terminal = await engine.handle(inbound(2, "select:character:missing-game", callback=True))
+
+    assert all(button.value != MAIN_MENU for button in prompt.buttons)
+    assert [(button.label, button.value) for button in terminal.buttons] == [(MAIN_MENU, MAIN_MENU)]
+
+
+@pytest.mark.asyncio
+async def test_terminal_navigation_buttons_leave_active_text_dialogs(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await engine.handle(inbound(1, PROFILE, user_id=2))
+
+    main = await engine.handle(inbound(2, MAIN_MENU, callback=True, user_id=2))
+    user = await users.get(Platform.TELEGRAM, 2)
+
+    assert PROFILE in [button.value for button in main.buttons]
+    assert user is not None and user.dialog_state == "IDLE"
+
+    await engine.handle(inbound(3, "➕ Создать игру", callback=True))
+
+    administration = await engine.handle(inbound(4, ADMIN_MENU, callback=True))
+    admin = await users.get(Platform.TELEGRAM, 1)
+
+    assert administration.text == "🛠 Администрирование"
+    assert admin is not None and admin.dialog_state == "IDLE"
 
 
 @pytest.mark.asyncio
@@ -504,6 +543,10 @@ async def test_admin_archive_requires_exact_case_but_trims_whitespace(
     assert "не совпало" in wrong.text
     accepted = await engine.handle(inbound(5, f"  {event.name}  "))
     assert accepted.deferred
+    assert [(button.label, button.value) for button in accepted.buttons] == [(ADMIN_MENU, ADMIN_MENU)]
+    assert [(button.label, button.value) for button in publisher.commands[-1].reply_context.buttons] == [
+        (ADMIN_MENU, ADMIN_MENU)
+    ]
     assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
 
 
@@ -732,12 +775,14 @@ async def test_admin_can_create_one_pass_table_and_list_its_permanent_link(
     assert any(button.value == f"select:admin-pass-create:{event.event_id}" for button in games.buttons)
     created = await engine.handle(inbound(3, f"select:admin-pass-create:{event.event_id}", callback=True))
     assert "Участников: 0" in created.text
+    assert [(button.label, button.value) for button in created.buttons] == [(ADMIN_MENU, ADMIN_MENU)]
     link = "https://disk.example/public/2"
     assert link in created.text
 
     await engine.handle(inbound(4, CREATE_PASS_TABLE, callback=True))
     repeated = await engine.handle(inbound(5, f"select:admin-pass-create:{event.event_id}", callback=True))
     assert "уже создана" in repeated.text
+    assert [(button.label, button.value) for button in repeated.buttons] == [(ADMIN_MENU, ADMIN_MENU)]
     assert link in repeated.text
 
     listed = await engine.handle(inbound(6, LIST_PASS_TABLES, callback=True))

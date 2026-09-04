@@ -14,6 +14,7 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.adapters.ymq.client import QueueEnvelope
+from larp_bot.application.navigation import MAIN_MENU
 from larp_bot.application.services import (
     ConfirmationNotificationService,
     OrderedMutationService,
@@ -35,6 +36,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    ReplyContext,
     TelegramUser,
     VkUser,
 )
@@ -67,6 +69,7 @@ def queued(
     operation: Operation,
     payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | NotificationPayload | EmptyPayload,
     index: int,
+    buttons: Sequence[Button] = (),
 ) -> QueueEnvelope:
     command = OrderedRegistrationCommand(
         operation_id=str(uuid4()),
@@ -80,6 +83,7 @@ def queued(
             else None
         ),
         payload=payload,
+        reply_context=ReplyContext(buttons=list(buttons)),
     )
     return QueueEnvelope(command=command, receipt_handle=f"receipt-{index}")
 
@@ -95,7 +99,13 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=1, last_bot_buttons=[Button(label="Old", value="old:button")]))
     envelopes = [
-        queued(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A"), 1),
+        queued(
+            event,
+            Operation.ENLIST,
+            EnlistPayload(display_name="Player", wish_play="A"),
+            1,
+            [Button(label=MAIN_MENU, value=MAIN_MENU)],
+        ),
         queued(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A"), 2),
         queued(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="B"), 3),
         queued(event, Operation.CANCEL, EmptyPayload(), 4),
@@ -116,6 +126,7 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     assert result.attendance_status is AttendanceStatus.CANCELLED
     assert consumer.deleted == [f"receipt-{index}" for index in range(1, 5)]
     assert len(transport.sent) == 4
+    assert [(button.label, button.value) for button in transport.sent[0][4]] == [(MAIN_MENU, MAIN_MENU)]
     saved_user = await users.get(Platform.TELEGRAM, 1)
     assert saved_user is not None and saved_user.last_bot_buttons == []
 
@@ -222,6 +233,10 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
         (Platform.TELEGRAM, 2, expected_text),
         (Platform.VK, 3, expected_text),
     }
+    assert all(
+        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)]
+        for sent in transport.sent
+    )
     assert consumer.deleted == ["receipt-1"]
 
 
@@ -332,4 +347,8 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
         (Platform.TELEGRAM, 3, expected_text),
         (Platform.VK, 4, expected_text),
     }
+    assert all(
+        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)]
+        for sent in transport.sent
+    )
     assert consumer.deleted == ["receipt-1"]

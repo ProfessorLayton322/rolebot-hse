@@ -29,6 +29,7 @@ from larp_bot.domain.models import (
 from larp_bot.domain.security import participant_key
 
 from .deadlines import format_confirmation_deadline
+from .navigation import main_menu_button
 from .ports import (
     DeferredTransport,
     EventRepository,
@@ -414,6 +415,7 @@ class ConfirmationNotificationService:
                 user_id=recipient.user_id,
                 request_id=request_id,
                 text=text,
+                buttons=[main_menu_button()],
             )
             await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id)
             delivered += 1

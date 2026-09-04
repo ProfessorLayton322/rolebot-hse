@@ -36,6 +36,7 @@ from .deadlines import (
     format_confirmation_deadline,
     parse_confirmation_deadline,
 )
+from .navigation import ADMIN_MENU, MAIN_MENU, admin_menu_button, main_menu_button
 from .ports import AdminConfigProvider, EventRepository, UserRepository, new_user
 from .services import EventAdministrationService, RegistrationService
 
@@ -76,6 +77,19 @@ ADMIN_STATUS_CHOICES = {
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
+ADMIN_ACTIONS = frozenset(
+    {
+        "➕ Создать игру",
+        CHANGE_STATUS,
+        SEND_CONFIRMATION_REMINDER,
+        SEND_CONFIRMED_NOTIFICATION,
+        CREATE_PASS_TABLE,
+        LIST_PASS_TABLES,
+        ARCHIVE_GAME,
+        LEGACY_DELETE_GAME,
+        "📋 Список игр",
+    }
+)
 FREE_TEXT_DIALOG_STATES = frozenset(
     {
         "PROFILE_SURNAME_CYRILLIC",
@@ -204,11 +218,19 @@ class ConversationEngine:
             return BotResponse(text="", silent=True, deferred=platform is Platform.TELEGRAM)
 
         value = (message.callback or message.text).strip()
+        admin_branch = (
+            user.dialog_state.startswith("ADMIN_")
+            or value in {ADMIN, ADMIN_MENU}
+            or value in ADMIN_ACTIONS
+            or value in LEGACY_STATUS_ACTIONS
+            or value.startswith(("select:admin-", "page:admin-"))
+        )
         current_button_values = {button.value for button in user.last_bot_buttons}
         if (
             user.dialog_state in FREE_TEXT_DIALOG_STATES
             and message.callback is not None
             and value not in current_button_values
+            and value not in {MAIN_MENU, ADMIN_MENU}
         ):
             response = BotResponse(
                 text=(
@@ -217,16 +239,24 @@ class ConversationEngine:
                 ),
                 buttons=user.last_bot_buttons,
             )
-        elif value in {"/start", "/menu", BACK}:
+        elif value in {"/start", "/menu", MAIN_MENU, BACK}:
             await self._clear(user)
             response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на LARP-игры.")
         elif value == CANCEL_DIALOG:
             await self._clear(user)
             response = await self._main(user, "Действие отменено.")
+        elif value == ADMIN_MENU:
+            await self._clear(user)
+            response = await self._admin_menu(user)
         elif user.dialog_state != "IDLE":
             response = await self._continue(user, message, value)
         else:
             response = await self._start(user, message, value)
+        if user.dialog_state == "IDLE" and not response.silent and not response.buttons:
+            if admin_branch and await self._has_admin_access(user):
+                response.buttons = [admin_menu_button()]
+            else:
+                response.buttons = [main_menu_button()]
         user.last_bot_buttons = response.buttons.copy()
         await self._save(user, message)
         return response
@@ -264,7 +294,7 @@ class ConversationEngine:
             return await self._show_registered(user, "character")
         if value == CANCEL:
             return await self._show_registered(user, "cancel")
-        if value == ADMIN:
+        if value in {ADMIN, ADMIN_MENU}:
             return await self._admin_menu(user)
         if value.startswith("select:"):
             return await self._select_event(user, message, value)
@@ -745,6 +775,7 @@ class ConversationEngine:
                     "Когда придёт время окончательно подтвердить участие, выберите "
                     "«✅ Подтвердить участие». Тогда бот попросит пожелания по персонажу."
                 ),
+                buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:ENLIST",
         )
@@ -786,6 +817,7 @@ class ConversationEngine:
                     if operation is Operation.CONFIRM
                     else f"🎭 Пожелания для игры «{context['event_name']}» обновлены."
                 ),
+                buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:{operation.value}",
         )
@@ -806,6 +838,7 @@ class ConversationEngine:
                 chat_id=message.chat_id,
                 peer_id=message.peer_id,
                 text_success=f"❌ Участие в игре «{context['event_name']}» отменено.",
+                buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:CANCEL",
         )
@@ -873,7 +906,8 @@ class ConversationEngine:
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
-                    text_success=f"Статус игры «{context['event_name']}» изменён: {status_label}."
+                    text_success=f"Статус игры «{context['event_name']}» изменён: {status_label}.",
+                    buttons=[admin_menu_button()],
                 ),
                 idempotency_key=f"{message.update_id}:{operation.value}",
             )
@@ -895,7 +929,8 @@ class ConversationEngine:
                 user_id=message.identity.platform_user_id,
                 payload=ConfirmationDeadlinePayload(deadline=deadline),
                 reply_context=ReplyContext(
-                    text_success=f"Статус игры «{context['event_name']}» изменён: {STATUS_CONFIRMATION}."
+                    text_success=f"Статус игры «{context['event_name']}» изменён: {STATUS_CONFIRMATION}.",
+                    buttons=[admin_menu_button()],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.OPEN_CONFIRMATION.value}",
             )
@@ -955,7 +990,8 @@ class ConversationEngine:
                 reply_context=ReplyContext(
                     text_success=(
                         f"📦 Игра «{expected}» архивирована. Игра, записи и XLSX-таблицы сохранены в постоянном списке."
-                    )
+                    ),
+                    buttons=[admin_menu_button()],
                 ),
                 idempotency_key=f"{message.update_id}:ARCHIVE_EVENT",
             )
@@ -1087,17 +1123,6 @@ class ConversationEngine:
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.
     async def dispatch_idle_admin(self, user: User, value: str) -> BotResponse | None:
-        admin_actions = {
-            "➕ Создать игру",
-            CHANGE_STATUS,
-            SEND_CONFIRMATION_REMINDER,
-            SEND_CONFIRMED_NOTIFICATION,
-            CREATE_PASS_TABLE,
-            LIST_PASS_TABLES,
-            ARCHIVE_GAME,
-            LEGACY_DELETE_GAME,
-            "📋 Список игр",
-        }
-        if value in admin_actions or value in LEGACY_STATUS_ACTIONS:
+        if value in ADMIN_ACTIONS or value in LEGACY_STATUS_ACTIONS:
             return await self._admin_start(user, value)
         return None
