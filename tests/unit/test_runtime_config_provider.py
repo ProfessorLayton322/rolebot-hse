@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
+from larp_bot.domain.models import Platform
 from larp_bot.functions.bootstrap import iam_token_from_context
 
 
@@ -90,3 +91,32 @@ async def test_runtime_config_rejects_non_string_values() -> None:
         )
         with pytest.raises(RuntimeError, match="invalid payload"):
             await provider.get_secret("VALUE")
+
+
+@pytest.mark.asyncio
+async def test_runtime_config_reads_platform_admin_and_gamemaster_ids() -> None:
+    values = {
+        "TG_ADMIN_IDS": "[10]",
+        "VK_ADMIN_IDS": "[20]",
+        "TG_GAMEMASTER_IDS": "[11]",
+        "VK_GAMEMASTER_IDS": "[21]",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == RuntimeConfigProvider.TOKEN_EXCHANGE_URL:
+            return httpx.Response(200, json={"access_token": "identity-token"})
+        return httpx.Response(200, json={"values": values})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = RuntimeConfigProvider(
+            "https://config.example/runtime/config",
+            "https://config.example/runtime/config",
+            "service-account-id",
+            client=client,
+            iam_token="context-token",
+        )
+        assert await provider.is_admin(Platform.TELEGRAM, 10)
+        assert await provider.is_admin(Platform.VK, 20)
+        assert await provider.is_gamemaster(Platform.TELEGRAM, 11)
+        assert await provider.is_gamemaster(Platform.VK, 21)
+        assert not await provider.is_gamemaster(Platform.TELEGRAM, 10)

@@ -11,6 +11,8 @@ const env: Env = {
   VK_GROUP_ID: "42",
   TG_ADMIN_IDS: "[1]",
   VK_ADMIN_IDS: "[2]",
+  TG_GAMEMASTER_IDS: "[3]",
+  VK_GAMEMASTER_IDS: "[4]",
   PARTICIPANT_KEY_HMAC_SECRET: "participant-secret",
   CF_TO_YANDEX_HMAC_SECRET: "ingress-secret",
   YMQ_ACCESS_KEY_ID: "ymq-key-id",
@@ -108,6 +110,8 @@ describe("telegram egress", () => {
     const payload = (await response.json()) as { values: Record<string, string> };
     expect(payload.values.YANDEX_DISK_TOKEN).toBe("disk-token");
     expect(payload.values.YMQ_SECRET_ACCESS_KEY).toBe("ymq-secret");
+    expect(payload.values.TG_GAMEMASTER_IDS).toBe("[3]");
+    expect(payload.values.VK_GAMEMASTER_IDS).toBe("[4]");
     expect(payload.values.TG_BOT_TOKEN).toBeUndefined();
   });
 

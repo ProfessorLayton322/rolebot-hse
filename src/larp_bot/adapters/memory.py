@@ -252,14 +252,22 @@ class StaticAdminProvider:
         self,
         tg_ids: set[int] | None = None,
         vk_ids: set[int] | None = None,
+        tg_gamemaster_ids: set[int] | None = None,
+        vk_gamemaster_ids: set[int] | None = None,
         secrets: dict[str, str] | None = None,
     ) -> None:
         self.tg_ids = tg_ids or set()
         self.vk_ids = vk_ids or set()
+        self.tg_gamemaster_ids = tg_gamemaster_ids or set()
+        self.vk_gamemaster_ids = vk_gamemaster_ids or set()
         self.secrets = secrets or {}
 
     async def is_admin(self, platform: Platform, user_id: int) -> bool:
         return user_id in (self.tg_ids if platform is Platform.TELEGRAM else self.vk_ids)
+
+    async def is_gamemaster(self, platform: Platform, user_id: int) -> bool:
+        ids = self.tg_gamemaster_ids if platform is Platform.TELEGRAM else self.vk_gamemaster_ids
+        return user_id in ids
 
     async def get_secret(self, key: str) -> str:
         return self.secrets[key]

@@ -96,8 +96,9 @@ class RuntimeConfigProvider:
         except KeyError as exc:
             raise RuntimeError(f"runtime config entry is missing: {key}") from exc
 
-    async def is_admin(self, platform: Platform, user_id: int) -> bool:
-        key = "TG_ADMIN_IDS" if platform is Platform.TELEGRAM else "VK_ADMIN_IDS"
+    async def _id_is_configured(self, platform: Platform, user_id: int, *, role: str) -> bool:
+        prefix = "TG" if platform is Platform.TELEGRAM else "VK"
+        key = f"{prefix}_{role}_IDS"
         raw = await self.get_secret(key)
         try:
             values = json.loads(raw)
@@ -106,3 +107,9 @@ class RuntimeConfigProvider:
         if not isinstance(values, list) or any(type(item) is not int for item in values):
             raise RuntimeError(f"{key} must be a JSON numeric array")
         return user_id in values
+
+    async def is_admin(self, platform: Platform, user_id: int) -> bool:
+        return await self._id_is_configured(platform, user_id, role="ADMIN")
+
+    async def is_gamemaster(self, platform: Platform, user_id: int) -> bool:
+        return await self._id_is_configured(platform, user_id, role="GAMEMASTER")

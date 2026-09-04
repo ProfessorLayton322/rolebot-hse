@@ -12,6 +12,8 @@ set -euo pipefail
 : "${VK_GROUP_ID:?VK_GROUP_ID is required}"
 : "${TG_ADMIN_IDS:?TG_ADMIN_IDS is required}"
 : "${VK_ADMIN_IDS:?VK_ADMIN_IDS is required}"
+: "${TG_GAMEMASTER_IDS:?TG_GAMEMASTER_IDS is required}"
+: "${VK_GAMEMASTER_IDS:?VK_GAMEMASTER_IDS is required}"
 : "${PARTICIPANT_KEY_HMAC_SECRET:?PARTICIPANT_KEY_HMAC_SECRET is required}"
 : "${YMQ_ACCESS_KEY_ID:?YMQ_ACCESS_KEY_ID is required}"
 : "${YMQ_SECRET_ACCESS_KEY:?YMQ_SECRET_ACCESS_KEY is required}"
@@ -33,6 +35,8 @@ validate_numeric_ids() {
 
 validate_numeric_ids "TG_ADMIN_IDS" "${TG_ADMIN_IDS}"
 validate_numeric_ids "VK_ADMIN_IDS" "${VK_ADMIN_IDS}"
+validate_numeric_ids "TG_GAMEMASTER_IDS" "${TG_GAMEMASTER_IDS}"
+validate_numeric_ids "VK_GAMEMASTER_IDS" "${VK_GAMEMASTER_IDS}"
 if ! printf '%s' "${YANDEX_SERVICE_ACCOUNT_IDS}" | jq -e \
   'type == "array" and length == 2 and all(.[]; type == "string" and length > 0)' >/dev/null; then
   echo "YANDEX_SERVICE_ACCOUNT_IDS must contain the two runtime service-account IDs" >&2
@@ -58,6 +62,8 @@ jq -n \
   --arg vk_group "${VK_GROUP_ID}" \
   --arg tg_admins "${TG_ADMIN_IDS}" \
   --arg vk_admins "${VK_ADMIN_IDS}" \
+  --arg tg_gamemasters "${TG_GAMEMASTER_IDS}" \
+  --arg vk_gamemasters "${VK_GAMEMASTER_IDS}" \
   --arg participant "${PARTICIPANT_KEY_HMAC_SECRET}" \
   --arg ingress "${CF_TO_YANDEX_HMAC_SECRET}" \
   --arg ymq_id "${YMQ_ACCESS_KEY_ID}" \
@@ -74,6 +80,8 @@ jq -n \
     VK_GROUP_ID:$vk_group,
     TG_ADMIN_IDS:$tg_admins,
     VK_ADMIN_IDS:$vk_admins,
+    TG_GAMEMASTER_IDS:$tg_gamemasters,
+    VK_GAMEMASTER_IDS:$vk_gamemasters,
     PARTICIPANT_KEY_HMAC_SECRET:$participant,
     CF_TO_YANDEX_HMAC_SECRET:$ingress,
     YMQ_ACCESS_KEY_ID:$ymq_id,

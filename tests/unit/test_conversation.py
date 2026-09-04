@@ -22,6 +22,7 @@ from larp_bot.application.conversation import (
     ENLIST,
     FREE_TEXT_DIALOG_STATES,
     KEEP,
+    LEGACY_DELETE_GAME,
     LIST_PASS_TABLES,
     PROFILE,
     SEND_CONFIRMATION_REMINDER,
@@ -72,7 +73,11 @@ def inbound(
 
 
 async def engine_setup(
-    store: MemoryDiskStore, event: Event, *additional_events: Event, admin: bool = False
+    store: MemoryDiskStore,
+    event: Event,
+    *additional_events: Event,
+    admin: bool = False,
+    gamemaster: bool = False,
 ) -> tuple[
     ConversationEngine,
     MemoryUserRepository,
@@ -102,7 +107,10 @@ async def engine_setup(
         events,
         registrations,
         EventAdministrationService(events, showcase, catalog, users, "participant-secret"),
-        StaticAdminProvider(tg_ids={1} if admin else set()),
+        StaticAdminProvider(
+            tg_ids={1} if admin else set(),
+            tg_gamemaster_ids={1} if gamemaster else set(),
+        ),
     )
     return conversation, users, publisher, tables
 
@@ -497,6 +505,62 @@ async def test_admin_archive_requires_exact_case_but_trims_whitespace(
     accepted = await engine.handle(inbound(5, f"  {event.name}  "))
     assert accepted.deferred
     assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
+
+
+@pytest.mark.asyncio
+async def test_gamemaster_has_admin_interface_except_archive(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+
+    main = await engine.handle(inbound(1, "/start"))
+    assert ADMIN in [button.value for button in main.buttons]
+
+    menu = await engine.handle(inbound(2, ADMIN))
+    assert [button.value for button in menu.buttons] == [
+        "➕ Создать игру",
+        CHANGE_STATUS,
+        SEND_CONFIRMATION_REMINDER,
+        SEND_CONFIRMED_NOTIFICATION,
+        CREATE_PASS_TABLE,
+        LIST_PASS_TABLES,
+        "📋 Список игр",
+        "⬅️ Назад",
+    ]
+
+    status_games = await engine.handle(inbound(3, CHANGE_STATUS))
+    assert any(button.value == f"select:admin-status:{event.event_id}" for button in status_games.buttons)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("archive_state", ["ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"])
+async def test_gamemaster_cannot_archive_through_hidden_or_stale_actions(
+    archive_state: str, disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
+
+    for update, value in enumerate(
+        (
+            ARCHIVE_GAME,
+            LEGACY_DELETE_GAME,
+            f"select:admin-archive:{event.event_id}",
+            f"select:admin-delete:{event.event_id}",
+            f"page:admin-archive:{int(event.created_at.timestamp() * 1_000_000)}:{event.event_id}",
+        ),
+        start=1,
+    ):
+        response = await engine.handle(inbound(update, value, callback=value.startswith(("select:", "page:"))))
+        assert response.text == "Недостаточно прав."
+
+    user = await users.get(Platform.TELEGRAM, 1)
+    assert user is not None
+    user.dialog_state = archive_state
+    user.dialog_context = {"event_id": event.event_id, "event_name": event.name}
+    await users.save(user)
+    response = await engine.handle(inbound(10, event.name))
+
+    assert response.text == "Недостаточно прав."
+    saved_user = await users.get(Platform.TELEGRAM, 1)
+    assert saved_user is not None and saved_user.dialog_state == "IDLE"
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio

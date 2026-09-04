@@ -88,6 +88,20 @@ def test_admin_page_size_is_ten_in_shared_engine() -> None:
     assert "self.events.list_page(after=after, limit=10)" in source
 
 
+def test_gamemaster_ids_are_propagated_to_runtime_config() -> None:
+    names = ("TG_GAMEMASTER_IDS", "VK_GAMEMASTER_IDS")
+    deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
+    update_script = (ROOT / "scripts/update_cloudflare_secrets.sh").read_text()
+    worker = (ROOT / "cloudflare/telegram-egress/src/index.ts").read_text()
+    wrangler = (ROOT / "cloudflare/telegram-egress/wrangler.toml").read_text()
+
+    for name in names:
+        assert f"vars.{name}" in deploy
+        assert f'validate_numeric_ids "{name}"' in update_script
+        assert name in worker
+        assert name in wrangler
+
+
 def test_user_models_do_not_contain_character_wish_source_field() -> None:
     models = (ROOT / "src/larp_bot/domain/models.py").read_text()
     user_section = models.split("class UserBase", 1)[1].split("class Event", 1)[0]
