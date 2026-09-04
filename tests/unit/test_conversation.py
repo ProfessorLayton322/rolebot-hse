@@ -251,11 +251,12 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
             peer_id=7,
         )
 
-    for update, value in enumerate((PROFILE, "Иван Иванов", "Пропустить", "Да", "Нет", "Нет"), start=1):
+    for update, value in enumerate((PROFILE, "Иванов", "Иван", "Пропустить", "Да", "Нет", "Нет"), start=1):
         await engine.handle(vk(update, value))
     profile = await users.get(Platform.VK, 7)
     assert isinstance(profile, VkUser)
     assert profile.profile_complete and profile.telegram_handle is None
+    assert profile.full_name == "Иванов Иван"
 
     await engine.handle(vk(10, ENLIST))
     await engine.handle(vk(11, f"select:enlist:{event.event_id}", callback=True))
@@ -349,21 +350,20 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     user_id = 2
     answers = (
         PROFILE,
-        "Иван Иванов",
+        "Иванов",
+        "Иван",
         "https://vk.com/id2",
         "Да",
         "Нет",
         "Да",
-        "Нет",
-        "Иванов",
-        "Иван",
         "Иванович",
+        "Нет",
         "+7 999 123-45-67",
     )
     for update, answer in enumerate(answers, start=1):
         await engine.handle(inbound(update, answer, user_id=user_id))
 
-    invalid = await engine.handle(inbound(12, "not-an-email", user_id=user_id))
+    invalid = await engine.handle(inbound(11, "not-an-email", user_id=user_id))
 
     assert "Некорректный email" in invalid.text
     pending = await users.get(Platform.TELEGRAM, user_id)
@@ -371,7 +371,7 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     assert pending.dialog_state == "PROFILE_PASS_EMAIL_ADDRESS"
     assert "email" not in pending.dialog_context
 
-    saved = await engine.handle(inbound(13, "player@example.com", user_id=user_id))
+    saved = await engine.handle(inbound(12, "player@example.com", user_id=user_id))
     profile = await users.get(Platform.TELEGRAM, user_id)
     assert "Профиль сохранён" in saved.text
     assert profile is not None and profile.pass_details is not None
@@ -379,6 +379,32 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     assert profile.pass_details.mobile_phone == "+7 999 123-45-67"
     assert profile.pass_details.foreigner is False
     assert profile.pass_details.surname_latin is None
+    assert profile.full_name == "Иванов Иван"
+
+
+@pytest.mark.asyncio
+async def test_every_profile_collects_cyrillic_surname_and_name_separately(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+
+    surname_prompt = await engine.handle(inbound(1, PROFILE, user_id=2))
+    invalid_surname = await engine.handle(inbound(2, "Smith", user_id=2))
+    name_prompt = await engine.handle(inbound(3, "Смирнов", user_id=2))
+    invalid_name = await engine.handle(inbound(4, "John", user_id=2))
+    contact_prompt = await engine.handle(inbound(5, "Иван", user_id=2))
+    for update, answer in enumerate(("https://vk.com/id2", "Нет", "Нет", "Нет"), start=6):
+        saved = await engine.handle(inbound(update, answer, user_id=2))
+
+    profile = await users.get(Platform.TELEGRAM, 2)
+    assert "фамилию кириллицей" in surname_prompt.text
+    assert "только кириллицу" in invalid_surname.text
+    assert "имя кириллицей" in name_prompt.text
+    assert "только кириллицу" in invalid_name.text
+    assert "страницу VK" in contact_prompt.text
+    assert "Профиль сохранён" in saved.text
+    assert profile is not None and profile.full_name == "Смирнов Иван"
+    assert profile.needs_pass is False and profile.pass_details is None
 
 
 @pytest.mark.asyncio
@@ -386,15 +412,14 @@ async def test_foreign_profile_collects_separate_pass_fields(disk_store: MemoryD
     engine, users, _, _ = await engine_setup(disk_store, event)
     answers = (
         PROFILE,
-        "Анна Ли",
+        "Ли",
+        "Анна",
         "https://vk.com/anna-li",
         "Нет",
         "Да",
         "Да",
-        "Да",
-        "Ли",
-        "Анна",
         "-",
+        "Да",
         "Li",
         "Anna",
         "-",
