@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.domain.models import Platform
+from larp_bot.domain.models import Button, Platform
 
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
@@ -30,7 +31,7 @@ class OrderedWorker:
         self.notifications = notifications
         self.max_seconds = max_seconds
 
-    async def _deliver_once(self, envelope: QueueEnvelope, text: str) -> None:
+    async def _deliver_once(self, envelope: QueueEnvelope, text: str, buttons: Sequence[Button]) -> None:
         command = envelope.command
         if command.platform is Platform.SYSTEM or command.platform_user_id <= 0:
             return
@@ -42,6 +43,7 @@ class OrderedWorker:
             user_id=command.platform_user_id,
             request_id=command.operation_id,
             text=text,
+            buttons=buttons,
         )
         # Mark only after the transport accepted the message. If delivery fails, the FIFO
         # message remains retryable and the already-authoritative YDB mutation is not undone.
@@ -70,7 +72,7 @@ class OrderedWorker:
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
                 if not notification_delivered:
-                    await self._deliver_once(raw, text)
+                    await self._deliver_once(raw, text, command.reply_context.buttons)
                 await self.consumer.delete(raw.receipt_handle)
                 LOGGER.info(
                     "ordered_command_completed",

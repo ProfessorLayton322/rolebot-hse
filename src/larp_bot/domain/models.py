@@ -329,6 +329,7 @@ class ReplyContext(StrictModel):
     peer_id: int | None = None
     text_success: str = ""
     text_failure: str = ""
+    buttons: list[Button] = Field(default_factory=list)
 
 
 class OrderedRegistrationCommand(StrictModel):
