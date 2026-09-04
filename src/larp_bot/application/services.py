@@ -19,6 +19,7 @@ from larp_bot.domain.models import (
     NotificationPayload,
     Operation,
     OrderedRegistrationCommand,
+    PassDetails,
     Platform,
     Registration,
     ReplyContext,
@@ -98,6 +99,8 @@ class RegistrationCatalog:
 
     async def delete(self, event: Event) -> None:
         await self.showcase.delete_event_workbook(event.disk_resource_path)
+        pass_table_path = event.pass_table_resource_path or f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+        await self.showcase.delete_pass_table(pass_table_path)
         await self.registrations.delete_for_event(event.event_id)
         await self.events.delete(event.event_id)
 
@@ -208,10 +211,27 @@ class RegistrationService:
         return command
 
 
+@dataclass(frozen=True)
+class PassTableExport:
+    public_url: str
+    created: bool
+    row_count: int | None
+
+
 class EventAdministrationService:
-    def __init__(self, events: EventRepository, showcase: RegistrationShowcaseRepository) -> None:
+    def __init__(
+        self,
+        events: EventRepository,
+        showcase: RegistrationShowcaseRepository,
+        catalog: RegistrationCatalog,
+        users: UserRepository,
+        participant_secret: str,
+    ) -> None:
         self.events = events
         self.showcase = showcase
+        self.catalog = catalog
+        self.users = users
+        self.participant_secret = participant_secret
 
     async def create_event(self, name: str) -> Event:
         clean_name = name.strip()
@@ -232,6 +252,39 @@ class EventAdministrationService:
             await self.showcase.delete_event_workbook(disk_path)
             raise
         return event
+
+    async def create_pass_table(self, event_id: str) -> PassTableExport:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.pass_table_public_url is not None:
+            return PassTableExport(event.pass_table_public_url, created=False, row_count=None)
+
+        await self.catalog.ensure_migrated(event)
+        confirmed = [
+            registration
+            for registration in await self.catalog.registrations.list_for_event(event.event_id)
+            if registration.attendance_status is AttendanceStatus.CONFIRMED
+        ]
+        pass_profiles: dict[str, PassDetails] = {}
+        for user in await self.users.list_all():
+            if not user.profile_complete or user.needs_pass is not True or user.pass_details is None:
+                continue
+            platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+            uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
+            key = participant_key(self.participant_secret, platform, uid, event.event_id)
+            pass_profiles[key] = user.pass_details
+        profiles = [pass_profiles[row.participant_key] for row in confirmed if row.participant_key in pass_profiles]
+
+        disk_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+        public_url = await self.showcase.create_pass_table(disk_path, profiles)
+        try:
+            if not await self.events.set_pass_table(event.event_id, disk_path, public_url):
+                raise EventNotFound("Игра была удалена во время создания таблицы")
+        except Exception:
+            await self.showcase.delete_pass_table(disk_path)
+            raise
+        return PassTableExport(public_url, created=True, row_count=len(profiles))
 
 
 @dataclass(frozen=True)
@@ -384,7 +437,7 @@ class OrderedMutationService:
         event = await self.events.get(command.event_id)
         if event is None:
             if command.operation is Operation.DELETE_EVENT:
-                return "Игра и таблица уже удалены"
+                return "Игра и таблицы уже удалены"
             raise EventNotFound("Игра уже удалена или не существует")
 
         status_operations = {
@@ -410,7 +463,7 @@ class OrderedMutationService:
             return message
         if command.operation is Operation.DELETE_EVENT:
             await self.catalog.delete(event)
-            return "Игра и таблица удалены"
+            return "Игра и таблицы удалены"
 
         assert command.participant_key is not None
         await self.catalog.ensure_migrated(event)
@@ -422,9 +475,11 @@ class OrderedMutationService:
             crossplay = command.payload.crossplay
             vk_profile = command.payload.vk_profile
             telegram_profile = command.payload.telegram_profile
-            if self.users is not None and (larp_experience is None or crossplay is None or not vk_profile):
+            if self.users is not None:
                 user = await self.users.get(command.platform, command.platform_user_id)
-                if user is not None:
+                if user is None or not user.profile_complete:
+                    raise OperationNotAllowed("Сначала полностью заполните профиль")
+                if larp_experience is None or crossplay is None or not vk_profile:
                     larp_experience = user.larp_experience
                     crossplay = user.crossplay
                     if isinstance(user, TelegramUser):

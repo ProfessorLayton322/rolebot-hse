@@ -17,8 +17,10 @@ from larp_bot.application.conversation import (
     CHANGE_STATUS,
     CHARACTER,
     CONFIRM,
+    CREATE_PASS_TABLE,
     ENLIST,
     KEEP,
+    LIST_PASS_TABLES,
     PROFILE,
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_NOTIFICATION,
@@ -96,7 +98,7 @@ async def engine_setup(
         users,
         events,
         registrations,
-        EventAdministrationService(events, showcase),
+        EventAdministrationService(events, showcase, catalog, users, "participant-secret"),
         StaticAdminProvider(tg_ids={1} if admin else set()),
     )
     return conversation, users, publisher, tables
@@ -236,7 +238,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         users,
         events,
         RegistrationService(events, catalog, publisher, "secret"),
-        EventAdministrationService(events, showcase),
+        EventAdministrationService(events, showcase, catalog, users, "secret"),
         StaticAdminProvider(vk_ids={7}),
     )
 
@@ -327,12 +329,16 @@ async def test_incomplete_profile_cannot_enlist(disk_store: MemoryDiskStore, eve
         users,
         events,
         RegistrationService(events, catalog, publisher, "secret"),
-        EventAdministrationService(events, showcase),
+        EventAdministrationService(events, showcase, catalog, users, "secret"),
         StaticAdminProvider(),
     )
     response = await engine.handle(inbound(1, ENLIST))
     assert "Сначала зарегистрируйте профиль" in response.text
     assert response.buttons[0].value == PROFILE
+
+    forged = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
+    assert "полностью заполните профиль" in forged.text
+    assert not publisher.commands
 
 
 @pytest.mark.asyncio
@@ -348,34 +354,71 @@ async def test_profile_validates_email_before_advancing_to_next_question(
         "Да",
         "Нет",
         "Да",
-        "Иванов Иван Иванович",
-        "Ivanov Ivan Ivanovich",
+        "Нет",
+        "Иванов",
+        "Иван",
+        "Иванович",
+        "+7 999 123-45-67",
     )
     for update, answer in enumerate(answers, start=1):
         await engine.handle(inbound(update, answer, user_id=user_id))
 
-    invalid = await engine.handle(inbound(9, "not-an-email", user_id=user_id))
+    invalid = await engine.handle(inbound(12, "not-an-email", user_id=user_id))
 
     assert "Некорректный email" in invalid.text
-    assert "гражданином" not in invalid.text
     pending = await users.get(Platform.TELEGRAM, user_id)
     assert pending is not None
-    assert pending.dialog_state == "PROFILE_PASS_EMAIL"
+    assert pending.dialog_state == "PROFILE_PASS_EMAIL_ADDRESS"
     assert "email" not in pending.dialog_context
 
-    next_question = await engine.handle(inbound(10, "player@example.com", user_id=user_id))
-
-    assert "гражданином" in next_question.text
-    pending = await users.get(Platform.TELEGRAM, user_id)
-    assert pending is not None
-    assert pending.dialog_state == "PROFILE_PASS_CITIZEN"
-    assert pending.dialog_context["email"] == "player@example.com"
-
-    saved = await engine.handle(inbound(11, "Да", user_id=user_id))
+    saved = await engine.handle(inbound(13, "player@example.com", user_id=user_id))
     profile = await users.get(Platform.TELEGRAM, user_id)
     assert "Профиль сохранён" in saved.text
     assert profile is not None and profile.pass_details is not None
     assert profile.pass_details.email == "player@example.com"
+    assert profile.pass_details.mobile_phone == "+7 999 123-45-67"
+    assert profile.pass_details.foreigner is False
+    assert profile.pass_details.surname_latin is None
+
+
+@pytest.mark.asyncio
+async def test_foreign_profile_collects_separate_pass_fields(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    answers = (
+        PROFILE,
+        "Анна Ли",
+        "https://vk.com/anna-li",
+        "Нет",
+        "Да",
+        "Да",
+        "Да",
+        "Ли",
+        "Анна",
+        "-",
+        "Li",
+        "Anna",
+        "-",
+        "+44 7700 900123",
+        "anna@example.com",
+    )
+    response = None
+    for update, answer in enumerate(answers, start=1):
+        response = await engine.handle(inbound(update, answer, user_id=2))
+
+    profile = await users.get(Platform.TELEGRAM, 2)
+    assert response is not None and "Профиль сохранён" in response.text
+    assert profile is not None and profile.profile_complete and profile.pass_details is not None
+    assert profile.pass_details.model_dump() == {
+        "surname_cyrillic": "Ли",
+        "name_cyrillic": "Анна",
+        "patronym_cyrillic": "-",
+        "foreigner": True,
+        "surname_latin": "Li",
+        "name_latin": "Anna",
+        "patronym_latin": "-",
+        "mobile_phone": "+44 7700 900123",
+        "email": "anna@example.com",
+    }
 
 
 @pytest.mark.asyncio
@@ -520,6 +563,33 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
 
 
 @pytest.mark.asyncio
+async def test_admin_can_create_one_pass_table_and_list_its_permanent_link(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert CREATE_PASS_TABLE in [button.value for button in menu.buttons]
+    assert LIST_PASS_TABLES in [button.value for button in menu.buttons]
+
+    games = await engine.handle(inbound(2, CREATE_PASS_TABLE, callback=True))
+    assert any(button.value == f"select:admin-pass-create:{event.event_id}" for button in games.buttons)
+    created = await engine.handle(inbound(3, f"select:admin-pass-create:{event.event_id}", callback=True))
+    assert "Участников: 0" in created.text
+    link = "https://disk.example/public/2"
+    assert link in created.text
+
+    await engine.handle(inbound(4, CREATE_PASS_TABLE, callback=True))
+    repeated = await engine.handle(inbound(5, f"select:admin-pass-create:{event.event_id}", callback=True))
+    assert "уже создана" in repeated.text
+    assert link in repeated.text
+
+    listed = await engine.handle(inbound(6, LIST_PASS_TABLES, callback=True))
+    assert event.name in listed.text
+    assert link in listed.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("count", [0, 1, 10, 11, 20, 21])
 async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDiskStore) -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
@@ -553,7 +623,7 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
         users,
         event_repository,
         RegistrationService(event_repository, catalog, MemoryCommandPublisher(), "secret"),
-        EventAdministrationService(event_repository, showcase),
+        EventAdministrationService(event_repository, showcase, catalog, users, "secret"),
         StaticAdminProvider(tg_ids={1}),
     )
     page = await engine.handle(inbound(1, "📋 Список игр"))

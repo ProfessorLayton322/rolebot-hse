@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from larp_bot.domain.models import EnlistPayload, Event, EventStatus, Registration, TelegramUser, VkUser
+from larp_bot.domain.models import EnlistPayload, Event, EventStatus, PassDetails, Registration, TelegramUser, VkUser
 
 
 @pytest.mark.parametrize("value", [None, "", "-"])
@@ -65,3 +65,71 @@ def test_event_has_exactly_three_states_and_starts_before_confirmation() -> None
         public_registration_url="https://disk.example/game",
     )
     assert event.status is EventStatus.CREATED
+
+
+def test_russian_pass_profile_keeps_latin_fields_blank_and_uses_dash_for_no_patronym() -> None:
+    details = PassDetails(
+        surname_cyrillic="Иванов",
+        name_cyrillic="Иван",
+        patronym_cyrillic="-",
+        foreigner=False,
+        mobile_phone="+7 999 123-45-67",
+        email="ivan@example.com",
+    )
+
+    assert details.patronym_cyrillic == "-"
+    assert details.surname_latin is None
+    assert details.name_latin is None
+    assert details.patronym_latin is None
+
+
+def test_foreign_pass_profile_requires_latin_names_and_matching_no_patronym_markers() -> None:
+    details = PassDetails(
+        surname_cyrillic="Ли",
+        name_cyrillic="Анна",
+        patronym_cyrillic="-",
+        foreigner=True,
+        surname_latin="Li",
+        name_latin="Anna",
+        patronym_latin="-",
+        mobile_phone="+44 7700 900123",
+        email="anna@example.com",
+    )
+    assert details.foreigner
+
+    with pytest.raises(ValidationError, match="both patronym"):
+        PassDetails(
+            surname_cyrillic="Ли",
+            name_cyrillic="Анна",
+            patronym_cyrillic="-",
+            foreigner=True,
+            surname_latin="Li",
+            name_latin="Anna",
+            patronym_latin="Ivanovna",
+            mobile_phone="+44 7700 900123",
+            email="anna@example.com",
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"surname_cyrillic": "Ivanov"}, "кириллицу"),
+        ({"surname_latin": "Иванов"}, "латиницу"),
+        ({"mobile_phone": "12345678"}, "телефона"),
+    ],
+)
+def test_pass_profile_rejects_invalid_identity_fields(overrides: dict[str, str], message: str) -> None:
+    values = {
+        "surname_cyrillic": "Иванов",
+        "name_cyrillic": "Иван",
+        "patronym_cyrillic": "Иванович",
+        "foreigner": True,
+        "surname_latin": "Ivanov",
+        "name_latin": "Ivan",
+        "patronym_latin": "Ivanovich",
+        "mobile_phone": "+7 999 123-45-67",
+        "email": "ivan@example.com",
+    }
+    with pytest.raises(ValidationError, match=message):
+        PassDetails(**(values | overrides))  # type: ignore[arg-type]

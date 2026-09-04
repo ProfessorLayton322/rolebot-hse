@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from larp_bot.adapters.ydb.repositories import YdbExecutor, YdbUserRepository, _dt
-from larp_bot.domain.models import Platform, TelegramUser, VkUser
+from larp_bot.adapters.ydb.repositories import YdbExecutor, YdbUserRepository, _dt, _optional_pass
+from larp_bot.domain.models import PassDetails, Platform, TelegramUser, VkUser
 
 
 def test_ydb_uses_function_context_token_instead_of_metadata() -> None:
@@ -152,3 +152,43 @@ async def test_user_repository_lists_both_platforms_for_notification_resolution(
     assert len(users) == 2
     assert isinstance(users[0], TelegramUser) and users[0].tg_id == 42
     assert isinstance(users[1], VkUser) and users[1].vk_id == 84
+
+
+def test_legacy_pass_json_makes_profile_incomplete_until_refilled() -> None:
+    assert (
+        _optional_pass(
+            '{"legal_name_cyrillic":"Иванов Иван",'
+            '"legal_name_latin":"Ivanov Ivan","email":"ivan@example.com","russian_citizen":true}'
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_repository_persists_all_pass_identity_fields_in_ydb() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+    details = PassDetails(
+        surname_cyrillic="Ли",
+        name_cyrillic="Анна",
+        patronym_cyrillic="-",
+        foreigner=True,
+        surname_latin="Li",
+        name_latin="Anna",
+        patronym_latin="-",
+        mobile_phone="+44 7700 900123",
+        email="anna@example.com",
+    )
+    user = TelegramUser(
+        tg_id=42,
+        vk_url="https://vk.com/anna",
+        full_name="Анна Ли",
+        crossplay=False,
+        larp_experience=True,
+        needs_pass=True,
+        pass_details=details,
+    )
+
+    await YdbUserRepository(executor).save(user)
+
+    params = executor.query.await_args.args[1]
+    assert params["$pass_details"] == details.model_dump_json()

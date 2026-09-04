@@ -61,6 +61,13 @@ resource "yandex_function" "gateway" {
     log_group_id = yandex_logging_group.application.id
     min_level    = "INFO"
   }
+
+  depends_on = [
+    yandex_ydb_table.tg_users,
+    yandex_ydb_table.vk_users,
+    yandex_ydb_table.events,
+    yandex_ydb_table.registrations,
+  ]
 }
 
 resource "yandex_function" "ordered_worker" {
@@ -95,6 +102,13 @@ resource "yandex_function" "ordered_worker" {
     log_group_id = yandex_logging_group.application.id
     min_level    = "INFO"
   }
+
+  depends_on = [
+    yandex_ydb_table.tg_users,
+    yandex_ydb_table.vk_users,
+    yandex_ydb_table.events,
+    yandex_ydb_table.registrations,
+  ]
 }
 
 resource "yandex_function_scaling_policy" "gateway" {

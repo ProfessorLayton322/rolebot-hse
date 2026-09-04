@@ -1,6 +1,6 @@
 # LARP registration bot
 
-Production-oriented Telegram and VK community bots for LARP profile collection, per-game registration, attendance confirmation, and administration. Both gateways use one Python domain/application layer. Profiles, events, and registrations live in four YDB tables; each game owns one stable public XLSX showcase on Yandex Disk.
+Production-oriented Telegram and VK community bots for LARP profile collection, per-game registration, attendance confirmation, and administration. Both gateways use one Python domain/application layer. Profiles, events, and registrations live in four YDB tables; each game owns one stable public XLSX showcase on Yandex Disk and may own one pass table.
 
 The default user-facing language is Russian. Python 3.12 is required.
 
@@ -97,7 +97,7 @@ Terraform declares exactly these application tables:
 |---|---|---|
 | `tg_users` | `tg_id` | Telegram profile, mandatory VK URL, FSM context, update/delivery metadata |
 | `vk_users` | `vk_id` | VK profile, optional Telegram handle, FSM context, update/delivery metadata |
-| `events` | `event_id` | Name, stable Disk resource path/public URL, status, confirmation deadline, migration timestamp |
+| `events` | `event_id` | Name, stable registration and optional pass-table Disk paths/public URLs, status, confirmation deadline, migration timestamp |
 | `registrations` | `(event_id, participant_key)` | Authoritative per-game registration, public profile projection, attendance, operation metadata |
 
 The composite registration key makes exact participant lookups constant-cost and keeps every game's rows contiguous for an efficient showcase rebuild. No secondary index or duplicated participant array is maintained. Profile/FSM writes use parameterized YQL and serializable read/write semantics. Event pages are keyset-ordered by `(created_at, event_id)` and never load the complete history just to paginate.
@@ -125,6 +125,30 @@ There are no technical or hidden columns. The participant key, operation ID, and
 The public workbook intentionally exposes row number, display name, VK profile, optional Telegram profile, prior LARP experience, readiness for cross-gender play, wanted co-player preference, character wishes, and attendance status. Legal/pass names, email, citizenship, raw Telegram IDs, participant keys, operation metadata, and credentials never enter it. Operators must disclose to players that these fields are public. On first access after rollout, legacy stateful workbooks are imported idempotently into YDB and immediately replaced with the visible-only projection; `events.registrations_migrated_at` prevents later XLSX reads.
 
 Malformed legacy XLSX aborts migration without setting the migration timestamp. After migration, damaged or manually edited showcase files are safely regenerated from YDB on the next mutation.
+
+### Pass profiles and pass tables
+
+A completed pass profile stores separate Cyrillic surname, name, and patronym; foreign-citizen choice; optional Latin surname, name, and patronym; mobile phone; and email in `pass_details_json` in the platform's YDB user table. The bot validates each field before advancing. A player who requests a pass cannot enlist until every required field is present. Profiles saved under the older combined-name schema remain readable but are treated as incomplete and must be filled in again before enlistment.
+
+Russian citizens provide only Cyrillic name fields; their Latin cells are blank. A missing Cyrillic patronym is stored as `-`. Foreign citizens also provide Latin name fields, and a missing patronym is `-` in both scripts.
+
+Admins can create a pass table once for any game and list all stored pass-table links. Creation takes a one-time snapshot containing only YDB registrations in `Подтверждено` whose current YDB profile requests a pass. The deterministic resource is `disk:/larp-bot/passes/<event_id>.xlsx`; its public Yandex Disk URL is stored on the event and reused by later requests. Both the resource and link remain until the game is deleted.
+
+The pass workbook copies the venue template's header wording and theme-color fill exactly:
+
+```text
+Фамилия (Кириллицей)
+Имя (Кириллицей)
+Отчество (Кириллицей)
+Иностранный гражданин (Да/Нет)
+Фамилия (Латиницей)
+Имя (Латиницей)
+Отчество (Латиницей)
+Телефон
+E-mail
+```
+
+The fourth column is always `Да` or `Нет`. Because these public links contain legal identity and contact data, access and sharing must be restricted operationally to the venue and authorized organizers.
 
 ## FIFO ordering and failure behavior
 

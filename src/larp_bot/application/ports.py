@@ -9,6 +9,7 @@ from larp_bot.domain.models import (
     Event,
     EventStatus,
     OrderedRegistrationCommand,
+    PassDetails,
     Platform,
     Registration,
     TelegramUser,
@@ -38,12 +39,21 @@ class EventRepository(Protocol):
 
     async def mark_registrations_migrated(self, event_id: str, migrated_at: datetime) -> None: ...
 
+    async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool: ...
+
     async def delete(self, event_id: str) -> bool: ...
 
     async def list_page(
         self,
         *,
         statuses: Collection[EventStatus] | None = None,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> Sequence[Event]: ...
+
+    async def list_pass_tables_page(
+        self,
+        *,
         after: tuple[datetime, str] | None = None,
         limit: int = 10,
     ) -> Sequence[Event]: ...
@@ -101,6 +111,10 @@ class RegistrationShowcaseRepository(Protocol):
     async def create_event_workbook(self, disk_path: str) -> str: ...
 
     async def delete_event_workbook(self, disk_path: str) -> None: ...
+
+    async def create_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> str: ...
+
+    async def delete_pass_table(self, disk_path: str) -> None: ...
 
 
 class OrderedCommandPublisher(Protocol):

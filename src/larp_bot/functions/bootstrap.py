@@ -89,7 +89,13 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     transport = MultiplexedDeferredTransport(telegram, vk)
     catalog = RegistrationCatalog(events, registrations, showcase)
     registration_service = RegistrationService(events, catalog, publisher, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
-    administration = EventAdministrationService(events, showcase)
+    administration = EventAdministrationService(
+        events,
+        showcase,
+        catalog,
+        users,
+        secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+    )
     conversation = ConversationEngine(users, events, registration_service, administration, config)
     mutations = OrderedMutationService(events, catalog, users)
     notifications = ConfirmationNotificationService(

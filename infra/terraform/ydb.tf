@@ -133,6 +133,14 @@ resource "yandex_ydb_table" "events" {
     type = "Timestamp"
   }
   column {
+    name = "pass_table_resource_path"
+    type = "Utf8"
+  }
+  column {
+    name = "pass_table_public_url"
+    type = "Utf8"
+  }
+  column {
     name     = "created_at"
     type     = "Timestamp"
     not_null = true

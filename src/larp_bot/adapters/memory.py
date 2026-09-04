@@ -79,6 +79,20 @@ class MemoryEventRepository:
         event.registrations_migrated_at = migrated_at
         event.updated_at = migrated_at
 
+    async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.pass_table_public_url is not None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "pass_table_resource_path": resource_path,
+                "pass_table_public_url": public_url,
+                "updated_at": datetime.now(event.updated_at.tzinfo),
+            }
+        )
+        return True
+
     async def delete(self, event_id: str) -> bool:
         return self.rows.pop(event_id, None) is not None
 
@@ -93,6 +107,20 @@ class MemoryEventRepository:
         if statuses is not None:
             accepted = set(statuses)
             values = [event for event in values if event.status in accepted]
+        if after is not None:
+            values = [event for event in values if (event.created_at, event.event_id) > after]
+        return deepcopy(values[:limit])
+
+    async def list_pass_tables_page(
+        self,
+        *,
+        after: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> Sequence[Event]:
+        values = sorted(
+            (event for event in self.rows.values() if event.pass_table_public_url is not None),
+            key=lambda event: (event.created_at, event.event_id),
+        )
         if after is not None:
             values = [event for event in values if (event.created_at, event.event_id) > after]
         return deepcopy(values[:limit])
