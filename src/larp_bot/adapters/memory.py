@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -187,8 +187,9 @@ class MemoryRegistrationRepository:
             registration.telegram_profile = telegram_profile
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
+                registration.created_at = datetime.now(UTC)
         registration.last_operation_id = operation_id
-        registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+        registration.updated_at = datetime.now(UTC)
         return True
 
     async def confirm(

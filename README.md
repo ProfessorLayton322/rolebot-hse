@@ -85,7 +85,7 @@ The same user has a different deterministic participant key for every event. Reg
 Game A registration.character_wish != Game B registration.character_wish
 ```
 
-Editing a wish changes only the character field, operation ID, and timestamp. Cancelling changes only status. Re-enlisting after cancellation updates the wanted co-player preference, returns to `Ожидается`, and preserves the old wish. A confirmed user updating that preference stays confirmed.
+Editing a wish changes only the character field, operation ID, and timestamp. Cancelling changes only the authoritative status and removes the player from the public workbook. Re-enlisting after cancellation updates the wanted co-player preference, returns to `Ожидается`, preserves the old character wish, and resets the signup timestamp so the player appears at the end of the queue. A confirmed user updating that preference stays confirmed.
 
 ## Storage
 

@@ -57,6 +57,43 @@ async def test_registration_lifecycle_is_stored_per_event_and_idempotent() -> No
 
 
 @pytest.mark.asyncio
+async def test_reenlist_after_cancellation_moves_registration_to_end() -> None:
+    base = datetime(2000, 1, 1, tzinfo=UTC)
+    cancelled = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Returning player",
+        wish_play="A",
+        character_wish="Doctor",
+        attendance_status=AttendanceStatus.CANCELLED,
+        created_at=base,
+        updated_at=base,
+    )
+    active = Registration(
+        event_id="event-a1",
+        participant_key="b" * 43,
+        display_name="Active player",
+        wish_play="B",
+        created_at=base + timedelta(days=1),
+        updated_at=base + timedelta(days=1),
+    )
+    repository = MemoryRegistrationRepository([cancelled, active])
+
+    await repository.enlist(
+        "event-a1",
+        operation_id="reenlist",
+        participant_key=cancelled.participant_key,
+        display_name=cancelled.display_name,
+        wish_play="New wish",
+    )
+
+    rows = await repository.list_for_event("event-a1")
+    assert [row.display_name for row in rows] == ["Active player", "Returning player"]
+    assert rows[-1].attendance_status is AttendanceStatus.WAITING
+    assert rows[-1].character_wish == "Doctor"
+
+
+@pytest.mark.asyncio
 async def test_legacy_import_never_overwrites_newer_ydb_state() -> None:
     current = Registration(
         event_id="event-a1",
@@ -137,6 +174,38 @@ async def test_ydb_enlist_uses_composite_key_and_persists_showcase_fields() -> N
     assert upsert[1]["$crossplay"] is False
     assert upsert[1]["$vk_profile"] == "https://vk.com/player"
     assert upsert[1]["$telegram_profile"] == "https://t.me/player"
+
+
+@pytest.mark.asyncio
+async def test_ydb_reenlist_after_cancellation_resets_queue_position() -> None:
+    base = datetime(2000, 1, 1, tzinfo=UTC)
+    cancelled = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Returning player",
+        wish_play="A",
+        character_wish="Doctor",
+        attendance_status=AttendanceStatus.CANCELLED,
+        created_at=base,
+        updated_at=base,
+    )
+    stored_row = cancelled.model_dump()
+    stored_row["attendance_status"] = AttendanceStatus.CANCELLED.value
+    executor = RecordingExecutor([[stored_row], []])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    await repository.enlist(
+        "event-a1",
+        operation_id="reenlist",
+        participant_key=cancelled.participant_key,
+        display_name=cancelled.display_name,
+        wish_play="New wish",
+    )
+
+    _, upsert = executor.queries
+    assert upsert[1]["$attendance_status"] == AttendanceStatus.WAITING.value
+    assert upsert[1]["$created_at"] > base
+    assert upsert[1]["$character_wish"] == "Doctor"
 
 
 @pytest.mark.asyncio

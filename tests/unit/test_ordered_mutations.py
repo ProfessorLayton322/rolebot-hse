@@ -152,6 +152,11 @@ async def test_fifo_sequence_has_required_final_state(disk_store: MemoryDiskStor
     assert registration is not None
     assert registration.character_wish == "B"
     assert registration.attendance_status is AttendanceStatus.CANCELLED
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert workbook.active.max_row == 1
+    finally:
+        workbook.close()
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from larp_bot.application.conversation import (
     ADMIN,
     ADMIN_MENU,
     ARCHIVE_GAME,
+    CANCEL,
     CHANGE_STATUS,
     CHARACTER,
     CONFIRM,
@@ -141,6 +142,29 @@ async def test_enlist_finishes_without_confirmation_or_character_wishes(
     assert [(button.label, button.value) for button in queued.reply_context.buttons] == [(MAIN_MENU, MAIN_MENU)]
     assert [(button.label, button.value) for button in responses[-1].buttons] == [(MAIN_MENU, MAIN_MENU)]
     assert responses[-1].deferred
+
+
+@pytest.mark.asyncio
+async def test_cancel_confirmation_warns_about_losing_queue_position(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, _, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+
+    games = await engine.handle(inbound(1, CANCEL))
+    assert any(button.value == f"select:cancel:{event.event_id}" for button in games.buttons)
+    response = await engine.handle(inbound(2, f"select:cancel:{event.event_id}", callback=True))
+
+    assert response.text == (
+        f"Вы уверены, что хотите отменить участие в игре «{event.name}»? "
+        "Если вы отмените участие, то сможете записаться снова, но попадёте "
+        "в конец очереди подтверждения"
+    )
 
 
 @pytest.mark.asyncio

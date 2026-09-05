@@ -902,11 +902,13 @@ Flow:
 4. enqueue CANCEL;
 5. ordered worker sets:
    `Статус = Отменено`;
-6. preserve all other row data.
+6. preserve all other authoritative registration data;
+7. regenerate the public workbook without the cancelled participant.
 
 Do not delete character wishes.
 
-Do not delete the participant row.
+Do not delete the authoritative YDB row. If the participant enlists again, reset the signup timestamp so the
+new public workbook row is placed at the end of the queue.
 
 ---
 
