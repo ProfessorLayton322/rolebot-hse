@@ -81,6 +81,7 @@ class Operation(StrEnum):
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
+    REMOVE_PARTICIPANT = "REMOVE_PARTICIPANT"
     CLOSE_EVENT = "CLOSE_EVENT"
     ARCHIVE_EVENT = "ARCHIVE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
@@ -414,6 +415,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.CONFIRM,
             Operation.UPDATE_CHARACTER_WISH,
             Operation.CANCEL,
+            Operation.REMOVE_PARTICIPANT,
         }
         if self.operation in participant_ops and not self.participant_key:
             raise ValueError("participant_key is required")
@@ -431,6 +433,7 @@ class OrderedRegistrationCommand(StrictModel):
             raise ValueError("SEND_CONFIRMED_NOTIFICATION requires NotificationPayload")
         empty_payload_operations = {
             Operation.CANCEL,
+            Operation.REMOVE_PARTICIPANT,
             Operation.OPEN_REGISTRATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.CLOSE_EVENT,

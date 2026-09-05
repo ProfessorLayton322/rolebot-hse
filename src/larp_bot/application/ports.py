@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Protocol
 
 from larp_bot.domain.models import (
+    AttendanceStatus,
     BotIdentity,
     Button,
     Event,
@@ -74,6 +75,16 @@ class RegistrationRepository(Protocol):
 
     async def list_for_event(self, event_id: str) -> Sequence[Registration]: ...
 
+    async def list_page_for_event(
+        self,
+        event_id: str,
+        *,
+        statuses: Collection[AttendanceStatus] | None = None,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> Sequence[Registration]: ...
+
     async def import_missing(self, registrations: Sequence[Registration]) -> None: ...
 
     async def enlist(
@@ -109,6 +120,8 @@ class RegistrationRepository(Protocol):
     ) -> bool: ...
 
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool: ...
+
+    async def remove(self, event_id: str, *, participant_key: str) -> bool: ...
 
     async def delete_for_event(self, event_id: str) -> None: ...
 

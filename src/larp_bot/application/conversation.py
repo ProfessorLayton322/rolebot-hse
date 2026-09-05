@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from secrets import token_urlsafe
 
 from pydantic import ValidationError
 
@@ -65,6 +66,7 @@ NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
+REMOVE_PLAYER = "🗑 Удалить игрока"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
@@ -101,6 +103,7 @@ ADMIN_ACTIONS = frozenset(
         CHANGE_STATUS,
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_NOTIFICATION,
+        REMOVE_PLAYER,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
         GRANT_GAMEMASTER,
@@ -131,6 +134,8 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_EVENT_LEADER_PROFILE",
         "ADMIN_ARCHIVE_NAME",
         "ADMIN_DELETE_NAME",
+        "ADMIN_REMOVE_PICK",
+        "ADMIN_REMOVE_CONFIRM",
     }
 )
 
@@ -975,6 +980,8 @@ class ConversationEngine:
             "ADMIN_DELETE_NAME",
             "ADMIN_EVENT_LEADER_PLATFORM",
             "ADMIN_EVENT_LEADER_PROFILE",
+            "ADMIN_REMOVE_PICK",
+            "ADMIN_REMOVE_CONFIRM",
         }
         if user.dialog_state in event_bound_states:
             denied = await self._event_leader_required(user, str(user.dialog_context["event_id"]))
@@ -1027,6 +1034,10 @@ class ConversationEngine:
             )
         if user.dialog_state == "ADMIN_EVENT_LEADER_PROFILE":
             return await self._add_event_leader(user, value)
+        if user.dialog_state == "ADMIN_REMOVE_PICK":
+            return await self._admin_remove_pick(user, message, value)
+        if user.dialog_state == "ADMIN_REMOVE_CONFIRM":
+            return await self._admin_remove_confirm(user, message, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
             leaders = [*(await self.admins.list_admins()), self._identity(user)]
             event = await self.administration.create_event(value, leaders)
@@ -1312,6 +1323,190 @@ class ConversationEngine:
         micros = int(event.created_at.timestamp() * 1_000_000)
         return f"page:a:{direction}:{micros}:{event.event_id}"
 
+    @staticmethod
+    def _stored_registration_cursor(user: User, name: str) -> tuple[datetime, str]:
+        raw = user.dialog_context[name]
+        if not isinstance(raw, list) or len(raw) != 2:
+            raise ValueError("invalid registration-page cursor")
+        return datetime.fromisoformat(str(raw[0])), str(raw[1])
+
+    async def _show_removable_players(
+        self,
+        user: User,
+        event: Event,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        invalid: str = "",
+    ) -> BotResponse:
+        page = await self.administration.active_registration_page(
+            event.event_id,
+            after=after,
+            before=before,
+        )
+        user.dialog_state = "ADMIN_REMOVE_PICK"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+        }
+        if not page.rows:
+            return BotResponse(
+                text=(
+                    f"В игре «{event.name}» нет записавшихся или подтвердивших участие игроков."
+                ),
+                buttons=[game_management_button(event.event_id)],
+            )
+
+        choices: dict[str, str] = {}
+        buttons: list[Button] = []
+        for registration in page.rows:
+            token = token_urlsafe(8)
+            choices[token] = registration.participant_key
+            buttons.append(
+                Button(
+                    label=f"{registration.display_name} — {registration.attendance_status.value}",
+                    value=f"admin:remove:pick:{token}",
+                )
+            )
+        page_token = token_urlsafe(8)
+        if page.has_previous:
+            buttons.append(Button(label="⬅️ Предыдущая", value=f"admin:remove:page:p:{page_token}"))
+        if page.has_next:
+            buttons.append(Button(label="➡️ Следующая", value=f"admin:remove:page:n:{page_token}"))
+        buttons.append(game_management_button(event.event_id))
+        user.dialog_context.update(
+            {
+                "remove_choices": choices,
+                "remove_page_token": page_token,
+                "remove_first": [page.rows[0].created_at.isoformat(), page.rows[0].participant_key],
+                "remove_last": [page.rows[-1].created_at.isoformat(), page.rows[-1].participant_key],
+            }
+        )
+        prefix = f"{invalid}\n\n" if invalid else ""
+        return BotResponse(
+            text=(
+                f"{prefix}Удаление игрока из игры «{event.name}»\n\n"
+                "Выберите игрока. Показаны записавшиеся и подтвердившие участие; "
+                "на кнопках указаны имена из их профилей."
+            ),
+            buttons=buttons,
+        )
+
+    @staticmethod
+    def _remove_confirmation_response(user: User, *, invalid: str = "") -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        token = str(user.dialog_context["remove_selected_token"])
+        name = str(user.dialog_context["remove_selected_name"])
+        status = str(user.dialog_context["remove_selected_status"])
+        prefix = f"{invalid}\n\n" if invalid else ""
+        return BotResponse(
+            text=(
+                f"{prefix}⚠️ Это действие нельзя отменить.\n\n"
+                "Вы уверены, что выбрали нужного человека?\n\n"
+                f"Имя из профиля: {name}\n"
+                f"Статус: {status}"
+            ),
+            buttons=[
+                Button(label="Да, удалить", value=f"admin:remove:confirm:{token}"),
+                Button(label="Нет, вернуться к списку", value=f"ag:remove:{event_id}"),
+            ],
+        )
+
+    async def _admin_remove_pick(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        del message
+        event_id = str(user.dialog_context["event_id"])
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+        parts = value.split(":")
+        if len(parts) == 5 and parts[:3] == ["admin", "remove", "page"]:
+            direction, page_token = parts[3:]
+            if page_token != user.dialog_context.get("remove_page_token") or direction not in {"n", "p"}:
+                return await self._show_removable_players(user, event, invalid="Эта страница устарела.")
+            if direction == "p":
+                return await self._show_removable_players(
+                    user,
+                    event,
+                    before=self._stored_registration_cursor(user, "remove_first"),
+                )
+            return await self._show_removable_players(
+                user,
+                event,
+                after=self._stored_registration_cursor(user, "remove_last"),
+            )
+        if len(parts) != 4 or parts[:3] != ["admin", "remove", "pick"]:
+            return await self._show_removable_players(user, event, invalid="Выберите игрока кнопкой из списка.")
+        token = parts[3]
+        choices = user.dialog_context.get("remove_choices")
+        participant_key = choices.get(token) if isinstance(choices, dict) else None
+        if not isinstance(participant_key, str):
+            return await self._show_removable_players(user, event, invalid="Этот список устарел.")
+        registration = await self.administration.get_registration(event_id, participant_key)
+        if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
+            return await self._show_removable_players(
+                user,
+                event,
+                invalid="Запись этого игрока уже недоступна для удаления.",
+            )
+        user.dialog_state = "ADMIN_REMOVE_CONFIRM"
+        user.dialog_context.update(
+            {
+                "remove_selected_key": participant_key,
+                "remove_selected_token": token,
+                "remove_selected_name": registration.display_name,
+                "remove_selected_status": registration.attendance_status.value,
+            }
+        )
+        return self._remove_confirmation_response(user)
+
+    async def _admin_remove_confirm(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        token = str(user.dialog_context["remove_selected_token"])
+        event_id = str(user.dialog_context["event_id"])
+        if value == f"ag:remove:{event_id}":
+            event = await self.events.get(event_id)
+            if event is None:
+                await self._clear(user)
+                return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+            return await self._show_removable_players(user, event)
+        if value != f"admin:remove:confirm:{token}":
+            return self._remove_confirmation_response(user, invalid="Удаление не подтверждено.")
+        context = user.dialog_context.copy()
+        participant_key = str(context["remove_selected_key"])
+        registration = await self.administration.get_registration(event_id, participant_key)
+        if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
+            event = await self.events.get(event_id)
+            if event is None:
+                await self._clear(user)
+                return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+            return await self._show_removable_players(
+                user,
+                event,
+                invalid="Запись этого игрока уже недоступна для удаления.",
+            )
+        await self._clear(user)
+        await self.registrations.enqueue(
+            operation=Operation.REMOVE_PARTICIPANT,
+            event_id=event_id,
+            platform=message.identity.platform,
+            user_id=message.identity.platform_user_id,
+            payload=EmptyPayload(),
+            reply_context=ReplyContext(
+                text_success=(
+                    f"🗑 Игрок «{registration.display_name}» удалён из игры «{context['event_name']}»."
+                ),
+                buttons=[game_management_button(event_id)],
+            ),
+            idempotency_key=f"{message.update_id}:{Operation.REMOVE_PARTICIPANT.value}",
+            target_participant_key=participant_key,
+        )
+        return BotResponse(
+            text="⏳ Удаление принято в обработку.",
+            buttons=[game_management_button(event_id)],
+            deferred=True,
+            command_enqueued=True,
+        )
+
     async def _show_admin_games(
         self,
         *,
@@ -1373,6 +1568,7 @@ class ConversationEngine:
             (SEND_CONFIRMATION_REMINDER, "remind"),
             (SEND_CONFIRMED_NOTIFICATION, "notify"),
             (EVENT_TABLES, "tables"),
+            (REMOVE_PLAYER, "remove"),
             (ADD_EVENT_LEADER, "leader"),
             (ARCHIVE_GAME, "archive"),
         ]
@@ -1461,6 +1657,8 @@ class ConversationEngine:
                 text=f"Таблицы игры «{event.name}»\n\n{event_table_links(refreshed)}",
                 buttons=[game_management_button(event.event_id)],
             )
+        if action == "remove":
+            return await self._show_removable_players(user, event)
         if action == "leader":
             user.dialog_state = "ADMIN_EVENT_LEADER_PLATFORM"
             return self._event_leader_platform_prompt(event.event_id)
@@ -1507,6 +1705,7 @@ class ConversationEngine:
             CREATE_PASS_TABLE,
             LIST_PASS_TABLES,
             EVENT_TABLES,
+            REMOVE_PLAYER,
             ADD_EVENT_LEADER,
             ARCHIVE_GAME,
             LEGACY_DELETE_GAME,
