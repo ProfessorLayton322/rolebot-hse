@@ -1351,9 +1351,7 @@ class ConversationEngine:
         }
         if not page.rows:
             return BotResponse(
-                text=(
-                    f"В игре «{event.name}» нет записавшихся или подтвердивших участие игроков."
-                ),
+                text=(f"В игре «{event.name}» нет записавшихся или подтвердивших участие игроков."),
                 buttons=[game_management_button(event.event_id)],
             )
 
@@ -1492,9 +1490,7 @@ class ConversationEngine:
             user_id=message.identity.platform_user_id,
             payload=EmptyPayload(),
             reply_context=ReplyContext(
-                text_success=(
-                    f"🗑 Игрок «{registration.display_name}» удалён из игры «{context['event_name']}»."
-                ),
+                text_success=(f"🗑 Игрок «{registration.display_name}» удалён из игры «{context['event_name']}»."),
                 buttons=[game_management_button(event_id)],
             ),
             idempotency_key=f"{message.update_id}:{Operation.REMOVE_PARTICIPANT.value}",

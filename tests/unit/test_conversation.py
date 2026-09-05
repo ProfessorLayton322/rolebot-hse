@@ -734,9 +734,7 @@ async def test_event_leader_pages_profile_names_and_confirms_player_removal(
     command = publisher.commands[-1]
     assert command.operation is Operation.REMOVE_PARTICIPANT
     assert command.participant_key == registrations[1].participant_key
-    assert command.reply_context.text_success == (
-        f"🗑 Игрок «Фамилия1 Имя1» удалён из игры «{event.name}»."
-    )
+    assert command.reply_context.text_success == (f"🗑 Игрок «Фамилия1 Имя1» удалён из игры «{event.name}».")
 
 
 @pytest.mark.asyncio
