@@ -22,6 +22,7 @@ from larp_bot.domain.models import (
     Operation,
     PassDetails,
     Platform,
+    Registration,
     ReplyContext,
     TelegramUser,
     User,
@@ -66,6 +67,7 @@ NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
+LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
 REMOVE_PLAYER = "🗑 Удалить игрока"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
@@ -103,6 +105,7 @@ ADMIN_ACTIONS = frozenset(
         CHANGE_STATUS,
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_NOTIFICATION,
+        LIST_WAITING_PLAYERS,
         REMOVE_PLAYER,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
@@ -136,6 +139,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_DELETE_NAME",
         "ADMIN_REMOVE_PICK",
         "ADMIN_REMOVE_CONFIRM",
+        "ADMIN_WAITING_PICK",
     }
 )
 
@@ -982,6 +986,7 @@ class ConversationEngine:
             "ADMIN_EVENT_LEADER_PROFILE",
             "ADMIN_REMOVE_PICK",
             "ADMIN_REMOVE_CONFIRM",
+            "ADMIN_WAITING_PICK",
         }
         if user.dialog_state in event_bound_states:
             denied = await self._event_leader_required(user, str(user.dialog_context["event_id"]))
@@ -1038,6 +1043,8 @@ class ConversationEngine:
             return await self._admin_remove_pick(user, message, value)
         if user.dialog_state == "ADMIN_REMOVE_CONFIRM":
             return await self._admin_remove_confirm(user, message, value)
+        if user.dialog_state == "ADMIN_WAITING_PICK":
+            return await self._admin_waiting_pick(user, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
             leaders = [*(await self.admins.list_admins()), self._identity(user)]
             event = await self.administration.create_event(value, leaders)
@@ -1390,6 +1397,140 @@ class ConversationEngine:
             buttons=buttons,
         )
 
+    async def _show_waiting_players(
+        self,
+        user: User,
+        event: Event,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        invalid: str = "",
+    ) -> BotResponse:
+        page = await self.administration.waiting_registration_page(
+            event.event_id,
+            after=after,
+            before=before,
+        )
+        user.dialog_state = "ADMIN_WAITING_PICK"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+        }
+        if not page.rows:
+            return BotResponse(
+                text=f"В игре «{event.name}» нет записавшихся, которые ещё не подтвердили участие.",
+                buttons=[game_management_button(event.event_id)],
+            )
+
+        choices: dict[str, str] = {}
+        buttons: list[Button] = []
+        for registration in page.rows:
+            token = token_urlsafe(8)
+            choices[token] = registration.participant_key
+            buttons.append(
+                Button(
+                    label=registration.display_name,
+                    value=f"admin:waiting:pick:{token}",
+                )
+            )
+        page_token = token_urlsafe(8)
+        if page.has_previous:
+            buttons.append(Button(label="⬅️ Предыдущая", value=f"admin:waiting:page:p:{page_token}"))
+        if page.has_next:
+            buttons.append(Button(label="➡️ Следующая", value=f"admin:waiting:page:n:{page_token}"))
+        buttons.append(game_management_button(event.event_id))
+        user.dialog_context.update(
+            {
+                "waiting_choices": choices,
+                "waiting_page_token": page_token,
+                "waiting_first": [page.rows[0].created_at.isoformat(), page.rows[0].participant_key],
+                "waiting_last": [page.rows[-1].created_at.isoformat(), page.rows[-1].participant_key],
+            }
+        )
+        prefix = f"{invalid}\n\n" if invalid else ""
+        return BotResponse(
+            text=(
+                f"{prefix}Не подтвердившие участие в игре «{event.name}»\n\nВыберите игрока, чтобы увидеть его профили."
+            ),
+            buttons=buttons,
+        )
+
+    @staticmethod
+    def _waiting_player_profile_text(registration: Registration, participant: User) -> str:
+        if isinstance(participant, TelegramUser):
+            bot_name = "Telegram"
+            vk_profile = registration.vk_profile or participant.vk_url or "не указан"
+            telegram_profile = registration.telegram_profile
+            if telegram_profile is None and participant.telegram_handle is not None:
+                telegram_profile = f"https://t.me/{participant.telegram_handle.removeprefix('@')}"
+        else:
+            bot_name = "ВК"
+            vk_profile = registration.vk_profile or f"https://vk.com/id{participant.vk_id}"
+            telegram_profile = registration.telegram_profile
+            if telegram_profile is None and participant.telegram_handle is not None:
+                telegram_profile = f"https://t.me/{participant.telegram_handle.removeprefix('@')}"
+
+        text = f"Этот пользователь зарегистрировался через бота {bot_name}. Вот его профиль вк: {vk_profile}"
+        if telegram_profile is not None:
+            text += f"\nВот его профиль Telegram: {telegram_profile}"
+        return text
+
+    async def _admin_waiting_pick(self, user: User, value: str) -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+        if value == f"ag:waiting:{event_id}":
+            return await self._show_waiting_players(user, event)
+
+        parts = value.split(":")
+        if len(parts) == 5 and parts[:3] == ["admin", "waiting", "page"]:
+            direction, page_token = parts[3:]
+            if page_token != user.dialog_context.get("waiting_page_token") or direction not in {"n", "p"}:
+                return await self._show_waiting_players(user, event, invalid="Эта страница устарела.")
+            if direction == "p":
+                return await self._show_waiting_players(
+                    user,
+                    event,
+                    before=self._stored_registration_cursor(user, "waiting_first"),
+                )
+            return await self._show_waiting_players(
+                user,
+                event,
+                after=self._stored_registration_cursor(user, "waiting_last"),
+            )
+        if len(parts) != 4 or parts[:3] != ["admin", "waiting", "pick"]:
+            return await self._show_waiting_players(user, event, invalid="Выберите игрока кнопкой из списка.")
+        token = parts[3]
+        choices = user.dialog_context.get("waiting_choices")
+        registration_key = choices.get(token) if isinstance(choices, dict) else None
+        if not isinstance(registration_key, str):
+            return await self._show_waiting_players(user, event, invalid="Этот список устарел.")
+        registration = await self.administration.get_registration(event_id, registration_key)
+        if registration is None or registration.attendance_status is not AttendanceStatus.WAITING:
+            return await self._show_waiting_players(
+                user,
+                event,
+                invalid="Этот игрок уже не находится в списке не подтвердивших участие.",
+            )
+        participant = await self.administration.registration_user(event_id, registration_key)
+        if participant is None:
+            return BotResponse(
+                text="Не удалось найти профиль этого пользователя.",
+                buttons=[
+                    Button(label="⬅️ К списку", value=f"ag:waiting:{event_id}"),
+                    game_management_button(event_id),
+                ],
+            )
+        return BotResponse(
+            text=self._waiting_player_profile_text(registration, participant),
+            buttons=[
+                Button(label="⬅️ К списку", value=f"ag:waiting:{event_id}"),
+                game_management_button(event_id),
+            ],
+        )
+
     @staticmethod
     def _remove_confirmation_response(user: User, *, invalid: str = "") -> BotResponse:
         event_id = str(user.dialog_context["event_id"])
@@ -1563,6 +1704,7 @@ class ConversationEngine:
             (CHANGE_STATUS, "status"),
             (SEND_CONFIRMATION_REMINDER, "remind"),
             (SEND_CONFIRMED_NOTIFICATION, "notify"),
+            (LIST_WAITING_PLAYERS, "waiting"),
             (EVENT_TABLES, "tables"),
             (REMOVE_PLAYER, "remove"),
             (ADD_EVENT_LEADER, "leader"),
@@ -1642,6 +1784,8 @@ class ConversationEngine:
         if action == "notify":
             user.dialog_state = "ADMIN_NOTIFICATION_TEXT"
             return _confirmed_notification_prompt(event.name, event.event_id)
+        if action == "waiting":
+            return await self._show_waiting_players(user, event)
         if action == "tables":
             await self._clear(user)
             event = await self.administration.ensure_event_tables(event)
@@ -1698,6 +1842,7 @@ class ConversationEngine:
             CHANGE_STATUS,
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_NOTIFICATION,
+            LIST_WAITING_PLAYERS,
             CREATE_PASS_TABLE,
             LIST_PASS_TABLES,
             EVENT_TABLES,
