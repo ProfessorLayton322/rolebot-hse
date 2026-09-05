@@ -135,6 +135,19 @@ Russian citizens provide only Cyrillic name fields; their Latin cells are blank.
 
 Admins can create a pass table once for any game and list all stored pass-table links. It contains only YDB registrations in `Подтверждено` whose current YDB profile requests a pass. After creation, every confirmation or cancellation regenerates and overwrites the same deterministic resource at `disk:/larp-bot/passes/<event_id>.xlsx`, so its stored public Yandex Disk URL remains unchanged. Both the resource and link remain permanently with the archived game.
 
+Attendance statistics live in `disk:/larp-bot/stats`. Place the starting workbook there as `initial.xlsx`; the private sample workbook in the repository root is not bundled into the deployment. The bot defaults to this file until an administrator selects another source or makes an edit. Statistics controls are available to configured administrators in both bots, with authorization checked again by the worker:
+
+- `📊 Выбрать таблицу статистики`: enter a filename, with or without `.xlsx`, from that folder. Use `initial` for the starting workbook, or a backup filename to restore it. Selection validates the layout and copies the selected bytes into `current.xlsx` and `showcase.xlsx`; the input file is preserved.
+- `🗓 Начать новый сезон`: creates the current September–August season in Moscow time (September 2026 → `2026-2027`) unless that sheet already exists. It carries all players, lifetime totals and milestone flags from the latest season, leaving no game columns. Older sheets remain intact.
+- In a game's management message, `📊 Внести участие в статистику` adds the game's name as a column and writes `1` for confirmed registrations. Waiting and cancelled registrations are excluded; the bot has no separate check-in status. Run this after the attendance list has been finalized and before archiving the game. Names come from the registration's Cyrillic surname/name snapshot. Matching ignores case, extra whitespace and the difference between ё/е. Missing players are appended before the summaries; matching duplicate rows are all marked. A game name already present in the current season is a no-op, even if its roster subsequently changes.
+- `🔗 Ссылка на статистику`: returns the single published URL of `showcase.xlsx`, creating that copy if absent. This method is admin-only; the published URL itself remains accessible to anyone it is shared with.
+
+Before every season/game edit, the bot saves the complete previous XLSX as `backup-<timestamp>-<operation UUID>.xlsx`. GitHub variable `TABLE_VERSIONING_NUMBER` flows through the Terraform plan/deploy workflows into the functions and controls retention (default/current value: 20). Only the oldest bot-generated backups are deleted; `initial.xlsx`, other supplied inputs, `current.xlsx`, and `showcase.xlsx` are outside the backup count. The showcase is overwritten in place, never deleted/recreated during updates, to preserve its link. Do not manually delete or rename it if the URL must remain valid.
+
+All statistics commands use the same FIFO group, `statistics`, across games and platforms. `state.json` and a temporary `pending.xlsx` form a recovery journal: the backup and staged result are saved before the commit marker; retries finish a marked commit before applying another action. Retention runs after successful publication. These files are internal; use the source-selection action for restoration. No new YDB tables or direct cloud deployments are required.
+
+See [the supplied workbook analysis](docs/attendance-statistics.md) for colours, formulas, known template issues, and preservation details.
+
 The pass workbook copies the venue template's header wording and theme-color fill exactly:
 
 ```text

@@ -9,6 +9,7 @@ from larp_bot.domain.models import Button, Operation, Platform
 
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
+from .statistics import StatisticsService
 
 LOGGER = logging.getLogger("larp_bot.application.worker")
 
@@ -23,6 +24,7 @@ class OrderedWorker:
         notifications: ConfirmationNotificationService | None = None,
         *,
         max_seconds: float = 40.0,
+        statistics: StatisticsService | None = None,
     ) -> None:
         self.consumer = consumer
         self.mutations = mutations
@@ -30,6 +32,7 @@ class OrderedWorker:
         self.transport = transport
         self.notifications = notifications
         self.max_seconds = max_seconds
+        self.statistics = statistics
 
     async def _deliver_once(self, envelope: QueueEnvelope, text: str, buttons: Sequence[Button]) -> None:
         command = envelope.command
@@ -62,7 +65,12 @@ class OrderedWorker:
                 command = raw.command
                 notification_delivered = False
                 try:
-                    default_text = await self.mutations.apply(command)
+                    if command.operation is Operation.STATISTICS:
+                        if self.statistics is None:
+                            raise RuntimeError("statistics service is not configured")
+                        default_text = await self.statistics.apply(command)
+                    else:
+                        default_text = await self.mutations.apply(command)
                     # ENLIST position is decided only after its ordered write;
                     # ignore text embedded by workers from an older rollout.
                     text = (

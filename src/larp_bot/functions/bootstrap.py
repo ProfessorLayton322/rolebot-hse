@@ -15,6 +15,7 @@ from larp_bot.adapters.yandex_disk.repository import (
     YandexDiskRestClient,
     YandexDiskShowcaseRepository,
 )
+from larp_bot.adapters.yandex_disk.statistics import YandexDiskStatisticsRepository
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.conversation import ConversationEngine
@@ -25,6 +26,7 @@ from larp_bot.application.services import (
     RegistrationCatalog,
     RegistrationService,
 )
+from larp_bot.application.statistics import StatisticsService
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.config import Settings
 from larp_bot.config.logging import configure_logging
@@ -74,7 +76,8 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     users = YdbUserRepository(db)
     events = YdbEventRepository(db)
     registrations = YdbRegistrationRepository(db)
-    showcase = YandexDiskShowcaseRepository(YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"]))
+    disk = YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"])
+    showcase = YandexDiskShowcaseRepository(disk)
     sqs = boto3.client(
         "sqs",
         endpoint_url=settings.ymq_endpoint,
@@ -120,6 +123,9 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         transport,
         notifications,
         max_seconds=settings.worker_max_seconds,
+        statistics=StatisticsService(
+            YandexDiskStatisticsRepository(disk, settings.table_versioning_number), config, administration
+        ),
     )
     return AppContainer(
         settings=settings,
