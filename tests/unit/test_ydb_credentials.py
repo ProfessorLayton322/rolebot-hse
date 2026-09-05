@@ -71,6 +71,7 @@ async def test_delivery_claim_prepares_both_transaction_queries() -> None:
         id_column="tg_id",
         user_id=42,
         operation_id="operation-1",
+        buttons=[Button(label="Visible", value="callback:value")],
     )
 
     assert claimed is True
@@ -78,7 +79,11 @@ async def test_delivery_claim_prepares_both_transaction_queries() -> None:
     transaction.execute.assert_any_call(prepared_select, {"$user_id": 42})
     transaction.execute.assert_any_call(
         prepared_update,
-        {"$user_id": 42, "$operation_id": "operation-1", "$last_bot_buttons": "[]"},
+        {
+            "$user_id": 42,
+            "$operation_id": "operation-1",
+            "$last_bot_buttons": '[{"label":"Visible","value":"callback:value"}]',
+        },
         commit_tx=True,
     )
 
