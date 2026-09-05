@@ -251,21 +251,31 @@ class RegistrationService:
         | EmptyPayload,
         reply_context: ReplyContext,
         idempotency_key: str | None = None,
+        target_participant_key: str | None = None,
     ) -> OrderedRegistrationCommand:
         event = await self._event(event_id)
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
-        participant = None
-        if operation not in {
+        administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.REMOVE_PARTICIPANT,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
-        }:
+        }
+        if operation is Operation.REMOVE_PARTICIPANT:
+            if target_participant_key is None:
+                raise ValueError("REMOVE_PARTICIPANT requires a target participant")
+            participant = target_participant_key
+        elif target_participant_key is not None:
+            raise ValueError("a target participant is only valid for REMOVE_PARTICIPANT")
+        elif operation not in administrative_operations:
             participant = self.key(platform, user_id, event_id)
+        else:
+            participant = None
         command = OrderedRegistrationCommand(
             operation_id=(
                 str(uuid5(NAMESPACE_URL, f"larp-bot:{platform}:{user_id}:{idempotency_key}"))
@@ -299,6 +309,13 @@ class PassTableExport:
     public_url: str
     created: bool
     row_count: int | None
+
+
+@dataclass(frozen=True)
+class RegistrationPage:
+    rows: list[Registration]
+    has_previous: bool
+    has_next: bool
 
 
 class EventAdministrationService:
@@ -350,6 +367,54 @@ class EventAdministrationService:
     async def ensure_event_tables(self, event: Event) -> Event:
         event = await self.catalog.ensure_migrated(event)
         return await self.catalog.ensure_public_table(event)
+
+    async def active_registration_page(
+        self,
+        event_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> RegistrationPage:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        active_statuses = frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED})
+        rows = list(
+            await self.catalog.registrations.list_page_for_event(
+                event_id,
+                statuses=active_statuses,
+                after=after,
+                before=before,
+                limit=limit,
+            )
+        )
+        if not rows:
+            return RegistrationPage(rows=[], has_previous=False, has_next=False)
+        first = (rows[0].created_at, rows[0].participant_key)
+        last = (rows[-1].created_at, rows[-1].participant_key)
+        previous, following = await asyncio.gather(
+            self.catalog.registrations.list_page_for_event(
+                event_id,
+                statuses=active_statuses,
+                before=first,
+                limit=1,
+            ),
+            self.catalog.registrations.list_page_for_event(
+                event_id,
+                statuses=active_statuses,
+                after=last,
+                limit=1,
+            ),
+        )
+        return RegistrationPage(rows=rows, has_previous=bool(previous), has_next=bool(following))
+
+    async def get_registration(self, event_id: str, participant_key: str) -> Registration | None:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        return await self.catalog.get(event, participant_key)
 
     async def create_pass_table(self, event_id: str) -> PassTableExport:
         event = await self.events.get(event_id)
@@ -600,6 +665,7 @@ class OrderedMutationService:
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.REMOVE_PARTICIPANT,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
@@ -684,6 +750,19 @@ class OrderedMutationService:
             raise OperationNotAllowed("Подтверждение участия в этой игре закрыто")
 
         registration = await self.catalog.registrations.get(event.event_id, command.participant_key)
+        if command.operation is Operation.REMOVE_PARTICIPANT:
+            if registration is not None and registration.attendance_status is AttendanceStatus.CANCELLED:
+                raise OperationNotAllowed("Запись этого игрока уже отменена")
+            if registration is not None:
+                await self.catalog.registrations.remove(
+                    event.event_id,
+                    participant_key=command.participant_key,
+                )
+            # Refresh even when the row is already absent. The first attempt may
+            # have deleted it before a transient workbook or pass-table failure.
+            await self.catalog.refresh(event)
+            await self._refresh_pass_table(event)
+            return "Игрок удалён" if registration is not None else "Игрок уже удалён"
         if registration is None:
             raise RegistrationNotFound("Сначала запишитесь на эту игру")
         if command.operation is Operation.CONFIRM:

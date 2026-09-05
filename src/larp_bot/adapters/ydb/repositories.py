@@ -834,6 +834,60 @@ class YdbRegistrationRepository:
         registrations = [self._from_row(row) for row in rows]
         return sorted(registrations, key=lambda item: (item.created_at, item.participant_key))
 
+    async def list_page_for_event(
+        self,
+        event_id: str,
+        *,
+        statuses: Collection[AttendanceStatus] | None = None,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> Sequence[Registration]:
+        if after is not None and before is not None:
+            raise ValueError("only one registration-page cursor may be supplied")
+        declarations = ["DECLARE $event_id AS Utf8;", "DECLARE $limit AS Uint64;"]
+        conditions = ["event_id = $event_id"]
+        params: dict[str, Any] = {"$event_id": event_id, "$limit": limit}
+        if statuses is not None:
+            accepted = sorted(set(statuses), key=lambda status: status.value)
+            if not accepted:
+                return []
+            status_parameters: list[str] = []
+            for index, status in enumerate(accepted):
+                name = f"$status_{index}"
+                declarations.append(f"DECLARE {name} AS Utf8;")
+                params[name] = status.value
+                status_parameters.append(name)
+            conditions.append(f"attendance_status IN ({', '.join(status_parameters)})")
+        if after is not None:
+            declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_key AS Utf8;"])
+            conditions.append(
+                "(created_at > $after_time OR (created_at = $after_time AND participant_key > $after_key))"
+            )
+            params.update({"$after_time": after[0], "$after_key": after[1]})
+        if before is not None:
+            declarations.extend(["DECLARE $before_time AS Timestamp;", "DECLARE $before_key AS Utf8;"])
+            conditions.append(
+                "(created_at < $before_time OR (created_at = $before_time AND participant_key < $before_key))"
+            )
+            params.update({"$before_time": before[0], "$before_key": before[1]})
+        order = "DESC" if before is not None else "ASC"
+        rows = await self.db.query(
+            f"""
+            {" ".join(declarations)}
+            SELECT {self.COLUMNS} FROM `registrations`
+            WHERE {" AND ".join(conditions)}
+            ORDER BY created_at {order}, participant_key {order}
+            LIMIT $limit;
+            """,
+            params,
+            read_only=True,
+        )
+        registrations = [self._from_row(row) for row in rows]
+        if before is not None:
+            registrations.reverse()
+        return registrations
+
     async def _save(self, registration: Registration) -> None:
         await self.db.query(
             """
@@ -1031,6 +1085,17 @@ class YdbRegistrationRepository:
                 "$attendance_status": AttendanceStatus.CANCELLED.value,
                 "$updated_at": datetime.now(UTC),
             },
+        )
+        return True
+
+    async def remove(self, event_id: str, *, participant_key: str) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DELETE FROM `registrations`
+            WHERE event_id = $event_id AND participant_key = $participant_key;
+            """,
+            {"$event_id": event_id, "$participant_key": participant_key},
         )
         return True
 

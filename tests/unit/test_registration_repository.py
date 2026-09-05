@@ -132,6 +132,69 @@ async def test_event_listing_is_stable_by_creation_time() -> None:
     assert [row.display_name for row in await repository.list_for_event("event-a1")] == ["Earlier", "Later"]
 
 
+@pytest.mark.asyncio
+async def test_active_registration_pages_filter_status_and_support_both_directions() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key=f"{index:043d}",
+            display_name=f"Player {index}",
+            wish_play="Anyone",
+            attendance_status=(
+                AttendanceStatus.CANCELLED
+                if index == 5
+                else AttendanceStatus.CONFIRMED
+                if index % 2
+                else AttendanceStatus.WAITING
+            ),
+            created_at=base + timedelta(seconds=index),
+        )
+        for index in range(12)
+    ]
+    repository = MemoryRegistrationRepository(registrations)
+    statuses = {AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}
+
+    first = await repository.list_page_for_event("event-a1", statuses=statuses, limit=10)
+    assert [row.display_name for row in first] == [
+        "Player 0",
+        "Player 1",
+        "Player 2",
+        "Player 3",
+        "Player 4",
+        "Player 6",
+        "Player 7",
+        "Player 8",
+        "Player 9",
+        "Player 10",
+    ]
+
+    last_cursor = (first[-1].created_at, first[-1].participant_key)
+    second = await repository.list_page_for_event("event-a1", statuses=statuses, after=last_cursor, limit=10)
+    assert [row.display_name for row in second] == ["Player 11"]
+
+    first_cursor = (second[0].created_at, second[0].participant_key)
+    previous = await repository.list_page_for_event("event-a1", statuses=statuses, before=first_cursor, limit=10)
+    assert previous == first
+
+
+@pytest.mark.asyncio
+async def test_registration_remove_is_scoped_to_one_event() -> None:
+    registration = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Player",
+        wish_play="Anyone",
+    )
+    other_event = registration.model_copy(update={"event_id": "event-b1"})
+    repository = MemoryRegistrationRepository([registration, other_event])
+
+    assert await repository.remove("event-a1", participant_key=registration.participant_key)
+    assert not await repository.remove("event-a1", participant_key=registration.participant_key)
+    assert await repository.get("event-a1", registration.participant_key) is None
+    assert await repository.get("event-b1", registration.participant_key) == other_event
+
+
 class RecordingExecutor:
     def __init__(self, responses: list[list[dict[str, Any]]]) -> None:
         self.responses = responses
@@ -225,3 +288,40 @@ async def test_ydb_confirmation_updates_wish_and_status_in_one_query() -> None:
     assert "attendance_status = $attendance_status" in query
     assert "last_operation_id != $operation_id" in query
     assert params["$attendance_status"] == AttendanceStatus.CONFIRMED.value
+
+
+@pytest.mark.asyncio
+async def test_ydb_registration_page_uses_status_and_keyset_filters() -> None:
+    after = (datetime(2026, 1, 1, tzinfo=UTC), "a" * 43)
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    rows = await repository.list_page_for_event(
+        "event-a1",
+        statuses={AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED},
+        after=after,
+        limit=10,
+    )
+
+    query, params = executor.queries[0]
+    assert rows == []
+    assert "attendance_status IN ($status_0, $status_1)" in query
+    assert "created_at > $after_time" in query
+    assert "participant_key > $after_key" in query
+    assert "ORDER BY created_at ASC, participant_key ASC" in query
+    assert set(params.values()) >= {AttendanceStatus.WAITING.value, AttendanceStatus.CONFIRMED.value}
+    assert params["$after_time"] == after[0]
+    assert params["$after_key"] == after[1]
+
+
+@pytest.mark.asyncio
+async def test_ydb_registration_remove_uses_the_composite_key() -> None:
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    await repository.remove("event-a1", participant_key="a" * 43)
+
+    query, params = executor.queries[0]
+    assert "DELETE FROM `registrations`" in query
+    assert "event_id = $event_id AND participant_key = $participant_key" in query
+    assert params == {"$event_id": "event-a1", "$participant_key": "a" * 43}

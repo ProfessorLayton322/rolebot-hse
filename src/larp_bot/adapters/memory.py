@@ -217,6 +217,33 @@ class MemoryRegistrationRepository:
         values = [value for (stored_event_id, _), value in self.rows.items() if stored_event_id == event_id]
         return deepcopy(sorted(values, key=lambda item: (item.created_at, item.participant_key)))
 
+    async def list_page_for_event(
+        self,
+        event_id: str,
+        *,
+        statuses: Collection[AttendanceStatus] | None = None,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> Sequence[Registration]:
+        if after is not None and before is not None:
+            raise ValueError("only one registration-page cursor may be supplied")
+        values = [value for (stored_event_id, _), value in self.rows.items() if stored_event_id == event_id]
+        if statuses is not None:
+            accepted = set(statuses)
+            values = [registration for registration in values if registration.attendance_status in accepted]
+        values.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+        if after is not None:
+            values = [registration for registration in values if self._registration_cursor(registration) > after]
+        if before is not None:
+            values = [registration for registration in values if self._registration_cursor(registration) < before]
+            values = values[-limit:]
+        return deepcopy(values[:limit])
+
+    @staticmethod
+    def _registration_cursor(registration: Registration) -> tuple[datetime, str]:
+        return registration.created_at, registration.participant_key
+
     async def import_missing(self, registrations: Sequence[Registration]) -> None:
         for registration in registrations:
             self.rows.setdefault(
@@ -308,6 +335,9 @@ class MemoryRegistrationRepository:
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
+
+    async def remove(self, event_id: str, *, participant_key: str) -> bool:
+        return self.rows.pop((event_id, participant_key), None) is not None
 
     async def delete_for_event(self, event_id: str) -> None:
         for key in [key for key in self.rows if key[0] == event_id]:

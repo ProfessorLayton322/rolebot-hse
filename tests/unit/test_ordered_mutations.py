@@ -26,9 +26,12 @@ from larp_bot.domain.models import (
     NotificationPayload,
     Operation,
     OrderedRegistrationCommand,
+    PassDetails,
     Platform,
+    Registration,
     TelegramUser,
 )
+from larp_bot.domain.security import participant_key
 from tests.conftest import MemoryDiskStore
 
 
@@ -352,6 +355,109 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
     assert stored_event.archived_at is not None
     assert stored_registration is not None and stored_registration.character_wish == "Doctor"
     assert event.disk_resource_path in disk_store.files
+
+
+@pytest.mark.asyncio
+async def test_leader_removal_deletes_registration_and_refreshes_every_table(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    pass_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+    event = Event.model_validate(
+        event.model_dump()
+        | {
+            "pass_table_resource_path": pass_path,
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    profile = PassDetails(
+        surname_cyrillic="Иванов",
+        name_cyrillic="Иван",
+        patronym_cyrillic="Иванович",
+        foreigner=False,
+        mobile_phone="+79991234567",
+        email="ivan@example.com",
+    )
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="Иванов Иван",
+            vk_url="https://vk.com/player",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=True,
+            pass_details=profile,
+        )
+    )
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    await showcase.create_pass_table(pass_path, [profile])
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        users,
+        "participant-secret",
+    )
+    key = participant_key("participant-secret", Platform.TELEGRAM, 1, event.event_id)
+    await mutations.apply(
+        command(
+            event,
+            Operation.ENLIST,
+            EnlistPayload(display_name="Иванов Иван", wish_play="Без пожеланий"),
+            key=key,
+        )
+    )
+    await mutations.apply(
+        command(
+            event,
+            Operation.CONFIRM,
+            CharacterWishPayload(character_wish="Без пожеланий"),
+            key=key,
+        )
+    )
+    removal = command(event, Operation.REMOVE_PARTICIPANT, EmptyPayload(), key=key)
+
+    assert await mutations.apply(removal) == "Игрок удалён"
+    assert await mutations.apply(removal) == "Игрок уже удалён"
+    assert await tables.get(event.event_id, key) is None
+
+    refreshed_event = await events.get(event.event_id)
+    assert refreshed_event is not None and refreshed_event.public_table_resource_path is not None
+    for path in (event.disk_resource_path, refreshed_event.public_table_resource_path, pass_path):
+        workbook = load_workbook(BytesIO(disk_store.files[path]))
+        try:
+            assert workbook.active.max_row == 1
+        finally:
+            workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_nonleader_cannot_remove_event_participant(disk_store: MemoryDiskStore, event: Event) -> None:
+    registration_key = "a" * 43
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=registration_key,
+                display_name="Player",
+                wish_play="Anyone",
+            )
+        ]
+    )
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="Только ведущие"):
+        await mutations.apply(command(event, Operation.REMOVE_PARTICIPANT, EmptyPayload(), key=registration_key))
+
+    assert await tables.get(event.event_id, registration_key) is not None
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ from larp_bot.application.conversation import (
     MANAGE_GAMES,
     MASTER_TABLE_DISCLAIMER,
     PROFILE,
+    REMOVE_PLAYER,
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_NOTIFICATION,
     STATUS_CLOSED,
@@ -46,6 +47,7 @@ from larp_bot.application.services import (
     RegistrationService,
 )
 from larp_bot.domain.models import (
+    AttendanceStatus,
     BotIdentity,
     Button,
     ConfirmationDeadlinePayload,
@@ -56,6 +58,7 @@ from larp_bot.domain.models import (
     NotificationPayload,
     Operation,
     Platform,
+    Registration,
     TelegramUser,
     VkUser,
 )
@@ -660,7 +663,80 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     assert "https://disk.example/pass-table" not in tables_denied.text
     notification_denied = await engine.handle(inbound(6, f"ag:notify:{event.event_id}", callback=True))
     assert notification_denied.text == "Только ведущие этой игры могут изменять её данные."
+    removal_denied = await engine.handle(inbound(7, f"ag:remove:{event.event_id}", callback=True))
+    assert removal_denied.text == "Только ведущие этой игры могут изменять её данные."
     assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+async def test_event_leader_pages_profile_names_and_confirms_player_removal(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event, admin=True)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    registrations = [
+        Registration(
+            event_id=event.event_id,
+            participant_key=f"{index:043d}",
+            display_name=f"Фамилия{index} Имя{index}",
+            wish_play="Без пожеланий",
+            attendance_status=(AttendanceStatus.CONFIRMED if index % 2 else AttendanceStatus.WAITING),
+            created_at=base + timedelta(seconds=index),
+        )
+        for index in range(11)
+    ]
+    await tables.import_missing(
+        [
+            *registrations,
+            Registration(
+                event_id=event.event_id,
+                participant_key="c" * 43,
+                display_name="Отменённый Игрок",
+                wish_play="Без пожеланий",
+                attendance_status=AttendanceStatus.CANCELLED,
+                created_at=base + timedelta(seconds=5, microseconds=1),
+            ),
+        ]
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    assert REMOVE_PLAYER in [button.label for button in management.buttons]
+
+    first = await engine.handle(inbound(2, f"ag:remove:{event.event_id}", callback=True))
+    first_players = [button for button in first.buttons if button.value.startswith("admin:remove:pick:")]
+    assert len(first_players) == 10
+    assert first_players[0].label == "Фамилия0 Имя0 — Ожидается"
+    assert "Отменённый Игрок" not in [button.label for button in first_players]
+    assert "имена из их профилей" in first.text
+
+    next_button = next(button for button in first.buttons if button.label == "➡️ Следующая")
+    second = await engine.handle(inbound(3, next_button.value, callback=True))
+    second_players = [button for button in second.buttons if button.value.startswith("admin:remove:pick:")]
+    assert [button.label for button in second_players] == ["Фамилия10 Имя10 — Ожидается"]
+
+    stale = await engine.handle(inbound(4, first_players[0].value, callback=True))
+    assert "кнопка устарела" in stale.text.casefold()
+    assert publisher.commands == []
+
+    previous_button = next(button for button in second.buttons if button.label == "⬅️ Предыдущая")
+    returned = await engine.handle(inbound(5, previous_button.value, callback=True))
+    target = next(button for button in returned.buttons if button.label.startswith("Фамилия1 Имя1 —"))
+    warning = await engine.handle(inbound(6, target.value, callback=True))
+
+    assert "Это действие нельзя отменить" in warning.text
+    assert "Вы уверены, что выбрали нужного человека?" in warning.text
+    assert "Имя из профиля: Фамилия1 Имя1" in warning.text
+    confirm = next(button for button in warning.buttons if button.value.startswith("admin:remove:confirm:"))
+    accepted = await engine.handle(inbound(7, confirm.value, callback=True))
+
+    assert accepted.deferred and accepted.command_enqueued
+    command = publisher.commands[-1]
+    assert command.operation is Operation.REMOVE_PARTICIPANT
+    assert command.participant_key == registrations[1].participant_key
+    assert command.reply_context.text_success == (
+        f"🗑 Игрок «Фамилия1 Имя1» удалён из игры «{event.name}»."
+    )
 
 
 @pytest.mark.asyncio
