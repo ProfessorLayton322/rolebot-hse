@@ -649,7 +649,7 @@ class ConfirmationNotificationService:
                 text=text,
                 buttons=buttons,
             )
-            await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id)
+            await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id, buttons)
             delivered += 1
         return delivered
 
@@ -687,7 +687,13 @@ class ConfirmationNotificationService:
             )
         # One command-level marker is written only after the complete bundle is
         # accepted. No per-notification/per-recipient delivery state is stored.
-        await self.users.claim_delivery(command.platform, command.platform_user_id, command.operation_id)
+        delivered_buttons = [main_menu_button()] if event.confirmed_notifications else confirmation_buttons
+        await self.users.claim_delivery(
+            command.platform,
+            command.platform_user_id,
+            command.operation_id,
+            delivered_buttons,
+        )
         return len(event.confirmed_notifications)
 
     async def notify_reserve_promotion(self, command: OrderedRegistrationCommand) -> int:
@@ -734,7 +740,12 @@ class ConfirmationNotificationService:
             buttons=[main_menu_button()],
         )
         await self.events.mark_reserve_promotion_delivered(event.event_id, command.operation_id)
-        await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id)
+        await self.users.claim_delivery(
+            recipient.platform,
+            recipient.user_id,
+            request_id,
+            [main_menu_button()],
+        )
         return 1
 
 

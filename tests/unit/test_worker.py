@@ -119,7 +119,13 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
         ),
         queued(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A"), 2),
         queued(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="B"), 3),
-        queued(event, Operation.CANCEL, EmptyPayload(), 4),
+        queued(
+            event,
+            Operation.CANCEL,
+            EmptyPayload(),
+            4,
+            [Button(label=MAIN_MENU, value=MAIN_MENU)],
+        ),
     ]
     consumer = FakeConsumer(envelopes)
     transport = MemoryDeferredTransport()
@@ -139,7 +145,8 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     assert len(transport.sent) == 4
     assert [(button.label, button.value) for button in transport.sent[0][4]] == [(MAIN_MENU, MAIN_MENU)]
     saved_user = await users.get(Platform.TELEGRAM, 1)
-    assert saved_user is not None and saved_user.last_bot_buttons == []
+    assert saved_user is not None
+    assert saved_user.last_bot_buttons == [Button(label=MAIN_MENU, value=MAIN_MENU)]
 
 
 @pytest.mark.asyncio
@@ -407,6 +414,14 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
         == [(CONFIRM_PARTICIPATION, f"select:confirm:{event.event_id}")]
         for sent in transport.sent
     )
+    for waiting_user in waiting_users:
+        platform = Platform.TELEGRAM if isinstance(waiting_user, TelegramUser) else Platform.VK
+        uid = waiting_user.tg_id if isinstance(waiting_user, TelegramUser) else waiting_user.vk_id
+        saved_user = await users.get(platform, uid)
+        assert saved_user is not None
+        assert saved_user.last_bot_buttons == [
+            Button(label=CONFIRM_PARTICIPATION, value=f"select:confirm:{event.event_id}")
+        ]
     assert consumer.deleted == ["receipt-1"]
 
 
@@ -615,4 +630,5 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
     saved_player = await users.get(Platform.TELEGRAM, player.tg_id)
     assert saved_player is not None
     assert saved_player.last_delivery_operation_id == confirm_operation_id
+    assert saved_player.last_bot_buttons == [Button(label=MAIN_MENU, value=MAIN_MENU)]
     assert consumer.deleted == ["receipt-1", "receipt-2", "receipt-3"]

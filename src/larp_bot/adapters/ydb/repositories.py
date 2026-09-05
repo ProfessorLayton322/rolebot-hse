@@ -71,7 +71,15 @@ class YdbExecutor:
 
         return await asyncio.to_thread(self.pool.retry_operation_sync, operation)
 
-    async def claim_delivery(self, *, table: str, id_column: str, user_id: int, operation_id: str) -> bool:
+    async def claim_delivery(
+        self,
+        *,
+        table: str,
+        id_column: str,
+        user_id: int,
+        operation_id: str,
+        buttons: Sequence[Button] = (),
+    ) -> bool:
         if (table, id_column) not in {("tg_users", "tg_id"), ("vk_users", "vk_id")}:
             raise ValueError("invalid user table")
 
@@ -96,7 +104,15 @@ class YdbExecutor:
             )
             transaction.execute(
                 session.prepare(update),
-                {"$user_id": user_id, "$operation_id": operation_id, "$last_bot_buttons": "[]"},
+                {
+                    "$user_id": user_id,
+                    "$operation_id": operation_id,
+                    "$last_bot_buttons": json.dumps(
+                        [button.model_dump() for button in buttons],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                },
                 commit_tx=True,
             )
             return True
@@ -354,10 +370,20 @@ class YdbUserRepository:
             {"$user_id": user_id, "$operation_id": operation_id},
         )
 
-    async def claim_delivery(self, platform: Platform, user_id: int, operation_id: str) -> bool:
+    async def claim_delivery(
+        self,
+        platform: Platform,
+        user_id: int,
+        operation_id: str,
+        buttons: Sequence[Button] = (),
+    ) -> bool:
         table, id_column, _ = self._location(platform)
         return await self.db.claim_delivery(
-            table=table, id_column=id_column, user_id=user_id, operation_id=operation_id
+            table=table,
+            id_column=id_column,
+            user_id=user_id,
+            operation_id=operation_id,
+            buttons=buttons,
         )
 
 

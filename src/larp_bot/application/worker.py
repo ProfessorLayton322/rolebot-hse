@@ -50,7 +50,12 @@ class OrderedWorker:
         )
         # Mark only after the transport accepted the message. If delivery fails, the FIFO
         # message remains retryable and the already-authoritative YDB mutation is not undone.
-        await self.users.claim_delivery(command.platform, command.platform_user_id, command.operation_id)
+        await self.users.claim_delivery(
+            command.platform,
+            command.platform_user_id,
+            command.operation_id,
+            buttons,
+        )
 
     async def run(self) -> int:
         started = time.monotonic()

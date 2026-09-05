@@ -32,7 +32,13 @@ class UserRepository(Protocol):
 
     async def list_all(self) -> Sequence[User]: ...
 
-    async def claim_delivery(self, platform: Platform, user_id: int, operation_id: str) -> bool: ...
+    async def claim_delivery(
+        self,
+        platform: Platform,
+        user_id: int,
+        operation_id: str,
+        buttons: Sequence[Button] = (),
+    ) -> bool: ...
 
 
 class EventRepository(Protocol):

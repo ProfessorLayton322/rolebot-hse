@@ -52,14 +52,20 @@ class MemoryUserRepository:
     async def list_all(self) -> Sequence[User]:
         return deepcopy(list(self.rows.values()))
 
-    async def claim_delivery(self, platform: Platform, user_id: int, operation_id: str) -> bool:
+    async def claim_delivery(
+        self,
+        platform: Platform,
+        user_id: int,
+        operation_id: str,
+        buttons: Sequence[Button] = (),
+    ) -> bool:
         user = self.rows.get((platform, user_id))
         if user is None:
             return True
         if user.last_delivery_operation_id == operation_id:
             return False
         user.last_delivery_operation_id = operation_id
-        user.last_bot_buttons = []
+        user.last_bot_buttons = list(buttons)
         return True
 
 
