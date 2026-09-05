@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from secrets import token_urlsafe
+from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
@@ -21,10 +23,12 @@ from larp_bot.domain.models import (
     InboundMessage,
     NotificationPayload,
     Operation,
+    OrderedRegistrationCommand,
     PassDetails,
     Platform,
     Registration,
     ReplyContext,
+    StatisticsPayload,
     TelegramUser,
     User,
     normalize_mobile_phone,
@@ -73,6 +77,10 @@ REMOVE_PLAYER = "🗑 Удалить игрока"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
+STATS_SOURCE = "📊 Выбрать таблицу статистики"
+STATS_SEASON = "🗓 Начать новый сезон"
+STATS_LINK = "🔗 Ссылка на статистику"
+STATS_GAME = "📊 Внести участие в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
 GRANT_GAMEMASTER = "🎖 Назначить гейммастера"
 ADD_EVENT_LEADER = "👑 Добавить ведущего игры"
@@ -100,6 +108,9 @@ MASTER_TABLE_DISCLAIMER = "⚠️ Только для ведущих этой и
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
 ADMIN_ACTIONS = frozenset(
     {
+        STATS_SOURCE,
+        STATS_SEASON,
+        STATS_LINK,
         "➕ Создать игру",
         MANAGE_GAMES,
         EVENT_TABLES,
@@ -119,6 +130,7 @@ ADMIN_ACTIONS = frozenset(
 )
 FREE_TEXT_DIALOG_STATES = frozenset(
     {
+        "ADMIN_STATS_SOURCE",
         "PROFILE_SURNAME_CYRILLIC",
         "PROFILE_NAME_CYRILLIC",
         "PROFILE_CONTACT",
@@ -360,6 +372,23 @@ class ConversationEngine:
             return await self._page(user, value)
         if value.startswith("ag:"):
             return await self._admin_game_action(user, message, value)
+        if value in {STATS_SOURCE, STATS_SEASON, STATS_LINK}:
+            if not await self._is_admin(user):
+                return BotResponse(text="Недостаточно прав.")
+            if value == STATS_SOURCE:
+                user.dialog_state = "ADMIN_STATS_SOURCE"
+                return BotResponse(
+                    text="Введите имя актуального XLSX-файла в larp-bot/stats. По умолчанию: initial.",
+                    buttons=[Button(label="initial", value="initial"), admin_menu_button()],
+                )
+            now = datetime.now(ZoneInfo("Europe/Moscow"))
+            year = now.year if now.month >= 9 else now.year - 1
+            payload = (
+                StatisticsPayload(action="link")
+                if value == STATS_LINK
+                else StatisticsPayload(action="season", season_year=year)
+            )
+            return await self._enqueue_statistics(user, message, payload)
         admin_response = await self.dispatch_idle_admin(user, value)
         if admin_response is not None:
             return admin_response
@@ -925,6 +954,7 @@ class ConversationEngine:
         ]
         if await self._is_admin(user):
             labels.insert(-1, GRANT_GAMEMASTER)
+            labels[-1:-1] = [STATS_SOURCE, STATS_SEASON, STATS_LINK]
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
     @staticmethod
@@ -973,6 +1003,8 @@ class ConversationEngine:
         if not await self._has_admin_access(user):
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
+        if user.dialog_state == "ADMIN_STATS_SOURCE":
+            return await self._enqueue_statistics(user, message, StatisticsPayload(action="select", table_name=value))
         event_bound_states = {
             "ADMIN_STATUS_SELECT",
             "ADMIN_CONFIRMATION_DEADLINE",
@@ -1731,6 +1763,8 @@ class ConversationEngine:
             (ADD_EVENT_LEADER, "leader"),
             (ARCHIVE_GAME, "archive"),
         ]
+        if await self._is_admin(user):
+            actions.insert(-1, (STATS_GAME, "stats"))
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))
         return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
@@ -1771,6 +1805,13 @@ class ConversationEngine:
         if action == "status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
             return _admin_status_response(event.name, event.status, event.event_id)
+        if action == "stats":
+            return await self._enqueue_statistics(
+                user,
+                message,
+                StatisticsPayload(action="game", game_id=event.event_id),
+                back=game_management_button(event.event_id),
+            )
         if action == "remind":
             await self._clear(user)
             if event.status is not EventStatus.CONFIRMATION_OPEN:
@@ -1834,6 +1875,34 @@ class ConversationEngine:
                 buttons=[game_management_button(event.event_id)],
             )
         return await self._game_management(user, event)
+
+    async def _enqueue_statistics(
+        self,
+        user: User,
+        message: InboundMessage,
+        payload: StatisticsPayload,
+        *,
+        back: Button | None = None,
+    ) -> BotResponse:
+        if not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        back = back or admin_menu_button()
+        command = OrderedRegistrationCommand(
+            operation_id=str(
+                uuid5(NAMESPACE_URL, f"stats:{message.identity.platform}:{user_id(user)}:{message.update_id}")
+            ),
+            event_id="statistics",
+            operation=Operation.STATISTICS,
+            platform=message.identity.platform,
+            platform_user_id=user_id(user),
+            payload=payload,
+            reply_context=ReplyContext(buttons=[back]),
+        )
+        await self.registrations.publisher.publish(command)
+        await self._clear(user)
+        return BotResponse(
+            text="⏳ Действие со статистикой принято в обработку.", buttons=[back], deferred=True, command_enqueued=True
+        )
 
     async def _admin_select(
         self,

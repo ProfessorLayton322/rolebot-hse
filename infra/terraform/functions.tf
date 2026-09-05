@@ -16,6 +16,7 @@ locals {
     TELEGRAM_EGRESS_URL     = local.telegram_egress_url
     INLINE_SAFETY_MARGIN_MS = "100"
     APP_LOG_LEVEL           = "INFO"
+    TABLE_VERSIONING_NUMBER = tostring(var.table_versioning_number)
   }
 }
 

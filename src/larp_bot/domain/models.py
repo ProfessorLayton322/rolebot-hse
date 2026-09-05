@@ -77,6 +77,7 @@ class AttendanceStatus(StrEnum):
 
 
 class Operation(StrEnum):
+    STATISTICS = "STATISTICS"
     ENLIST = "ENLIST"
     CONFIRM = "CONFIRM"
     UPDATE_CHARACTER_WISH = "UPDATE_CHARACTER_WISH"
@@ -395,7 +396,29 @@ class NotificationPayload(StrictModel):
         return normalized
 
 
-CommandPayload = EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | NotificationPayload | EmptyPayload
+class StatisticsPayload(StrictModel):
+    action: Literal["select", "season", "game", "link"]
+    table_name: str = "initial"
+    game_id: str | None = None
+    season_year: int | None = Field(default=None, ge=2000, le=2099)
+
+    @model_validator(mode="after")
+    def validate_action(self) -> StatisticsPayload:
+        if self.action == "game" and not self.game_id:
+            raise ValueError("game requires game_id")
+        if self.action == "season" and self.season_year is None:
+            raise ValueError("season requires season_year")
+        return self
+
+
+CommandPayload = (
+    EnlistPayload
+    | CharacterWishPayload
+    | ConfirmationDeadlinePayload
+    | NotificationPayload
+    | StatisticsPayload
+    | EmptyPayload
+)
 
 
 class ReplyContext(StrictModel):
@@ -420,6 +443,9 @@ class OrderedRegistrationCommand(StrictModel):
 
     @model_validator(mode="after")
     def validate_shape(self) -> OrderedRegistrationCommand:
+        if self.operation is Operation.STATISTICS:
+            if not isinstance(self.payload, StatisticsPayload) or self.event_id != "statistics":
+                raise ValueError("STATISTICS requires StatisticsPayload and the global statistics group")
         participant_ops = {
             Operation.ENLIST,
             Operation.CONFIRM,

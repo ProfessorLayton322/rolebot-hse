@@ -16,6 +16,12 @@ class MemoryDiskStore:
     async def download(self, path: str) -> bytes:
         return bytes(self.files[path])
 
+    async def exists(self, path: str) -> bool:
+        return path in self.files
+
+    async def list_files(self, path: str) -> list[str]:
+        return [name for name in self.files if name.rsplit("/", 1)[0] == path]
+
     async def upload_new(self, path: str, content: bytes) -> None:
         if path in self.files:
             raise FileExistsError(path)

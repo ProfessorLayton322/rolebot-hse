@@ -68,3 +68,13 @@ variable "labels" {
   type    = map(string)
   default = {}
 }
+
+variable "table_versioning_number" {
+  description = "Number of pre-edit statistics workbook backups retained on Yandex Disk."
+  type        = number
+  default     = 20
+  validation {
+    condition     = var.table_versioning_number >= 1 && var.table_versioning_number <= 1000 && floor(var.table_versioning_number) == var.table_versioning_number
+    error_message = "table_versioning_number must be an integer between 1 and 1000."
+  }
+}

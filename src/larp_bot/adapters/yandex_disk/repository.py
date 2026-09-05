@@ -378,12 +378,46 @@ class YandexDiskRestClient:
         response.raise_for_status()
         return response.content
 
+    async def exists(self, path: str) -> bool:
+        response = await self._client.get(
+            f"{self.API}/resources", headers=self._headers, params={"path": path, "fields": "path"}
+        )
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return True
+
+    async def list_files(self, path: str) -> list[str]:
+        files: list[str] = []
+        offset = 0
+        while True:
+            response = await self._client.get(
+                f"{self.API}/resources",
+                headers=self._headers,
+                params={"path": path, "limit": 1000, "offset": offset},
+            )
+            response.raise_for_status()
+            embedded = response.json()["_embedded"]
+            items = embedded["items"]
+            files.extend(item["path"] for item in items if item["type"] == "file")
+            offset += len(items)
+            if offset >= embedded["total"]:
+                return files
+            if not items:
+                raise RuntimeError("Yandex Disk returned an incomplete directory listing")
+
     async def _upload(self, path: str, content: bytes, *, overwrite: bool) -> None:
         href = await self._link("resources/upload", path, overwrite=overwrite)
         response = await self._client.put(
             href,
             content=content,
-            headers={"Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+            headers={
+                "Content-Type": (
+                    "application/json"
+                    if path.endswith(".json")
+                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            },
         )
         response.raise_for_status()
 
