@@ -126,7 +126,12 @@ def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes
     # A repository is not required to return rows in insertion order. Keep the
     # public signup sheet chronological at the projection boundary so later
     # profile, confirmation, and cancellation updates cannot move a player.
-    ordered_registrations = sorted(registrations, key=lambda row: (row.created_at, row.participant_key))
+    active_registrations = (
+        registration
+        for registration in registrations
+        if registration.attendance_status is not AttendanceStatus.CANCELLED
+    )
+    ordered_registrations = sorted(active_registrations, key=lambda row: (row.created_at, row.participant_key))
     for number, registration in enumerate(ordered_registrations, start=1):
         sheet.append(
             (

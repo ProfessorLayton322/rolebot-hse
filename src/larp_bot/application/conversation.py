@@ -706,7 +706,11 @@ class ConversationEngine:
         if flow == "cancel":
             user.dialog_state = "CANCEL_CONFIRM"
             return BotResponse(
-                text=f"Отменить участие в игре «{event.name}»?",
+                text=(
+                    f"Вы уверены, что хотите отменить участие в игре «{event.name}»? "
+                    "Если вы отмените участие, то сможете записаться снова, но попадёте "
+                    "в конец очереди подтверждения"
+                ),
                 buttons=[
                     Button(label="Да, отменить", value="cancel:yes"),
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),

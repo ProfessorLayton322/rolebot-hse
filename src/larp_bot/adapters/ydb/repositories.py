@@ -722,6 +722,7 @@ class YdbRegistrationRepository:
             registration.telegram_profile = telegram_profile
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
+                registration.created_at = datetime.now(UTC)
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(UTC)
         await self._save(registration)

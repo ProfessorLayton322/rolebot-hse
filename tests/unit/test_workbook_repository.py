@@ -80,6 +80,35 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
 
 
 @pytest.mark.asyncio
+async def test_cancelled_registrations_are_omitted_from_showcase(disk_store: MemoryDiskStore, event: Event) -> None:
+    showcase = await initialized(disk_store, event)
+    registrations = [
+        Registration(
+            event_id=event.event_id,
+            participant_key="a" * 43,
+            display_name="Cancelled player",
+            wish_play="Anyone",
+            attendance_status=AttendanceStatus.CANCELLED,
+        ),
+        Registration(
+            event_id=event.event_id,
+            participant_key="b" * 43,
+            display_name="Active player",
+            wish_play="Anyone",
+        ),
+    ]
+
+    await showcase.replace(event, registrations)
+
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
+        assert rows == [(1, "Active player")]
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
 async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
