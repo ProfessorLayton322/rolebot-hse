@@ -27,6 +27,7 @@ from larp_bot.application.conversation import (
     LEGACY_DELETE_GAME,
     LIST_PASS_TABLES,
     MAIN_MENU,
+    MASTER_TABLE_DISCLAIMER,
     PROFILE,
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_NOTIFICATION,
@@ -596,6 +597,26 @@ async def test_gamemaster_has_admin_interface_except_archive(disk_store: MemoryD
 
 
 @pytest.mark.asyncio
+async def test_created_game_returns_separate_master_and_public_links_with_warning(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
+
+    prompt = await engine.handle(inbound(1, "➕ Создать игру"))
+    assert prompt.text == "Введите название игры:"
+    response = await engine.handle(inbound(2, "Бал в зимнем дворце"))
+
+    created_events = await engine.events.list_page(limit=10)
+    created = next(candidate for candidate in created_events if candidate.name == "Бал в зимнем дворце")
+    assert created.master_table_resource_path.endswith("/master_table_Бал в зимнем дворце.xlsx")
+    assert created.public_table_resource_path is not None
+    assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
+    assert response.text.count("https://disk.example/public/") == 2
+    assert MASTER_TABLE_DISCLAIMER in response.text
+    assert "Публичная таблица (без контактов Telegram и VK)" in response.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("archive_state", ["ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"])
 async def test_gamemaster_cannot_archive_through_hidden_or_stale_actions(
     archive_state: str, disk_store: MemoryDiskStore, event: Event
@@ -850,7 +871,9 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
         StaticAdminProvider(tg_ids={1}),
     )
     page = await engine.handle(inbound(1, "📋 Список игр"))
-    assert page.text.count("https://disk.example/") == min(count, 10)
+    assert page.text.count("https://disk.example/") == min(count, 10) * 2
+    assert page.text.count(MASTER_TABLE_DISCLAIMER) == min(count, 10)
+    assert page.text.count("Публичная таблица (без контактов Telegram и VK)") == min(count, 10)
     assert page.text.count("Статус: Регистрация") == min(count, 10)
     has_next = any(button.label == "➡️ Далее" for button in page.buttons)
     assert has_next is (count > 10)

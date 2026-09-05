@@ -303,6 +303,7 @@ class YdbUserRepository:
 class YdbEventRepository:
     COLUMNS = """
         event_id, name, disk_resource_path, public_registration_url,
+        public_table_resource_path, public_table_public_url,
         status, confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url, created_at, updated_at
     """
@@ -321,6 +322,8 @@ class YdbEventRepository:
             name=row["name"],
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
+            public_table_resource_path=row.get("public_table_resource_path"),
+            public_table_public_url=row.get("public_table_public_url"),
             status=status,
             confirmation_deadline=(
                 _dt(row["confirmation_deadline"]) if row.get("confirmation_deadline") is not None else None
@@ -351,6 +354,8 @@ class YdbEventRepository:
             """
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
+            DECLARE $public_table_resource_path AS Optional<Utf8>;
+            DECLARE $public_table_public_url AS Optional<Utf8>;
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
             DECLARE $confirmation_deadline AS Optional<Timestamp>;
             DECLARE $registrations_migrated_at AS Timestamp;
@@ -359,10 +364,12 @@ class YdbEventRepository:
             DECLARE $updated_at AS Timestamp;
             INSERT INTO `events` (
                 event_id, name, disk_resource_path, public_registration_url,
+                public_table_resource_path, public_table_public_url,
                 status, confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url, created_at, updated_at
             ) VALUES (
                 $event_id, $name, $disk_resource_path, $public_url,
+                $public_table_resource_path, $public_table_public_url,
                 $status, $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url, $created_at, $updated_at
             );
@@ -372,6 +379,8 @@ class YdbEventRepository:
                 "$name": event.name,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
+                "$public_table_resource_path": event.public_table_resource_path,
+                "$public_table_public_url": event.public_table_public_url,
                 "$status": event.status.value,
                 "$confirmation_deadline": event.confirmation_deadline,
                 "$registrations_migrated_at": event.registrations_migrated_at,
@@ -436,6 +445,29 @@ class YdbEventRepository:
             """,
             {"$event_id": event_id, "$migrated_at": migrated_at},
         )
+
+    async def set_public_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.public_table_public_url is not None:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $resource_path AS Utf8;
+            DECLARE $public_url AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET public_table_resource_path = $resource_path,
+                public_table_public_url = $public_url,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND public_table_public_url IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$resource_path": resource_path,
+                "$public_url": public_url,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
 
     async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
         event = await self.get(event_id)

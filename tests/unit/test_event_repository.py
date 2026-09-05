@@ -91,6 +91,22 @@ async def test_pass_table_link_is_persisted_once_on_the_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_game_table_link_is_persisted_once_on_the_event() -> None:
+    executor = RecordingExecutor([event_row("CREATED")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.set_public_table(
+        "event-a1",
+        "disk:/larp-bot/events/event-a1/public_table_Game.xlsx",
+        "https://disk.example/public-game",
+    )
+
+    assert "public_table_public_url IS NULL" in executor.query_text
+    assert executor.params["$resource_path"].endswith("/public_table_Game.xlsx")
+    assert executor.params["$public_url"] == "https://disk.example/public-game"
+
+
+@pytest.mark.asyncio
 async def test_pass_table_listing_filters_events_with_stored_links() -> None:
     row = event_row("CLOSED") | {
         "pass_table_resource_path": "disk:/larp-bot/passes/event-a1.xlsx",

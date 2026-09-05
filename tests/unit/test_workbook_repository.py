@@ -10,6 +10,7 @@ from openpyxl import Workbook, load_workbook
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository
 from larp_bot.adapters.yandex_disk.repository import (
     LEGACY_HEADERS,
+    PUBLIC_HEADERS,
     STATEFUL_HEADERS,
     VISIBLE_HEADERS,
     YandexDiskRestClient,
@@ -75,6 +76,51 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
             AttendanceStatus.CONFIRMED.value,
         )
         assert workbook.active.max_column == 9
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: MemoryDiskStore, event: Event) -> None:
+    public_path = "disk:/larp-bot/events/event-a1/public_table_Лесной предел.xlsx"
+    event = event.model_copy(
+        update={
+            "public_table_resource_path": public_path,
+            "public_table_public_url": "https://disk.example/public/2",
+        }
+    )
+    showcase = await initialized(disk_store, event)
+    await showcase.create_public_event_workbook(public_path)
+    registration = Registration(
+        event_id=event.event_id,
+        participant_key="a" * 43,
+        display_name="Player",
+        vk_profile="https://vk.com/private-player",
+        telegram_profile="https://t.me/private-player",
+        wish_play="Anyone",
+        larp_experience=True,
+        crossplay=False,
+        character_wish="Doctor",
+        attendance_status=AttendanceStatus.CONFIRMED,
+    )
+
+    await showcase.replace(event, [registration])
+
+    workbook = load_workbook(BytesIO(disk_store.files[public_path]), data_only=False)
+    try:
+        values = tuple(cell.value for row in workbook.active.iter_rows() for cell in row)
+        assert tuple(cell.value for cell in workbook.active[1]) == PUBLIC_HEADERS
+        assert tuple(workbook.active.cell(2, column).value for column in range(1, 8)) == (
+            1,
+            "Player",
+            "Да",
+            "Нет",
+            "Anyone",
+            "Doctor",
+            AttendanceStatus.CONFIRMED.value,
+        )
+        assert workbook.active.max_column == 7
+        assert not any("vk.com" in str(value) or "t.me" in str(value) for value in values)
     finally:
         workbook.close()
 
@@ -195,12 +241,20 @@ async def test_legacy_state_is_imported_once_then_removed_from_xlsx(
     assert migrated.larp_experience is (True if headers == STATEFUL_HEADERS else None)
     stored_event = await events.get(event.event_id)
     assert stored_event is not None and stored_event.registrations_migrated_at is not None
+    assert stored_event.public_table_resource_path is not None
+    assert stored_event.public_table_public_url is not None
     rendered = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         assert tuple(cell.value for cell in rendered.active[1]) == VISIBLE_HEADERS
         assert rendered.active.max_column == 9
     finally:
         rendered.close()
+    public_rendered = load_workbook(BytesIO(disk_store.files[stored_event.public_table_resource_path]))
+    try:
+        assert tuple(cell.value for cell in public_rendered.active[1]) == PUBLIC_HEADERS
+        assert public_rendered.active.max_column == 7
+    finally:
+        public_rendered.close()
 
 
 @pytest.mark.asyncio

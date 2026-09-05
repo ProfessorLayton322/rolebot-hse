@@ -80,6 +80,20 @@ class MemoryEventRepository:
         event.registrations_migrated_at = migrated_at
         event.updated_at = migrated_at
 
+    async def set_public_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.public_table_public_url is not None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "public_table_resource_path": resource_path,
+                "public_table_public_url": public_url,
+                "updated_at": datetime.now(event.updated_at.tzinfo),
+            }
+        )
+        return True
+
     async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
         event = self.rows.get(event_id)
         if event is None or event.pass_table_public_url is not None:

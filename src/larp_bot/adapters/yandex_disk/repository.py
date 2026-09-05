@@ -10,6 +10,7 @@ from typing import Protocol
 import httpx
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from larp_bot.domain.models import AttendanceStatus, Event, PassDetails, Registration
@@ -25,8 +26,18 @@ VISIBLE_HEADERS = (
     "Пожелания по персонажу",
     "Текущий статус",
 )
+PUBLIC_HEADERS = (
+    "№",
+    "Имя",
+    "Предыдущий опыт в LARP",
+    "Готовность к кроссполу",
+    "С кем хочу играть",
+    "Пожелания по персонажу",
+    "Текущий статус",
+)
 # These layouts are read only while migrating deployments that used XLSX as
-# storage. Newly generated showcase files contain VISIBLE_HEADERS exclusively.
+# storage. Newly generated master files contain VISIBLE_HEADERS; public files
+# use PUBLIC_HEADERS.
 STATEFUL_HEADERS = (
     "№",
     "Имя",
@@ -108,12 +119,11 @@ def _parse_bool(value: object) -> bool | None:
     return None
 
 
-def _format_sheet(sheet: Worksheet) -> None:
+def _format_sheet(sheet: Worksheet, widths: Sequence[float]) -> None:
     for cell in sheet[1]:
         cell.font = Font(bold=True)
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = "A1:I1"
-    widths = (8, 30, 32, 32, 25, 26, 35, 45, 18)
+    sheet.auto_filter.ref = f"A1:{get_column_letter(len(widths))}1"
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
 
@@ -146,7 +156,39 @@ def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes
                 registration.attendance_status.value,
             )
         )
-    _format_sheet(sheet)
+    _format_sheet(sheet, (8, 30, 32, 32, 25, 26, 35, 45, 18))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+def public_showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes:
+    """Render the player-safe projection without Telegram or VK contacts."""
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Регистрация"
+    sheet.append(PUBLIC_HEADERS)
+    active_registrations = (
+        registration
+        for registration in registrations
+        if registration.attendance_status is not AttendanceStatus.CANCELLED
+    )
+    ordered_registrations = sorted(active_registrations, key=lambda row: (row.created_at, row.participant_key))
+    for number, registration in enumerate(ordered_registrations, start=1):
+        sheet.append(
+            (
+                number,
+                safe_cell(registration.display_name),
+                _bool_cell(registration.larp_experience),
+                _bool_cell(registration.crossplay),
+                safe_cell(registration.wish_play),
+                safe_cell(registration.character_wish),
+                registration.attendance_status.value,
+            )
+        )
+    _format_sheet(sheet, (8, 30, 25, 26, 35, 45, 18))
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -326,13 +368,21 @@ class YandexDiskShowcaseRepository:
     def __init__(self, store: DiskObjectStore) -> None:
         self.store = store
 
-    async def create_event_workbook(self, disk_path: str) -> str:
-        await self.store.upload_new(disk_path, showcase_workbook_bytes())
+    async def _create_event_workbook(self, disk_path: str, content: bytes) -> str:
+        await self.store.upload_new(disk_path, content)
         try:
             return await self.store.publish(disk_path)
         except Exception:
             await self.store.delete(disk_path)
             raise
+
+    async def create_event_workbook(self, disk_path: str, registrations: Sequence[Registration] = ()) -> str:
+        content = await asyncio.to_thread(showcase_workbook_bytes, registrations)
+        return await self._create_event_workbook(disk_path, content)
+
+    async def create_public_event_workbook(self, disk_path: str, registrations: Sequence[Registration] = ()) -> str:
+        content = await asyncio.to_thread(public_showcase_workbook_bytes, registrations)
+        return await self._create_event_workbook(disk_path, content)
 
     async def delete_event_workbook(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
@@ -354,5 +404,10 @@ class YandexDiskShowcaseRepository:
         return await asyncio.to_thread(_legacy_registrations, event.event_id, content)
 
     async def replace(self, event: Event, registrations: Sequence[Registration]) -> None:
-        content = await asyncio.to_thread(showcase_workbook_bytes, registrations)
-        await self.store.replace(event.disk_resource_path, content)
+        master_content, public_content = await asyncio.gather(
+            asyncio.to_thread(showcase_workbook_bytes, registrations),
+            asyncio.to_thread(public_showcase_workbook_bytes, registrations),
+        )
+        await self.store.replace(event.master_table_resource_path, master_content)
+        if event.public_table_resource_path is not None:
+            await self.store.replace(event.public_table_resource_path, public_content)

@@ -8,7 +8,7 @@ import pytest
 from openpyxl import load_workbook
 
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
-from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
+from larp_bot.adapters.yandex_disk.repository import PUBLIC_HEADERS, YandexDiskShowcaseRepository
 from larp_bot.application.services import (
     OperationNotAllowed,
     OrderedMutationService,
@@ -88,6 +88,15 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
         assert workbook.active["F2"].value == "Нет"
     finally:
         workbook.close()
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.public_table_resource_path is not None
+    public_workbook = load_workbook(BytesIO(disk_store.files[stored_event.public_table_resource_path]))
+    try:
+        assert tuple(cell.value for cell in public_workbook.active[1]) == PUBLIC_HEADERS
+        assert public_workbook.active.max_column == 7
+        assert "https://vk.com/player" not in {cell.value for row in public_workbook.active.iter_rows() for cell in row}
+    finally:
+        public_workbook.close()
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
@@ -74,6 +75,7 @@ ADMIN_STATUS_CHOICES = {
     "admin:status:confirmation": (STATUS_CONFIRMATION, Operation.OPEN_CONFIRMATION),
     "admin:status:closed": (STATUS_CLOSED, Operation.CLOSE_EVENT),
 }
+MASTER_TABLE_DISCLAIMER = "⚠️ Только для мастеров и администраторов. Не пересылайте эту ссылку игрокам!"
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
@@ -122,6 +124,15 @@ def main_buttons(has_admin_access: bool) -> list[Button]:
     if has_admin_access:
         labels.append(ADMIN)
     return [Button(label=label, value=label) for label in labels]
+
+
+def event_table_links(event: Event) -> str:
+    if event.public_table_public_url is None:
+        raise RuntimeError("public game table is not initialized")
+    return (
+        f"Мастерская таблица:\n{MASTER_TABLE_DISCLAIMER}\n{event.master_table_public_url}\n\n"
+        f"Публичная таблица (без контактов Telegram и VK):\n{event.public_table_public_url}"
+    )
 
 
 def user_id(user: User) -> int:
@@ -885,7 +896,7 @@ class ConversationEngine:
             return BotResponse(
                 text=(
                     f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
-                    f"Таблица регистрации:\n{event.public_registration_url}\n\n"
+                    f"{event_table_links(event)}\n\n"
                     f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
                     "но пока не могут подтверждать участие."
                 )
@@ -1068,11 +1079,18 @@ class ConversationEngine:
         events = list(await self.events.list_page(after=after, limit=10))
         if not events:
             return BotResponse(text="Игр нет.", buttons=[Button(label=BACK, value=BACK)])
+        semaphore = asyncio.Semaphore(3)
+
+        async def ensure_tables(event: Event) -> Event:
+            async with semaphore:
+                return await self.administration.ensure_event_tables(event)
+
+        events = list(await asyncio.gather(*(ensure_tables(event) for event in events)))
         lines = []
         for event in events:
             lines.append(
                 f"{event.name}\nСтатус: {EVENT_STATUS_LABELS[event.status]} · {event.created_at:%d.%m.%Y}\n"
-                f"{event.public_registration_url}"
+                f"{event_table_links(event)}"
             )
         buttons: list[Button] = []
         if len(events) == 10:
