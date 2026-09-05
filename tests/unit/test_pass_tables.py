@@ -142,6 +142,13 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
         assert tuple(cell.value for cell in sheet[1]) == PASS_TABLE_HEADERS
         assert all(cell.fill.fill_type == "solid" for cell in sheet[1])
         assert all(cell.fill.fgColor.type == "theme" and cell.fill.fgColor.theme == 5 for cell in sheet[1])
+        assert sheet.column_dimensions["G"].width == sheet.column_dimensions["C"].width
+        table_cells = (
+            cell
+            for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, min_col=1, max_col=len(PASS_TABLE_HEADERS))
+            for cell in row
+        )
+        assert all(cell.font.name == "Calibri Light" and cell.font.size == 14 for cell in table_cells)
         rows = {
             sheet.cell(row, 1).value: tuple(sheet.cell(row, column).value for column in range(1, 10))
             for row in range(2, 4)
