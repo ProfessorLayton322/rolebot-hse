@@ -29,7 +29,7 @@ from larp_bot.domain.models import (
 from larp_bot.domain.security import participant_key
 
 from .deadlines import format_confirmation_deadline
-from .navigation import main_menu_button
+from .navigation import confirmation_button, main_menu_button
 from .ports import (
     DeferredTransport,
     EventRepository,
@@ -393,6 +393,7 @@ class ConfirmationNotificationService:
             assert isinstance(command.payload, NotificationPayload)
             text = confirmed_notification_text(event.name, command.payload.text)
             attendance_status = AttendanceStatus.CONFIRMED
+            buttons = [main_menu_button()]
         else:
             if event.confirmation_deadline is None:
                 raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
@@ -402,6 +403,7 @@ class ConfirmationNotificationService:
             else:
                 text = f"Напоминаем о необходимости подтвердить или отменить участие в игре {event.name} до {deadline}!"
             attendance_status = AttendanceStatus.WAITING
+            buttons = [confirmation_button(event.event_id)]
 
         delivered = 0
         for recipient in await self._recipients(event, attendance_status):
@@ -415,7 +417,7 @@ class ConfirmationNotificationService:
                 user_id=recipient.user_id,
                 request_id=request_id,
                 text=text,
-                buttons=[main_menu_button()],
+                buttons=buttons,
             )
             await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id)
             delivered += 1

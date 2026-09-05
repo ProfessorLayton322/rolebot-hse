@@ -14,7 +14,7 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.application.navigation import MAIN_MENU
+from larp_bot.application.navigation import CONFIRM_PARTICIPATION, MAIN_MENU
 from larp_bot.application.services import (
     ConfirmationNotificationService,
     OrderedMutationService,
@@ -234,7 +234,9 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
         (Platform.VK, 3, expected_text),
     }
     assert all(
-        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)] for sent in transport.sent
+        [(button.label, button.value) for button in sent[4]]
+        == [(CONFIRM_PARTICIPATION, f"select:confirm:{event.event_id}")]
+        for sent in transport.sent
     )
     assert consumer.deleted == ["receipt-1"]
 
