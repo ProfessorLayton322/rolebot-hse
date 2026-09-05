@@ -134,6 +134,20 @@ class MemoryEventRepository:
         )
         return True
 
+    async def archive(self, event_id: str, archived_at: datetime) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.archived_at is not None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "status": EventStatus.CLOSED,
+                "archived_at": archived_at,
+                "updated_at": archived_at,
+            }
+        )
+        return True
+
     async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
         event = self.rows.get(event_id)
         if event is None or event.pass_table_public_url is not None:
@@ -168,28 +182,23 @@ class MemoryEventRepository:
         *,
         statuses: Collection[EventStatus] | None = None,
         after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        archived: bool | None = None,
         limit: int = 10,
     ) -> Sequence[Event]:
+        if after is not None and before is not None:
+            raise ValueError("only one event-page cursor may be supplied")
         values = sorted(self.rows.values(), key=lambda event: (event.created_at, event.event_id))
         if statuses is not None:
             accepted = set(statuses)
             values = [event for event in values if event.status in accepted]
+        if archived is not None:
+            values = [event for event in values if (event.archived_at is not None) is archived]
         if after is not None:
             values = [event for event in values if (event.created_at, event.event_id) > after]
-        return deepcopy(values[:limit])
-
-    async def list_pass_tables_page(
-        self,
-        *,
-        after: tuple[datetime, str] | None = None,
-        limit: int = 10,
-    ) -> Sequence[Event]:
-        values = sorted(
-            (event for event in self.rows.values() if event.pass_table_public_url is not None),
-            key=lambda event: (event.created_at, event.event_id),
-        )
-        if after is not None:
-            values = [event for event in values if (event.created_at, event.event_id) > after]
+        if before is not None:
+            values = [event for event in values if (event.created_at, event.event_id) < before]
+            values = values[-limit:]
         return deepcopy(values[:limit])
 
 

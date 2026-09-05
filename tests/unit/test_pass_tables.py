@@ -274,3 +274,4 @@ async def test_archived_game_keeps_its_registration_and_pass_tables(disk_store: 
     assert event.disk_resource_path in disk_store.files
     assert stored_event.pass_table_resource_path in disk_store.files
     assert archived_event is not None and archived_event.status is EventStatus.CLOSED
+    assert archived_event.archived_at is not None

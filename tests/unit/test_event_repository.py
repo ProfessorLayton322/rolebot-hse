@@ -76,6 +76,13 @@ def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
     assert event.last_confirmed_notification_operation_id == "notification-operation"
 
 
+def test_archival_timestamp_is_loaded() -> None:
+    archived_at = datetime(2026, 2, 1, tzinfo=UTC)
+    event = YdbEventRepository._from_row(event_row("CLOSED") | {"archived_at": archived_at})
+
+    assert event.archived_at == archived_at
+
+
 @pytest.mark.asyncio
 async def test_event_creation_atomically_seeds_platform_specific_leaders() -> None:
     executor = RecordingExecutor([])
@@ -126,6 +133,35 @@ async def test_confirmation_open_filter_includes_legacy_open_rows() -> None:
     assert events[0].status is EventStatus.CONFIRMATION_OPEN
     status_values = {value for key, value in executor.params.items() if key.startswith("$status_")}
     assert status_values == {"CREATED", "CONFIRMATION_OPEN", "OPEN"}
+
+
+@pytest.mark.asyncio
+async def test_active_game_page_filters_archived_rows_and_supports_previous_cursor() -> None:
+    older = event_row("CREATED") | {"event_id": "event-old", "created_at": datetime(2025, 1, 1, tzinfo=UTC)}
+    executor = RecordingExecutor([older])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    cursor = (datetime(2026, 1, 1, tzinfo=UTC), "event-a1")
+
+    events = await repository.list_page(before=cursor, archived=False, limit=10)
+
+    assert [event.event_id for event in events] == ["event-old"]
+    assert "archived_at IS NULL" in executor.query_text
+    assert "created_at DESC, event_id DESC" in executor.query_text
+    assert executor.params["$before_time"] == cursor[0]
+    assert executor.params["$before_id"] == cursor[1]
+
+
+@pytest.mark.asyncio
+async def test_archive_sets_timestamp_and_closed_status() -> None:
+    executor = RecordingExecutor([event_row("CONFIRMATION_OPEN")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    archived_at = datetime(2026, 9, 5, 15, tzinfo=UTC)
+
+    assert await repository.archive("event-a1", archived_at)
+
+    assert "archived_at = $archived_at" in executor.query_text
+    assert executor.params["$status"] == EventStatus.CLOSED.value
+    assert executor.params["$archived_at"] == archived_at
 
 
 @pytest.mark.asyncio
@@ -193,18 +229,3 @@ async def test_public_game_table_link_is_persisted_once_on_the_event() -> None:
     assert "public_table_public_url IS NULL" in executor.query_text
     assert executor.params["$resource_path"].endswith("/public_table_Game.xlsx")
     assert executor.params["$public_url"] == "https://disk.example/public-game"
-
-
-@pytest.mark.asyncio
-async def test_pass_table_listing_filters_events_with_stored_links() -> None:
-    row = event_row("CLOSED") | {
-        "pass_table_resource_path": "disk:/larp-bot/passes/event-a1.xlsx",
-        "pass_table_public_url": "https://disk.example/pass",
-    }
-    executor = RecordingExecutor([row])
-    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
-
-    events = await repository.list_pass_tables_page(limit=10)
-
-    assert events[0].pass_table_public_url == "https://disk.example/pass"
-    assert "WHERE pass_table_public_url IS NOT NULL" in executor.query_text

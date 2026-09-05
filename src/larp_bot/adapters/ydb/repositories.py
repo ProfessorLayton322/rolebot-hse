@@ -367,6 +367,7 @@ class YdbEventRepository:
         status, confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
+        archived_at,
         created_at, updated_at
     """
 
@@ -397,6 +398,7 @@ class YdbEventRepository:
             pass_table_public_url=row.get("pass_table_public_url"),
             confirmed_notifications=_confirmed_notifications(row.get("confirmed_notifications_json")),
             last_confirmed_notification_operation_id=row.get("last_confirmed_notification_operation_id"),
+            archived_at=_dt(row["archived_at"]) if row.get("archived_at") is not None else None,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
         )
@@ -453,6 +455,7 @@ class YdbEventRepository:
             DECLARE $pass_table_public_url AS Optional<Utf8>;
             DECLARE $confirmed_notifications_json AS Utf8;
             DECLARE $last_confirmed_notification_operation_id AS Optional<Utf8>;
+            DECLARE $archived_at AS Optional<Timestamp>;
             DECLARE $updated_at AS Timestamp;
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
@@ -461,6 +464,7 @@ class YdbEventRepository:
                 status, confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
+                archived_at,
                 created_at, updated_at
             ) VALUES (
                 $event_id, $name, $disk_resource_path, $public_url,
@@ -468,6 +472,7 @@ class YdbEventRepository:
                 $status, $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
+                $archived_at,
                 $created_at, $updated_at
             );
             {" ".join(leader_upserts)}
@@ -490,6 +495,7 @@ class YdbEventRepository:
                     separators=(",", ":"),
                 ),
                 "$last_confirmed_notification_operation_id": event.last_confirmed_notification_operation_id,
+                "$archived_at": event.archived_at,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
                 **leader_params,
@@ -555,6 +561,26 @@ class YdbEventRepository:
                 "$event_id": event_id,
                 "$status": status.value,
                 "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def archive(self, event_id: str, archived_at: datetime) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.archived_at is not None:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $status AS Utf8;
+            DECLARE $archived_at AS Timestamp;
+            UPDATE `events`
+            SET status = $status, archived_at = $archived_at, updated_at = $archived_at
+            WHERE event_id = $event_id AND archived_at IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$status": EventStatus.CLOSED.value,
+                "$archived_at": archived_at.astimezone(UTC),
             },
         )
         return True
@@ -686,10 +712,14 @@ class YdbEventRepository:
         *,
         statuses: Collection[EventStatus] | None = None,
         after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        archived: bool | None = None,
         limit: int = 10,
     ) -> Sequence[Event]:
         if limit < 1 or limit > 10:
             raise ValueError("event page size must be between 1 and 10")
+        if after is not None and before is not None:
+            raise ValueError("only one event-page cursor may be supplied")
         conditions: list[str] = []
         params: dict[str, Any] = {"$limit": limit}
         declarations = ["DECLARE $limit AS Uint64;"]
@@ -708,44 +738,24 @@ class YdbEventRepository:
             conditions.append("(created_at > $after_time OR (created_at = $after_time AND event_id > $after_id))")
             declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_id AS Utf8;"])
             params.update({"$after_time": after[0], "$after_id": after[1]})
+        if before is not None:
+            conditions.append("(created_at < $before_time OR (created_at = $before_time AND event_id < $before_id))")
+            declarations.extend(["DECLARE $before_time AS Timestamp;", "DECLARE $before_id AS Utf8;"])
+            params.update({"$before_time": before[0], "$before_id": before[1]})
+        if archived is not None:
+            conditions.append("archived_at IS NOT NULL" if archived else "archived_at IS NULL")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        order = "DESC" if before is not None else "ASC"
         query = f"""
             {" ".join(declarations)}
             SELECT {self.COLUMNS}
             FROM `events` {where}
-            ORDER BY created_at ASC, event_id ASC
+            ORDER BY created_at {order}, event_id {order}
             LIMIT $limit;
         """
         rows = await self.db.query(query, params, read_only=True)
-        return [self._from_row(row) for row in rows]
-
-    async def list_pass_tables_page(
-        self,
-        *,
-        after: tuple[datetime, str] | None = None,
-        limit: int = 10,
-    ) -> Sequence[Event]:
-        if limit < 1 or limit > 10:
-            raise ValueError("event page size must be between 1 and 10")
-        params: dict[str, Any] = {"$limit": limit}
-        declarations = ["DECLARE $limit AS Uint64;"]
-        after_condition = ""
-        if after is not None:
-            declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_id AS Utf8;"])
-            params.update({"$after_time": after[0], "$after_id": after[1]})
-            after_condition = "AND (created_at > $after_time OR (created_at = $after_time AND event_id > $after_id))"
-        rows = await self.db.query(
-            f"""
-            {" ".join(declarations)}
-            SELECT {self.COLUMNS}
-            FROM `events`
-            WHERE pass_table_public_url IS NOT NULL {after_condition}
-            ORDER BY created_at ASC, event_id ASC
-            LIMIT $limit;
-            """,
-            params,
-            read_only=True,
-        )
+        if before is not None:
+            rows.reverse()
         return [self._from_row(row) for row in rows]
 
 

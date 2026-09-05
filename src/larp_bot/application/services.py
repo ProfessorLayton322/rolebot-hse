@@ -154,7 +154,7 @@ class RegistrationCatalog:
         return event
 
     async def archive(self, event: Event) -> None:
-        await self.events.set_status(event.event_id, EventStatus.CLOSED)
+        await self.events.archive(event.event_id, datetime.now(UTC))
 
     async def delete(self, event: Event) -> None:
         """Archive legacy delete requests without removing permanent game data."""
@@ -262,6 +262,7 @@ class RegistrationService:
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.CLOSE_EVENT,
+            Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }:
             participant = self.key(platform, user_id, event_id)
@@ -585,9 +586,14 @@ class OrderedMutationService:
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         event = await self.events.get(command.event_id)
         if event is None:
-            if command.operation is Operation.DELETE_EVENT:
+            if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
                 return "Игра уже отсутствует в постоянном списке"
             raise EventNotFound("Игра уже удалена или не существует")
+
+        if event.archived_at is not None:
+            if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
+                return "Игра уже архивирована"
+            raise OperationNotAllowed("Игра уже архивирована")
 
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
@@ -595,6 +601,7 @@ class OrderedMutationService:
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.CLOSE_EVENT,
+            Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }
         if command.operation in administrative_operations:
@@ -626,7 +633,7 @@ class OrderedMutationService:
             status, message = status_operations[command.operation]
             await self.events.set_status(event.event_id, status)
             return message
-        if command.operation is Operation.DELETE_EVENT:
+        if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
             # DELETE_EVENT can still be present in FIFO or in a stale admin
             # keyboard from an older deployment. Treat it as archival so a
             # published workbook, its registrations, and its permanent game

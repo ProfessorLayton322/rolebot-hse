@@ -44,6 +44,8 @@ class EventRepository(Protocol):
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool: ...
 
+    async def archive(self, event_id: str, archived_at: datetime) -> bool: ...
+
     async def open_confirmation(self, event_id: str, deadline: datetime) -> bool: ...
 
     async def mark_registrations_migrated(self, event_id: str, migrated_at: datetime) -> None: ...
@@ -61,13 +63,8 @@ class EventRepository(Protocol):
         *,
         statuses: Collection[EventStatus] | None = None,
         after: tuple[datetime, str] | None = None,
-        limit: int = 10,
-    ) -> Sequence[Event]: ...
-
-    async def list_pass_tables_page(
-        self,
-        *,
-        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        archived: bool | None = None,
         limit: int = 10,
     ) -> Sequence[Event]: ...
 
