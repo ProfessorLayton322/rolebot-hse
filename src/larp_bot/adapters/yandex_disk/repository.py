@@ -396,6 +396,10 @@ class YandexDiskShowcaseRepository:
             await self.store.delete(disk_path)
             raise
 
+    async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None:
+        content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)
+        await self.store.replace(disk_path, content)
+
     async def delete_pass_table(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
 

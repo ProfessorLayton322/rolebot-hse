@@ -132,7 +132,7 @@ Every profile collects the player's Cyrillic surname and name as separate valida
 
 Russian citizens provide only Cyrillic name fields; their Latin cells are blank. A missing Cyrillic patronym is stored as `-`. Foreign citizens also provide Latin name fields, and a missing patronym is `-` in both scripts.
 
-Admins can create a pass table once for any game and list all stored pass-table links. Creation takes a one-time snapshot containing only YDB registrations in `Подтверждено` whose current YDB profile requests a pass. The deterministic resource is `disk:/larp-bot/passes/<event_id>.xlsx`; its public Yandex Disk URL is stored on the event and reused by later requests. Both the resource and link remain permanently with the archived game.
+Admins can create a pass table once for any game and list all stored pass-table links. It contains only YDB registrations in `Подтверждено` whose current YDB profile requests a pass. After creation, every confirmation or cancellation regenerates and overwrites the same deterministic resource at `disk:/larp-bot/passes/<event_id>.xlsx`, so its stored public Yandex Disk URL remains unchanged. Both the resource and link remain permanently with the archived game.
 
 The pass workbook copies the venue template's header wording and theme-color fill exactly:
 

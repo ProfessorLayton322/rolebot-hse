@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 from io import BytesIO
+from uuid import uuid4
 
 import pytest
 from openpyxl import load_workbook
 
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
 from larp_bot.adapters.yandex_disk.repository import PASS_TABLE_HEADERS, YandexDiskShowcaseRepository
-from larp_bot.application.services import EventAdministrationService, RegistrationCatalog
+from larp_bot.application.services import EventAdministrationService, OrderedMutationService, RegistrationCatalog
 from larp_bot.domain.models import (
     AttendanceStatus,
+    CharacterWishPayload,
+    EmptyPayload,
+    EnlistPayload,
     EventStatus,
+    Operation,
+    OrderedRegistrationCommand,
     PassDetails,
     Platform,
     Registration,
@@ -170,6 +176,76 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
     assert repeated.created is False
     assert repeated.row_count is None
     assert len(disk_store.files) == 1
+
+
+@pytest.mark.asyncio
+async def test_pass_table_tracks_confirmation_and_cancellation_without_changing_url(
+    disk_store: MemoryDiskStore, event
+) -> None:
+    secret = "participant-secret"
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=11,
+            full_name="Иван Иванов",
+            vk_url="https://vk.com/ivan",
+            crossplay=False,
+            larp_experience=True,
+            needs_pass=True,
+            pass_details=russian_pass(),
+        )
+    )
+    events = MemoryEventRepository([event])
+    registrations = MemoryRegistrationRepository()
+    workbooks = YandexDiskShowcaseRepository(disk_store)
+    await workbooks.create_event_workbook(event.disk_resource_path)
+    catalog = RegistrationCatalog(events, registrations, workbooks)
+    administration = EventAdministrationService(events, workbooks, catalog, users, secret)
+    export = await administration.create_pass_table(event.event_id)
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.pass_table_resource_path is not None
+    pass_path = stored_event.pass_table_resource_path
+
+    mutations = OrderedMutationService(events, catalog, users, secret)
+    key = participant_key(secret, Platform.TELEGRAM, 11, event.event_id)
+
+    def mutation(operation: Operation, payload: EnlistPayload | CharacterWishPayload | EmptyPayload):
+        return OrderedRegistrationCommand(
+            operation_id=str(uuid4()),
+            event_id=event.event_id,
+            operation=operation,
+            platform=Platform.TELEGRAM,
+            platform_user_id=11,
+            participant_key=key,
+            payload=payload,
+        )
+
+    await mutations.apply(
+        mutation(Operation.ENLIST, EnlistPayload(display_name="Иван Иванов", wish_play="Без пожеланий"))
+    )
+    await mutations.apply(mutation(Operation.CONFIRM, CharacterWishPayload(character_wish="Без пожеланий")))
+
+    confirmed = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert confirmed.active.max_row == 2
+        assert confirmed.active["A2"].value == "Иванов"
+    finally:
+        confirmed.close()
+    assert disk_store.public_urls[pass_path] == export.public_url
+    assert disk_store.replace_count[pass_path] == 1
+
+    await mutations.apply(mutation(Operation.CANCEL, EmptyPayload()))
+
+    cancelled = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert cancelled.active.max_row == 1
+    finally:
+        cancelled.close()
+    refreshed_event = await events.get(event.event_id)
+    assert refreshed_event is not None
+    assert refreshed_event.pass_table_public_url == export.public_url
+    assert disk_store.public_urls[pass_path] == export.public_url
+    assert disk_store.replace_count[pass_path] == 2
 
 
 @pytest.mark.asyncio
