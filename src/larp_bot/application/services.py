@@ -158,6 +158,32 @@ class RegistrationCatalog:
         await self.archive(event)
 
 
+async def _confirmed_pass_profiles(
+    event: Event,
+    registrations: RegistrationRepository,
+    users: UserRepository,
+    participant_secret: str,
+) -> list[PassDetails]:
+    registration_rows, user_rows = await asyncio.gather(
+        registrations.list_for_event(event.event_id),
+        users.list_all(),
+    )
+    pass_profiles: dict[str, PassDetails] = {}
+    for user in user_rows:
+        if not user.profile_complete or user.needs_pass is not True or user.pass_details is None:
+            continue
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
+        key = participant_key(participant_secret, platform, uid, event.event_id)
+        pass_profiles[key] = user.pass_details
+    return [
+        pass_profiles[registration.participant_key]
+        for registration in registration_rows
+        if registration.attendance_status is AttendanceStatus.CONFIRMED
+        and registration.participant_key in pass_profiles
+    ]
+
+
 class RegistrationService:
     def __init__(
         self,
@@ -327,20 +353,12 @@ class EventAdministrationService:
             return PassTableExport(event.pass_table_public_url, created=False, row_count=None)
 
         await self.catalog.ensure_migrated(event)
-        confirmed = [
-            registration
-            for registration in await self.catalog.registrations.list_for_event(event.event_id)
-            if registration.attendance_status is AttendanceStatus.CONFIRMED
-        ]
-        pass_profiles: dict[str, PassDetails] = {}
-        for user in await self.users.list_all():
-            if not user.profile_complete or user.needs_pass is not True or user.pass_details is None:
-                continue
-            platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-            uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
-            key = participant_key(self.participant_secret, platform, uid, event.event_id)
-            pass_profiles[key] = user.pass_details
-        profiles = [pass_profiles[row.participant_key] for row in confirmed if row.participant_key in pass_profiles]
+        profiles = await _confirmed_pass_profiles(
+            event,
+            self.catalog.registrations,
+            self.users,
+            self.participant_secret,
+        )
 
         disk_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
         public_url = await self.showcase.create_pass_table(disk_path, profiles)
@@ -497,10 +515,25 @@ class OrderedMutationService:
         events: EventRepository,
         catalog: RegistrationCatalog,
         users: UserRepository | None = None,
+        participant_secret: str | None = None,
     ) -> None:
         self.events = events
         self.catalog = catalog
         self.users = users
+        self.participant_secret = participant_secret
+
+    async def _refresh_pass_table(self, event: Event) -> None:
+        if event.pass_table_resource_path is None:
+            return
+        if self.users is None or self.participant_secret is None:
+            raise RuntimeError("pass table refresh requires users and participant secret")
+        profiles = await _confirmed_pass_profiles(
+            event,
+            self.catalog.registrations,
+            self.users,
+            self.participant_secret,
+        )
+        await self.catalog.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         event = await self.events.get(command.event_id)
@@ -592,6 +625,7 @@ class OrderedMutationService:
                 character_wish=command.payload.character_wish,
             )
             await self.catalog.refresh(event)
+            await self._refresh_pass_table(event)
             return "Участие подтверждено"
         if command.operation is Operation.UPDATE_CHARACTER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
@@ -614,5 +648,6 @@ class OrderedMutationService:
                 participant_key=command.participant_key,
             )
             await self.catalog.refresh(event)
+            await self._refresh_pass_table(event)
             return "Участие отменено"
         raise AssertionError(f"unhandled operation: {command.operation}")
