@@ -116,6 +116,12 @@ resource "yandex_ydb_table" "events" {
     type     = "Utf8"
     not_null = true
   }
+  # Optional at storage level so Terraform can add it to existing rows; the
+  # application supplies a legacy default and always writes it for new games.
+  column {
+    name = "player_amount"
+    type = "Uint64"
+  }
   column {
     name     = "disk_resource_path"
     type     = "Utf8"
@@ -161,6 +167,18 @@ resource "yandex_ydb_table" "events" {
   }
   column {
     name = "last_confirmed_notification_operation_id"
+    type = "Utf8"
+  }
+  column {
+    name = "last_reserve_promotion_operation_id"
+    type = "Utf8"
+  }
+  column {
+    name = "last_reserve_promotion_participant_key"
+    type = "Utf8"
+  }
+  column {
+    name = "last_reserve_promotion_delivered_operation_id"
     type = "Utf8"
   }
   column {

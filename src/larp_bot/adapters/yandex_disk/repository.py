@@ -13,7 +13,14 @@ from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from larp_bot.domain.models import AttendanceStatus, Event, PassDetails, Registration
+from larp_bot.domain.models import (
+    DEFAULT_PLAYER_AMOUNT,
+    MAX_PLAYER_AMOUNT,
+    AttendanceStatus,
+    Event,
+    PassDetails,
+    Registration,
+)
 
 VISIBLE_HEADERS = (
     "№",
@@ -128,21 +135,56 @@ def _format_sheet(sheet: Worksheet, widths: Sequence[float]) -> None:
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
 
 
-def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes:
+def _ordered_active_registrations(registrations: Sequence[Registration]) -> list[Registration]:
+    active = [
+        registration
+        for registration in registrations
+        if registration.attendance_status is not AttendanceStatus.CANCELLED
+    ]
+    return sorted(active, key=lambda row: (row.created_at, row.participant_key))
+
+
+def _append_reserve_separator(sheet: Worksheet, *, player_amount: int, column_count: int) -> None:
+    if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
+        raise ValueError(f"player_amount must be between 1 and {MAX_PLAYER_AMOUNT}")
+    reserve_row = player_amount + 2
+    sheet.merge_cells(start_row=reserve_row, start_column=1, end_row=reserve_row, end_column=column_count)
+    cell = sheet.cell(reserve_row, 1, "ЗАПАС")
+    cell.fill = PatternFill(fill_type="solid", fgColor="00B050")
+    cell.font = Font(bold=True, color="FFFFFF")
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+
+
+def showcase_workbook_bytes(
+    registrations: Sequence[Registration] = (),
+    *,
+    player_amount: int = DEFAULT_PLAYER_AMOUNT,
+) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Регистрация"
     sheet.append(VISIBLE_HEADERS)
-    # A repository is not required to return rows in insertion order. Keep the
-    # public signup sheet chronological at the projection boundary so later
-    # profile, confirmation, and cancellation updates cannot move a player.
-    active_registrations = (
-        registration
-        for registration in registrations
-        if registration.attendance_status is not AttendanceStatus.CANCELLED
-    )
-    ordered_registrations = sorted(active_registrations, key=lambda row: (row.created_at, row.participant_key))
-    for number, registration in enumerate(ordered_registrations, start=1):
+    # Keep the first player_amount rows fixed as main-roster slots. Padding
+    # prevents the green separator from moving while later signups flow below.
+    ordered_registrations = _ordered_active_registrations(registrations)
+    for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
+        sheet.append(
+            (
+                number,
+                safe_cell(registration.display_name),
+                safe_cell(registration.vk_profile),
+                safe_cell(registration.telegram_profile or ""),
+                _bool_cell(registration.larp_experience),
+                _bool_cell(registration.crossplay),
+                safe_cell(registration.wish_play),
+                safe_cell(registration.character_wish),
+                registration.attendance_status.value,
+            )
+        )
+    for number in range(len(ordered_registrations) + 1, player_amount + 1):
+        sheet.append((number,))
+    _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(VISIBLE_HEADERS))
+    for number, registration in enumerate(ordered_registrations[player_amount:], start=player_amount + 1):
         sheet.append(
             (
                 number,
@@ -163,20 +205,34 @@ def showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes
     return output.getvalue()
 
 
-def public_showcase_workbook_bytes(registrations: Sequence[Registration] = ()) -> bytes:
+def public_showcase_workbook_bytes(
+    registrations: Sequence[Registration] = (),
+    *,
+    player_amount: int = DEFAULT_PLAYER_AMOUNT,
+) -> bytes:
     """Render the player-safe projection without Telegram or VK contacts."""
 
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Регистрация"
     sheet.append(PUBLIC_HEADERS)
-    active_registrations = (
-        registration
-        for registration in registrations
-        if registration.attendance_status is not AttendanceStatus.CANCELLED
-    )
-    ordered_registrations = sorted(active_registrations, key=lambda row: (row.created_at, row.participant_key))
-    for number, registration in enumerate(ordered_registrations, start=1):
+    ordered_registrations = _ordered_active_registrations(registrations)
+    for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
+        sheet.append(
+            (
+                number,
+                safe_cell(registration.display_name),
+                _bool_cell(registration.larp_experience),
+                _bool_cell(registration.crossplay),
+                safe_cell(registration.wish_play),
+                safe_cell(registration.character_wish),
+                registration.attendance_status.value,
+            )
+        )
+    for number in range(len(ordered_registrations) + 1, player_amount + 1):
+        sheet.append((number,))
+    _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(PUBLIC_HEADERS))
+    for number, registration in enumerate(ordered_registrations[player_amount:], start=player_amount + 1):
         sheet.append(
             (
                 number,
@@ -387,12 +443,24 @@ class YandexDiskShowcaseRepository:
             await self.store.delete(disk_path)
             raise
 
-    async def create_event_workbook(self, disk_path: str, registrations: Sequence[Registration] = ()) -> str:
-        content = await asyncio.to_thread(showcase_workbook_bytes, registrations)
+    async def create_event_workbook(
+        self,
+        disk_path: str,
+        registrations: Sequence[Registration] = (),
+        *,
+        player_amount: int = DEFAULT_PLAYER_AMOUNT,
+    ) -> str:
+        content = await asyncio.to_thread(showcase_workbook_bytes, registrations, player_amount=player_amount)
         return await self._create_event_workbook(disk_path, content)
 
-    async def create_public_event_workbook(self, disk_path: str, registrations: Sequence[Registration] = ()) -> str:
-        content = await asyncio.to_thread(public_showcase_workbook_bytes, registrations)
+    async def create_public_event_workbook(
+        self,
+        disk_path: str,
+        registrations: Sequence[Registration] = (),
+        *,
+        player_amount: int = DEFAULT_PLAYER_AMOUNT,
+    ) -> str:
+        content = await asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=player_amount)
         return await self._create_event_workbook(disk_path, content)
 
     async def delete_event_workbook(self, disk_path: str) -> None:
@@ -420,8 +488,8 @@ class YandexDiskShowcaseRepository:
 
     async def replace(self, event: Event, registrations: Sequence[Registration]) -> None:
         master_content, public_content = await asyncio.gather(
-            asyncio.to_thread(showcase_workbook_bytes, registrations),
-            asyncio.to_thread(public_showcase_workbook_bytes, registrations),
+            asyncio.to_thread(showcase_workbook_bytes, registrations, player_amount=event.player_amount),
+            asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=event.player_amount),
         )
         await self.store.replace(event.master_table_resource_path, master_content)
         if event.public_table_resource_path is not None:

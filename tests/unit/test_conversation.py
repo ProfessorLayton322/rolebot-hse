@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 
 import pytest
+from openpyxl import load_workbook
 
 from larp_bot.adapters.memory import (
     MemoryCommandPublisher,
@@ -982,22 +984,33 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
 
     prompt = await engine.handle(inbound(1, "➕ Создать игру"))
     assert prompt.text == "Введите название игры:"
-    response = await engine.handle(inbound(2, "Бал в зимнем дворце"))
+    amount_prompt = await engine.handle(inbound(2, "Бал в зимнем дворце"))
+    assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
+    invalid = await engine.handle(inbound(3, "много"))
+    assert invalid.text == "Введите целое количество игроков от 1 до 10000:"
+    response = await engine.handle(inbound(4, "24"))
 
     created_events = await engine.events.list_page(limit=10)
     created = next(candidate for candidate in created_events if candidate.name == "Бал в зимнем дворце")
     assert created.master_table_resource_path.endswith("/master_table_Бал в зимнем дворце.xlsx")
+    assert created.player_amount == 24
     assert created.public_table_resource_path is not None
     assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
+    for path in (created.master_table_resource_path, created.public_table_resource_path):
+        workbook = load_workbook(BytesIO(disk_store.files[path]))
+        try:
+            assert workbook.active.cell(26, 1).value == "ЗАПАС"
+        finally:
+            workbook.close()
     assert "https://disk.example/public/" not in response.text
     assert response.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{created.event_id}")]
     assert await engine.events.list_leaders(created.event_id) == [
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)
     ]
 
-    management = await engine.handle(inbound(3, response.buttons[0].value, callback=True))
+    management = await engine.handle(inbound(5, response.buttons[0].value, callback=True))
     assert EVENT_TABLES in [button.label for button in management.buttons]
-    tables = await engine.handle(inbound(4, f"ag:tables:{created.event_id}", callback=True))
+    tables = await engine.handle(inbound(6, f"ag:tables:{created.event_id}", callback=True))
     assert tables.text.count("https://disk.example/public/") == 3
     assert MASTER_TABLE_DISCLAIMER in tables.text
     assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
@@ -1019,6 +1032,7 @@ async def test_gamemaster_created_game_seeds_creator_and_every_configured_admin(
 
     await engine.handle(inbound(1, "➕ Создать игру"))
     await engine.handle(inbound(2, "Новая игра"))
+    await engine.handle(inbound(3, "20"))
 
     created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
     leaders = await engine.events.list_leaders(created.event_id)
@@ -1046,6 +1060,7 @@ async def test_selecting_existing_game_backfills_every_configured_admin_as_leade
 
     assert event.name in next(button.label for button in games.buttons if button.value.startswith("ag:manage:"))
     assert f"Управление игрой «{event.name}»" in selected.text
+    assert f"Количество игроков: {event.player_amount}" in selected.text
     leaders = await engine.events.list_leaders(event.event_id)
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
         (Platform.TELEGRAM, 1),

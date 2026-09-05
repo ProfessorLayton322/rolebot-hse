@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Protocol
 
 from larp_bot.domain.models import (
+    DEFAULT_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
     Button,
@@ -56,6 +57,15 @@ class EventRepository(Protocol):
     async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool: ...
 
     async def append_confirmed_notification(self, event_id: str, text: str, operation_id: str) -> bool: ...
+
+    async def set_reserve_promotion(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str | None,
+    ) -> None: ...
+
+    async def mark_reserve_promotion_delivered(self, event_id: str, operation_id: str) -> None: ...
 
     async def delete(self, event_id: str) -> bool: ...
 
@@ -131,9 +141,21 @@ class RegistrationShowcaseRepository(Protocol):
 
     async def replace(self, event: Event, registrations: Sequence[Registration]) -> None: ...
 
-    async def create_event_workbook(self, disk_path: str, registrations: Sequence[Registration] = ()) -> str: ...
+    async def create_event_workbook(
+        self,
+        disk_path: str,
+        registrations: Sequence[Registration] = (),
+        *,
+        player_amount: int = DEFAULT_PLAYER_AMOUNT,
+    ) -> str: ...
 
-    async def create_public_event_workbook(self, disk_path: str, registrations: Sequence[Registration] = ()) -> str: ...
+    async def create_public_event_workbook(
+        self,
+        disk_path: str,
+        registrations: Sequence[Registration] = (),
+        *,
+        player_amount: int = DEFAULT_PLAYER_AMOUNT,
+    ) -> str: ...
 
     async def delete_event_workbook(self, disk_path: str) -> None: ...
 

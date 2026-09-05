@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from larp_bot.adapters.ydb.repositories import YdbEventRepository
-from larp_bot.domain.models import BotIdentity, EventStatus, Platform
+from larp_bot.domain.models import DEFAULT_PLAYER_AMOUNT, BotIdentity, EventStatus, Platform
 
 
 def event_row(status: str) -> dict[str, Any]:
@@ -15,6 +15,7 @@ def event_row(status: str) -> dict[str, Any]:
     return {
         "event_id": "event-a1",
         "name": "Game",
+        "player_amount": 12,
         "disk_resource_path": "disk:/larp-bot/events/event-a1-game.xlsx",
         "public_registration_url": "https://disk.example/game",
         "status": status,
@@ -59,6 +60,16 @@ class RecordingExecutor:
 def test_legacy_open_status_is_read_as_confirmation_open() -> None:
     event = YdbEventRepository._from_row(event_row("OPEN"))
     assert event.status is EventStatus.CONFIRMATION_OPEN
+    assert event.player_amount == 12
+
+
+def test_event_without_persisted_player_amount_uses_rollout_default() -> None:
+    row = event_row("CREATED")
+    del row["player_amount"]
+
+    event = YdbEventRepository._from_row(row)
+
+    assert event.player_amount == DEFAULT_PLAYER_AMOUNT
 
 
 def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
@@ -102,6 +113,25 @@ async def test_event_creation_atomically_seeds_platform_specific_leaders() -> No
     assert executor.params["$leader_user_id_0"] == 10
     assert executor.params["$leader_platform_1"] == Platform.VK.value
     assert executor.params["$leader_user_id_1"] == 20
+    assert executor.params["$player_amount"] == 12
+
+
+@pytest.mark.asyncio
+async def test_reserve_promotion_operation_and_participant_are_persisted_together() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    await repository.set_reserve_promotion("event-a1", "cancel-operation", "p" * 43)
+
+    assert "last_reserve_promotion_operation_id = $operation_id" in executor.query_text
+    assert "last_reserve_promotion_participant_key = $participant_key" in executor.query_text
+    assert executor.params["$operation_id"] == "cancel-operation"
+    assert executor.params["$participant_key"] == "p" * 43
+
+    await repository.mark_reserve_promotion_delivered("event-a1", "cancel-operation")
+
+    assert "last_reserve_promotion_delivered_operation_id = $operation_id" in executor.query_text
+    assert executor.params["$operation_id"] == "cancel-operation"
 
 
 @pytest.mark.asyncio

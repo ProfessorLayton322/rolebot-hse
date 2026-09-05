@@ -63,7 +63,13 @@ class OrderedWorker:
                 notification_delivered = False
                 try:
                     default_text = await self.mutations.apply(command)
-                    text = command.reply_context.text_success or default_text
+                    # ENLIST position is decided only after its ordered write;
+                    # ignore text embedded by workers from an older rollout.
+                    text = (
+                        default_text
+                        if command.operation is Operation.ENLIST
+                        else command.reply_context.text_success or default_text
+                    )
                     if command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS:
                         if self.notifications is None:
                             raise RuntimeError("confirmation notification service is not configured")
@@ -76,6 +82,9 @@ class OrderedWorker:
                             command.reply_context.buttons,
                         )
                         notification_delivered = True
+                    elif command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+                        if self.notifications is not None:
+                            await self.notifications.notify_reserve_promotion(command)
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
                 if not notification_delivered:

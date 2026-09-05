@@ -10,6 +10,7 @@ import ydb
 from pydantic import ValidationError
 
 from larp_bot.domain.models import (
+    DEFAULT_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
     Button,
@@ -362,11 +363,13 @@ class YdbUserRepository:
 
 class YdbEventRepository:
     COLUMNS = """
-        event_id, name, disk_resource_path, public_registration_url,
+        event_id, name, player_amount, disk_resource_path, public_registration_url,
         public_table_resource_path, public_table_public_url,
         status, confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
+        last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
+        last_reserve_promotion_delivered_operation_id,
         archived_at,
         created_at, updated_at
     """
@@ -383,6 +386,7 @@ class YdbEventRepository:
         return Event(
             event_id=row["event_id"],
             name=row["name"],
+            player_amount=row.get("player_amount") or DEFAULT_PLAYER_AMOUNT,
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
             public_table_resource_path=row.get("public_table_resource_path"),
@@ -398,6 +402,9 @@ class YdbEventRepository:
             pass_table_public_url=row.get("pass_table_public_url"),
             confirmed_notifications=_confirmed_notifications(row.get("confirmed_notifications_json")),
             last_confirmed_notification_operation_id=row.get("last_confirmed_notification_operation_id"),
+            last_reserve_promotion_operation_id=row.get("last_reserve_promotion_operation_id"),
+            last_reserve_promotion_participant_key=row.get("last_reserve_promotion_participant_key"),
+            last_reserve_promotion_delivered_operation_id=row.get("last_reserve_promotion_delivered_operation_id"),
             archived_at=_dt(row["archived_at"]) if row.get("archived_at") is not None else None,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
@@ -444,7 +451,7 @@ class YdbEventRepository:
             )
         await self.db.query(
             f"""
-            DECLARE $event_id AS Utf8; DECLARE $name AS Utf8;
+            DECLARE $event_id AS Utf8; DECLARE $name AS Utf8; DECLARE $player_amount AS Uint64;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
@@ -455,23 +462,30 @@ class YdbEventRepository:
             DECLARE $pass_table_public_url AS Optional<Utf8>;
             DECLARE $confirmed_notifications_json AS Utf8;
             DECLARE $last_confirmed_notification_operation_id AS Optional<Utf8>;
+            DECLARE $last_reserve_promotion_operation_id AS Optional<Utf8>;
+            DECLARE $last_reserve_promotion_participant_key AS Optional<Utf8>;
+            DECLARE $last_reserve_promotion_delivered_operation_id AS Optional<Utf8>;
             DECLARE $archived_at AS Optional<Timestamp>;
             DECLARE $updated_at AS Timestamp;
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
-                event_id, name, disk_resource_path, public_registration_url,
+                event_id, name, player_amount, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
                 status, confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
+                last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
+                last_reserve_promotion_delivered_operation_id,
                 archived_at,
                 created_at, updated_at
             ) VALUES (
-                $event_id, $name, $disk_resource_path, $public_url,
+                $event_id, $name, $player_amount, $disk_resource_path, $public_url,
                 $public_table_resource_path, $public_table_public_url,
                 $status, $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
+                $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
+                $last_reserve_promotion_delivered_operation_id,
                 $archived_at,
                 $created_at, $updated_at
             );
@@ -480,6 +494,7 @@ class YdbEventRepository:
             {
                 "$event_id": event.event_id,
                 "$name": event.name,
+                "$player_amount": event.player_amount,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
                 "$public_table_resource_path": event.public_table_resource_path,
@@ -495,6 +510,9 @@ class YdbEventRepository:
                     separators=(",", ":"),
                 ),
                 "$last_confirmed_notification_operation_id": event.last_confirmed_notification_operation_id,
+                "$last_reserve_promotion_operation_id": event.last_reserve_promotion_operation_id,
+                "$last_reserve_promotion_participant_key": event.last_reserve_promotion_participant_key,
+                "$last_reserve_promotion_delivered_operation_id": (event.last_reserve_promotion_delivered_operation_id),
                 "$archived_at": event.archived_at,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
@@ -692,6 +710,48 @@ class YdbEventRepository:
             },
         )
         return True
+
+    async def set_reserve_promotion(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str | None,
+    ) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $participant_key AS Optional<Utf8>; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET last_reserve_promotion_operation_id = $operation_id,
+                last_reserve_promotion_participant_key = $participant_key,
+                updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$participant_key": participant_key,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def mark_reserve_promotion_delivered(self, event_id: str, operation_id: str) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET last_reserve_promotion_delivered_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND last_reserve_promotion_operation_id = $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
 
     async def delete(self, event_id: str) -> bool:
         exists = await self.get(event_id)
