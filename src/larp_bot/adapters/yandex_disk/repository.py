@@ -211,7 +211,18 @@ def pass_table_workbook_bytes(profiles: Sequence[PassDetails] = ()) -> bytes:
         cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
         cell.number_format = "@"
     sheet.row_dimensions[1].height = 57
-    widths = (24.85546875, 22.140625, 24.28515625, 13, 40.28515625, 22.140625, 13, 33.85546875, 43.7109375)
+    patronym_width = 24.28515625
+    widths = (
+        24.85546875,
+        22.140625,
+        patronym_width,
+        13,
+        40.28515625,
+        22.140625,
+        patronym_width,
+        33.85546875,
+        43.7109375,
+    )
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[sheet.cell(1, index).column_letter].width = width
 
