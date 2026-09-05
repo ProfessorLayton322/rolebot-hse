@@ -170,7 +170,8 @@ class YdbUserRepository:
     COMMON_COLUMNS = """
         full_name, crossplay, larp_experience, needs_pass, pass_details_json,
         dialog_state, dialog_context_json, last_update_id, last_update_at,
-        last_delivery_operation_id, last_bot_buttons_json, created_at, updated_at
+        last_delivery_operation_id, last_bot_buttons_json, is_gamemaster,
+        gamemaster_grant_operation_id, created_at, updated_at
     """
 
     def __init__(self, executor: YdbExecutor) -> None:
@@ -186,9 +187,10 @@ class YdbUserRepository:
 
     async def get(self, platform: Platform, user_id: int) -> User | None:
         table, id_column, contact_column = self._location(platform)
+        platform_columns = f"{contact_column}, telegram_handle" if platform is Platform.TELEGRAM else contact_column
         query = f"""
             DECLARE $user_id AS Uint64;
-            SELECT {id_column}, {contact_column}, {self.COMMON_COLUMNS}
+            SELECT {id_column}, {platform_columns}, {self.COMMON_COLUMNS}
             FROM `{table}` WHERE {id_column} = $user_id;
         """
         rows = await self.db.query(query, {"$user_id": user_id}, read_only=True)
@@ -210,17 +212,43 @@ class YdbUserRepository:
             "last_update_at": _dt(row["last_update_at"]) if row.get("last_update_at") is not None else None,
             "last_delivery_operation_id": row.get("last_delivery_operation_id"),
             "last_bot_buttons": _buttons(row.get("last_bot_buttons_json")),
+            "is_gamemaster": row.get("is_gamemaster") or False,
+            "gamemaster_grant_operation_id": row.get("gamemaster_grant_operation_id"),
             "created_at": _dt(row["created_at"]),
             "updated_at": _dt(row["updated_at"]),
         }
         if platform is Platform.TELEGRAM:
-            return TelegramUser.model_validate({"tg_id": user_id, "vk_url": row.get("vk_url"), **common})
+            return TelegramUser.model_validate(
+                {
+                    "tg_id": user_id,
+                    "vk_url": row.get("vk_url"),
+                    "telegram_handle": row.get("telegram_handle"),
+                    **common,
+                }
+            )
         return VkUser.model_validate({"vk_id": user_id, "telegram_handle": row.get("telegram_handle"), **common})
+
+    async def find_telegram_by_handle(self, handle: str) -> TelegramUser | None:
+        rows = await self.db.query(
+            f"""
+            DECLARE $handle AS Utf8;
+            SELECT tg_id, vk_url, telegram_handle, {self.COMMON_COLUMNS}
+            FROM `tg_users` WHERE telegram_handle = $handle
+            LIMIT 2;
+            """,
+            {"$handle": handle},
+            read_only=True,
+        )
+        if len(rows) != 1:
+            return None
+        user = self._from_row(Platform.TELEGRAM, int(rows[0]["tg_id"]), rows[0])
+        assert isinstance(user, TelegramUser)
+        return user
 
     async def list_all(self) -> Sequence[User]:
         telegram_rows, vk_rows = await asyncio.gather(
             self.db.query(
-                f"SELECT tg_id, vk_url, {self.COMMON_COLUMNS} FROM `tg_users`;",
+                f"SELECT tg_id, vk_url, telegram_handle, {self.COMMON_COLUMNS} FROM `tg_users`;",
                 read_only=True,
             ),
             self.db.query(
@@ -235,14 +263,22 @@ class YdbUserRepository:
 
     async def save(self, user: User) -> None:
         if isinstance(user, TelegramUser):
-            table, id_column, contact_column = "tg_users", "tg_id", "vk_url"
-            user_id, contact = user.tg_id, user.vk_url
+            table, id_column = "tg_users", "tg_id"
+            user_id = user.tg_id
+            contact_declarations = "DECLARE $vk_url AS Optional<Utf8>; DECLARE $telegram_handle AS Optional<Utf8>;"
+            contact_columns = "vk_url, telegram_handle,"
+            contact_values = "$vk_url, $telegram_handle,"
+            contact_params = {"$vk_url": user.vk_url, "$telegram_handle": user.telegram_handle}
         else:
-            table, id_column, contact_column = "vk_users", "vk_id", "telegram_handle"
-            user_id, contact = user.vk_id, user.telegram_handle
+            table, id_column = "vk_users", "vk_id"
+            user_id = user.vk_id
+            contact_declarations = "DECLARE $telegram_handle AS Optional<Utf8>;"
+            contact_columns = "telegram_handle,"
+            contact_values = "$telegram_handle,"
+            contact_params = {"$telegram_handle": user.telegram_handle}
         query = f"""
             DECLARE $user_id AS Uint64;
-            DECLARE $contact AS Optional<Utf8>;
+            {contact_declarations}
             DECLARE $full_name AS Optional<Utf8>;
             DECLARE $crossplay AS Optional<Bool>;
             DECLARE $larp_experience AS Optional<Bool>;
@@ -257,12 +293,12 @@ class YdbUserRepository:
             DECLARE $created_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             UPSERT INTO `{table}` (
-                {id_column}, {contact_column}, full_name, crossplay, larp_experience,
+                {id_column}, {contact_columns} full_name, crossplay, larp_experience,
                 needs_pass, pass_details_json, dialog_state, dialog_context_json,
                 last_update_id, last_update_at, last_delivery_operation_id, last_bot_buttons_json,
                 created_at, updated_at
             ) VALUES (
-                $user_id, $contact, $full_name, $crossplay, $larp_experience,
+                $user_id, {contact_values} $full_name, $crossplay, $larp_experience,
                 $needs_pass, $pass_details, $dialog_state, $dialog_context,
                 $last_update_id, $last_update_at, $last_delivery_operation_id, $last_bot_buttons,
                 $created_at, $updated_at
@@ -272,7 +308,7 @@ class YdbUserRepository:
             query,
             {
                 "$user_id": user_id,
-                "$contact": contact,
+                **contact_params,
                 "$full_name": user.full_name,
                 "$crossplay": user.crossplay,
                 "$larp_experience": user.larp_experience,
@@ -291,6 +327,20 @@ class YdbUserRepository:
                 "$created_at": user.created_at,
                 "$updated_at": user.updated_at,
             },
+        )
+
+    async def grant_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+        table, id_column, _ = self._location(platform)
+        await self.db.query(
+            f"""
+            DECLARE $user_id AS Uint64;
+            DECLARE $operation_id AS Utf8;
+            UPDATE `{table}`
+            SET is_gamemaster = TRUE, gamemaster_grant_operation_id = $operation_id
+            WHERE {id_column} = $user_id
+              AND (is_gamemaster IS NULL OR is_gamemaster = FALSE);
+            """,
+            {"$user_id": user_id, "$operation_id": operation_id},
         )
 
     async def claim_delivery(self, platform: Platform, user_id: int, operation_id: str) -> bool:

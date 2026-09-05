@@ -20,6 +20,9 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "pass_table_resource_path"' in ydb
     assert 'name = "pass_table_public_url"' in ydb
     assert 'name = "last_bot_buttons_json"' in ydb
+    assert 'name = "is_gamemaster"' in ydb
+    assert 'name = "gamemaster_grant_operation_id"' in ydb
+    assert ydb.count('name = "telegram_handle"') == 2
 
 
 def test_no_fifo_native_trigger() -> None:

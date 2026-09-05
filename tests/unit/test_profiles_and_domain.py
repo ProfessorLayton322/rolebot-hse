@@ -3,7 +3,16 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from larp_bot.domain.models import EnlistPayload, Event, EventStatus, PassDetails, Registration, TelegramUser, VkUser
+from larp_bot.domain.models import (
+    EnlistPayload,
+    Event,
+    EventStatus,
+    PassDetails,
+    Registration,
+    TelegramUser,
+    VkUser,
+    normalize_telegram_profile,
+)
 
 
 @pytest.mark.parametrize("value", [None, "", "-"])
@@ -37,6 +46,24 @@ def test_vk_profile_accepts_missing_telegram(value: str | None) -> None:
 def test_vk_handle_is_normalized() -> None:
     assert VkUser(vk_id=1, telegram_handle="some_user").telegram_handle == "@some_user"
     assert VkUser(vk_id=1, telegram_handle="@some_user").telegram_handle == "@some_user"
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("@Some_User", "@some_user"),
+        ("https://t.me/Some_User", "@some_user"),
+        ("telegram.me/Some_User", "@some_user"),
+    ],
+)
+def test_telegram_profile_reference_is_normalized(raw: str, normalized: str) -> None:
+    assert normalize_telegram_profile(raw) == normalized
+
+
+@pytest.mark.parametrize("value", ["some_user", "https://example.com/some_user", "https://t.me/+invite"])
+def test_telegram_profile_reference_rejects_non_profile_values(value: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_telegram_profile(value)
 
 
 def test_character_wish_cannot_be_reintroduced_on_user_models() -> None:

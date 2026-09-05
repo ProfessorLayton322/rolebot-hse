@@ -80,3 +80,33 @@ async def test_vk_transport_preserves_non_chatbot_api_error_details() -> None:
         transport = VkApiTransport("token", client=client)
         with pytest.raises(RuntimeError, match="VK API error code 15: Access denied"):
             await transport.send(user_id=42, request_id="request-3", text="Hello")
+
+
+@pytest.mark.asyncio
+async def test_vk_profile_resolver_uses_numeric_profile_without_api_call() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        user_id = await transport.resolve_user_id("https://vk.ru/id42")
+
+    assert user_id == 42
+
+
+@pytest.mark.asyncio
+async def test_vk_profile_resolver_resolves_vanity_profile() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"response": [{"id": 84}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        user_id = await transport.resolve_user_id("vk.com/game_master")
+
+    assert user_id == 84
+    assert len(requests) == 1
+    assert requests[0].url.path.endswith("/users.get")
+    assert parse_qs(requests[0].content.decode())["user_ids"] == ["game_master"]

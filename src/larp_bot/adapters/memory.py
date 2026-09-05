@@ -12,6 +12,7 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     Platform,
     Registration,
+    TelegramUser,
     User,
 )
 
@@ -24,10 +25,28 @@ class MemoryUserRepository:
         value = self.rows.get((platform, user_id))
         return None if value is None else deepcopy(value)
 
+    async def find_telegram_by_handle(self, handle: str) -> TelegramUser | None:
+        matches = [
+            user
+            for (platform, _), user in self.rows.items()
+            if platform is Platform.TELEGRAM and getattr(user, "telegram_handle", None) == handle
+        ]
+        if len(matches) != 1:
+            return None
+        match = matches[0]
+        assert isinstance(match, TelegramUser)
+        return deepcopy(match)
+
     async def save(self, user: User) -> None:
         platform = Platform.TELEGRAM if hasattr(user, "tg_id") else Platform.VK
         user_id = user.tg_id if hasattr(user, "tg_id") else user.vk_id
         self.rows[(platform, user_id)] = deepcopy(user)
+
+    async def grant_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+        user = self.rows[(platform, user_id)]
+        if not user.is_gamemaster:
+            user.is_gamemaster = True
+            user.gamemaster_grant_operation_id = operation_id
 
     async def list_all(self) -> Sequence[User]:
         return deepcopy(list(self.rows.values()))
@@ -302,3 +321,11 @@ class MemoryDeferredTransport:
         buttons: Sequence[Button] = (),
     ) -> None:
         self.sent.append((platform, user_id, request_id, text, tuple(buttons)))
+
+
+class MemoryVkUserIdResolver:
+    def __init__(self, ids: dict[str, int] | None = None) -> None:
+        self.ids = ids or {}
+
+    async def resolve_user_id(self, profile: str) -> int | None:
+        return self.ids.get(profile)

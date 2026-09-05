@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from larp_bot.adapters.memory import (
     MemoryCommandPublisher,
+    MemoryDeferredTransport,
     MemoryEventRepository,
     MemoryRegistrationRepository,
     MemoryUserRepository,
+    MemoryVkUserIdResolver,
     StaticAdminProvider,
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
@@ -23,6 +26,8 @@ from larp_bot.application.conversation import (
     CREATE_PASS_TABLE,
     ENLIST,
     FREE_TEXT_DIALOG_STATES,
+    GAMEMASTER_NOTIFICATION,
+    GRANT_GAMEMASTER,
     KEEP,
     LEGACY_DELETE_GAME,
     LIST_PASS_TABLES,
@@ -76,12 +81,39 @@ def inbound(
     )
 
 
+class FailOnceTransport(MemoryDeferredTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    async def send(
+        self,
+        *,
+        platform: Platform,
+        user_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("temporary transport failure")
+        await super().send(
+            platform=platform,
+            user_id=user_id,
+            request_id=request_id,
+            text=text,
+            buttons=buttons,
+        )
+
+
 async def engine_setup(
     store: MemoryDiskStore,
     event: Event,
     *additional_events: Event,
     admin: bool = False,
     gamemaster: bool = False,
+    vk_profile_ids: dict[str, int] | None = None,
 ) -> tuple[
     ConversationEngine,
     MemoryUserRepository,
@@ -106,6 +138,7 @@ async def engine_setup(
     catalog = RegistrationCatalog(events, tables, showcase)
     publisher = MemoryCommandPublisher()
     registrations = RegistrationService(events, catalog, publisher, "participant-secret")
+    transport = MemoryDeferredTransport()
     conversation = ConversationEngine(
         users,
         events,
@@ -115,6 +148,8 @@ async def engine_setup(
             tg_ids={1} if admin else set(),
             tg_gamemaster_ids={1} if gamemaster else set(),
         ),
+        transport=transport,
+        vk_user_ids=MemoryVkUserIdResolver(vk_profile_ids),
     )
     return conversation, users, publisher, tables
 
@@ -410,6 +445,19 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
 
 
 @pytest.mark.asyncio
+async def test_telegram_identity_handle_is_refreshed_from_each_update(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+
+    await engine.handle(inbound(1, "/start", user_id=2, telegram_username="Current_Name"))
+
+    user = await users.get(Platform.TELEGRAM, 2)
+    assert isinstance(user, TelegramUser)
+    assert user.telegram_handle == "@current_name"
+
+
+@pytest.mark.asyncio
 async def test_waiting_blank_character_menu_routes_to_confirmation(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, _, _, tables = await engine_setup(disk_store, event)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
@@ -594,6 +642,136 @@ async def test_gamemaster_has_admin_interface_except_archive(disk_store: MemoryD
 
     status_games = await engine.handle(inbound(3, CHANGE_STATUS))
     assert any(button.value == f"select:admin-status:{event.event_id}" for button in status_games.buttons)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["@Target_Player", "https://t.me/Target_Player"])
+async def test_admin_grants_telegram_gamemaster_by_profile_and_notifies_them(
+    profile: str, disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@target_player",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert GRANT_GAMEMASTER in [button.value for button in menu.buttons]
+    choose_platform = await engine.handle(inbound(2, GRANT_GAMEMASTER, callback=True))
+    assert [button.label for button in choose_platform.buttons[:2]] == ["Telegram", "VK"]
+    prompt = await engine.handle(inbound(3, "admin:gamemaster:telegram", callback=True))
+    assert "ссылку на профиль Telegram или @username" in prompt.text
+    granted = await engine.handle(inbound(4, profile))
+
+    target = await users.get(Platform.TELEGRAM, 2)
+    assert target is not None and target.is_gamemaster
+    assert target.gamemaster_grant_operation_id == "gamemaster-grant:telegram:2:4"
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == [
+        (Platform.TELEGRAM, 2, "gamemaster-grant:telegram:2:4", GAMEMASTER_NOTIFICATION, ()),
+    ]
+    assert granted.text == "✅ Пользователь назначен гейммастером в Telegram."
+
+    target_main = await engine.handle(inbound(5, "/start", user_id=2, telegram_username="target_player"))
+    assert ADMIN in [button.value for button in target_main.buttons]
+
+
+@pytest.mark.asyncio
+async def test_admin_grants_vk_gamemaster_from_vanity_link(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, _, _ = await engine_setup(
+        disk_store,
+        event,
+        admin=True,
+        vk_profile_ids={"https://vk.com/game_master": 22},
+    )
+    await users.save(
+        VkUser(
+            vk_id=22,
+            full_name="Петров Пётр",
+            crossplay=False,
+            larp_experience=True,
+            needs_pass=False,
+        )
+    )
+
+    await engine.handle(inbound(1, GRANT_GAMEMASTER))
+    await engine.handle(inbound(2, "admin:gamemaster:vk", callback=True))
+    granted = await engine.handle(inbound(3, "vk.ru/game_master"))
+
+    target = await users.get(Platform.VK, 22)
+    assert target is not None and target.is_gamemaster
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == [
+        (Platform.VK, 22, "gamemaster-grant:vk:22:3", GAMEMASTER_NOTIFICATION, ()),
+    ]
+    assert granted.text == "✅ Пользователь назначен гейммастером в VK."
+
+
+@pytest.mark.asyncio
+async def test_admin_rejects_incomplete_gamemaster_profile(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(TelegramUser(tg_id=2, telegram_handle="@target_player"))
+
+    await engine.handle(inbound(1, GRANT_GAMEMASTER))
+    await engine.handle(inbound(2, "admin:gamemaster:telegram", callback=True))
+    rejected = await engine.handle(inbound(3, "@target_player"))
+
+    target = await users.get(Platform.TELEGRAM, 2)
+    assert target is not None and not target.is_gamemaster
+    assert "заполнен не полностью" in rejected.text
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_gamemaster_notification_retries_after_role_was_persisted(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    engine.transport = FailOnceTransport()
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@target_player",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+    await engine.handle(inbound(1, GRANT_GAMEMASTER))
+    await engine.handle(inbound(2, "admin:gamemaster:telegram", callback=True))
+    grant_message = inbound(3, "@target_player")
+
+    with pytest.raises(RuntimeError, match="temporary transport failure"):
+        await engine.handle(grant_message)
+    persisted = await users.get(Platform.TELEGRAM, 2)
+    assert persisted is not None and persisted.is_gamemaster
+    assert persisted.last_delivery_operation_id is None
+
+    response = await engine.handle(grant_message)
+
+    assert response.text == "✅ Пользователь назначен гейммастером в Telegram."
+    assert isinstance(engine.transport, FailOnceTransport)
+    assert len(engine.transport.sent) == 1
+    assert engine.transport.sent[0][3] == GAMEMASTER_NOTIFICATION
+
+
+@pytest.mark.asyncio
+async def test_gamemaster_cannot_grant_gamemaster_role(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+
+    response = await engine.handle(inbound(1, GRANT_GAMEMASTER))
+
+    assert response.text == "Недостаточно прав."
 
 
 @pytest.mark.asyncio
