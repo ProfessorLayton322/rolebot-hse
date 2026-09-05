@@ -16,7 +16,6 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
-    ADD_EVENT_LEADER,
     ADMIN,
     ADMIN_MENU,
     ARCHIVE_GAME,
@@ -24,14 +23,14 @@ from larp_bot.application.conversation import (
     CHANGE_STATUS,
     CHARACTER,
     CONFIRM,
-    CREATE_PASS_TABLE,
     ENLIST,
+    EVENT_TABLES,
     FREE_TEXT_DIALOG_STATES,
     GAMEMASTER_NOTIFICATION,
     GRANT_GAMEMASTER,
     KEEP,
-    LIST_PASS_TABLES,
     MAIN_MENU,
+    MANAGE_GAMES,
     MASTER_TABLE_DISCLAIMER,
     PROFILE,
     SEND_CONFIRMATION_REMINDER,
@@ -610,18 +609,20 @@ async def test_admin_archive_requires_exact_case_but_trims_whitespace(
 ) -> None:
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
     menu = await engine.handle(inbound(1, ADMIN))
-    assert ARCHIVE_GAME in [button.value for button in menu.buttons]
-    await engine.handle(inbound(2, ARCHIVE_GAME, callback=True))
-    await engine.handle(inbound(3, f"select:admin-archive:{event.event_id}", callback=True))
-    wrong = await engine.handle(inbound(4, event.name.casefold()))
+    assert MANAGE_GAMES in [button.value for button in menu.buttons]
+    await engine.handle(inbound(2, MANAGE_GAMES, callback=True))
+    management = await engine.handle(inbound(3, f"ag:manage:{event.event_id}", callback=True))
+    assert ARCHIVE_GAME in [button.label for button in management.buttons]
+    await engine.handle(inbound(4, f"ag:archive:{event.event_id}", callback=True))
+    wrong = await engine.handle(inbound(5, event.name.casefold()))
     assert "не совпало" in wrong.text
-    accepted = await engine.handle(inbound(5, f"  {event.name}  "))
+    accepted = await engine.handle(inbound(6, f"  {event.name}  "))
     assert accepted.deferred
-    assert [(button.label, button.value) for button in accepted.buttons] == [(ADMIN_MENU, ADMIN_MENU)]
+    assert [(button.label, button.value) for button in accepted.buttons] == [("⬅️ Назад", MANAGE_GAMES)]
     assert [(button.label, button.value) for button in publisher.commands[-1].reply_context.buttons] == [
-        (ADMIN_MENU, ADMIN_MENU)
+        ("⬅️ Назад", MANAGE_GAMES)
     ]
-    assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
+    assert publisher.commands[-1].operation is Operation.ARCHIVE_EVENT
 
 
 @pytest.mark.asyncio
@@ -643,30 +644,21 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     menu = await engine.handle(inbound(2, ADMIN))
     assert [button.value for button in menu.buttons] == [
         "➕ Создать игру",
-        CHANGE_STATUS,
-        SEND_CONFIRMATION_REMINDER,
-        SEND_CONFIRMED_NOTIFICATION,
-        CREATE_PASS_TABLE,
-        ADD_EVENT_LEADER,
-        LIST_PASS_TABLES,
-        ARCHIVE_GAME,
-        "📋 Список игр",
+        MANAGE_GAMES,
         "⬅️ Назад",
     ]
 
-    status_games = await engine.handle(inbound(3, CHANGE_STATUS))
-    assert any(button.value == f"select:admin-status:{event.event_id}" for button in status_games.buttons)
-    denied = await engine.handle(inbound(4, f"select:admin-status:{event.event_id}", callback=True))
-    assert denied.text == "Только ведущие этой игры могут изменять её данные."
+    games = await engine.handle(inbound(3, MANAGE_GAMES))
+    assert any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
+    management = await engine.handle(inbound(4, f"ag:manage:{event.event_id}", callback=True))
+    assert "доступны только ведущим" in management.text
+    assert EVENT_TABLES not in [button.label for button in management.buttons]
+    assert "https://disk.example/pass-table" not in management.text
 
-    listed = await engine.handle(inbound(5, "📋 Список игр"))
-    assert event.name in listed.text
-    pass_tables = await engine.handle(inbound(6, LIST_PASS_TABLES))
-    assert event.name in pass_tables.text
-    assert "https://disk.example/pass-table" in pass_tables.text
-
-    await engine.handle(inbound(7, SEND_CONFIRMED_NOTIFICATION))
-    notification_denied = await engine.handle(inbound(8, f"select:admin-notification:{event.event_id}", callback=True))
+    tables_denied = await engine.handle(inbound(5, f"ag:tables:{event.event_id}", callback=True))
+    assert tables_denied.text == "Только ведущие этой игры могут изменять её данные."
+    assert "https://disk.example/pass-table" not in tables_denied.text
+    notification_denied = await engine.handle(inbound(6, f"ag:notify:{event.event_id}", callback=True))
     assert notification_denied.text == "Только ведущие этой игры могут изменять её данные."
     assert publisher.commands == []
 
@@ -802,7 +794,7 @@ async def test_gamemaster_cannot_grant_gamemaster_role(disk_store: MemoryDiskSto
 
 
 @pytest.mark.asyncio
-async def test_created_game_returns_separate_master_and_public_links_with_warning(
+async def test_created_game_keeps_links_in_its_leader_only_tables_action(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
@@ -816,12 +808,20 @@ async def test_created_game_returns_separate_master_and_public_links_with_warnin
     assert created.master_table_resource_path.endswith("/master_table_Бал в зимнем дворце.xlsx")
     assert created.public_table_resource_path is not None
     assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
-    assert response.text.count("https://disk.example/public/") == 2
-    assert MASTER_TABLE_DISCLAIMER in response.text
-    assert "Публичная таблица (без контактов Telegram и VK)" in response.text
+    assert "https://disk.example/public/" not in response.text
+    assert response.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{created.event_id}")]
     assert await engine.events.list_leaders(created.event_id) == [
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)
     ]
+
+    management = await engine.handle(inbound(3, response.buttons[0].value, callback=True))
+    assert EVENT_TABLES in [button.label for button in management.buttons]
+    tables = await engine.handle(inbound(4, f"ag:tables:{created.event_id}", callback=True))
+    assert tables.text.count("https://disk.example/public/") == 3
+    assert MASTER_TABLE_DISCLAIMER in tables.text
+    assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
+    assert "Административная таблица" in tables.text
+    assert "Таблица пропусков" in tables.text
 
 
 @pytest.mark.asyncio
@@ -849,7 +849,7 @@ async def test_gamemaster_created_game_seeds_creator_and_every_configured_admin(
 
 
 @pytest.mark.asyncio
-async def test_listing_existing_game_backfills_every_configured_admin_as_leader(
+async def test_selecting_existing_game_backfills_every_configured_admin_as_leader(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, _, _, _ = await engine_setup(
@@ -860,9 +860,11 @@ async def test_listing_existing_game_backfills_every_configured_admin_as_leader(
         vk_admin_ids={30},
     )
 
-    listed = await engine.handle(inbound(1, "📋 Список игр"))
+    games = await engine.handle(inbound(1, MANAGE_GAMES))
+    selected = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
 
-    assert event.name in listed.text
+    assert event.name in next(button.label for button in games.buttons if button.value.startswith("ag:manage:"))
+    assert f"Управление игрой «{event.name}»" in selected.text
     leaders = await engine.events.list_leaders(event.event_id)
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
         (Platform.TELEGRAM, 1),
@@ -893,21 +895,22 @@ async def test_event_leader_can_add_another_gamemaster_who_can_then_notify_playe
         )
     )
 
-    games = await engine.handle(inbound(1, ADD_EVENT_LEADER))
-    assert any(button.value == f"select:admin-leader-add:{event.event_id}" for button in games.buttons)
-    platforms = await engine.handle(inbound(2, f"select:admin-leader-add:{event.event_id}", callback=True))
+    await engine.handle(inbound(1, MANAGE_GAMES))
+    await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
+    platforms = await engine.handle(inbound(3, f"ag:leader:{event.event_id}", callback=True))
     assert [button.label for button in platforms.buttons[:2]] == ["Telegram", "VK"]
-    await engine.handle(inbound(3, "admin:event-leader:telegram", callback=True))
-    added = await engine.handle(inbound(4, "@target_player"))
+    await engine.handle(inbound(4, "admin:event-leader:telegram", callback=True))
+    added = await engine.handle(inbound(5, "@target_player"))
 
     assert added.text == f"✅ Гейммастер добавлен ведущим игры «{event.name}»."
     assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) in await engine.events.list_leaders(
         event.event_id
     )
 
-    await engine.handle(inbound(1, SEND_CONFIRMED_NOTIFICATION, user_id=2))
-    await engine.handle(inbound(2, f"select:admin-notification:{event.event_id}", callback=True, user_id=2))
-    queued = await engine.handle(inbound(3, "Сбор в 18:30", user_id=2))
+    await engine.handle(inbound(1, MANAGE_GAMES, user_id=2))
+    await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True, user_id=2))
+    await engine.handle(inbound(3, f"ag:notify:{event.event_id}", callback=True, user_id=2))
+    queued = await engine.handle(inbound(4, "Сбор в 18:30", user_id=2))
 
     assert queued.deferred
     assert publisher.commands[-1].operation is Operation.SEND_CONFIRMED_NOTIFICATION
@@ -933,10 +936,9 @@ async def test_event_leader_cannot_add_a_non_gamemaster_as_leader(disk_store: Me
         )
     )
 
-    await engine.handle(inbound(1, ADD_EVENT_LEADER))
-    await engine.handle(inbound(2, f"select:admin-leader-add:{event.event_id}", callback=True))
-    await engine.handle(inbound(3, "admin:event-leader:telegram", callback=True))
-    denied = await engine.handle(inbound(4, "@ordinary_user"))
+    await engine.handle(inbound(1, f"ag:leader:{event.event_id}", callback=True))
+    await engine.handle(inbound(2, "admin:event-leader:telegram", callback=True))
+    denied = await engine.handle(inbound(3, "@ordinary_user"))
 
     assert denied.text == "Добавить ведущим можно только гейммастера."
     assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) not in await engine.events.list_leaders(
@@ -951,21 +953,23 @@ async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_acti
 ) -> None:
     engine, users, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
 
-    listing = await engine.handle(inbound(1, ARCHIVE_GAME))
-    assert any(button.value == f"select:admin-archive:{event.event_id}" for button in listing.buttons)
+    listing = await engine.handle(inbound(1, MANAGE_GAMES))
+    assert any(button.value == f"ag:manage:{event.event_id}" for button in listing.buttons)
+    current = await engine.handle(inbound(2, f"ag:archive:{event.event_id}", callback=True))
+    assert current.text == "Только ведущие этой игры могут изменять её данные."
     for update, value in enumerate(
         (
             f"select:admin-archive:{event.event_id}",
             f"select:admin-delete:{event.event_id}",
         ),
-        start=2,
+        start=3,
     ):
         response = await engine.handle(inbound(update, value, callback=True))
         assert response.text == "Только ведущие этой игры могут изменять её данные."
 
     page = await engine.handle(
         inbound(
-            4,
+            5,
             f"page:admin-archive:{int(event.created_at.timestamp() * 1_000_000)}:{event.event_id}",
             callback=True,
         )
@@ -1001,15 +1005,48 @@ async def test_admin_archive_game_buttons_are_paginated(disk_store: MemoryDiskSt
     ]
     engine, _, _, _ = await engine_setup(disk_store, *events, admin=True)
 
-    first = await engine.handle(inbound(1, ARCHIVE_GAME))
-    game_buttons = [button for button in first.buttons if button.value.startswith("select:admin-archive:")]
-    next_button = next(button for button in first.buttons if button.label == "➡️ Далее")
+    first = await engine.handle(inbound(1, MANAGE_GAMES))
+    game_buttons = [button for button in first.buttons if button.value.startswith("ag:manage:")]
+    next_button = next(button for button in first.buttons if button.label == "➡️ Следующая")
     assert len(game_buttons) == 10
 
     second = await engine.handle(inbound(2, next_button.value, callback=True))
-    assert [button.label for button in second.buttons if button.value.startswith("select:admin-archive:")] == [
-        "Game 10"
+    assert [button.label for button in second.buttons if button.value.startswith("ag:manage:")] == ["Game 10"]
+    previous_button = next(button for button in second.buttons if button.label == "⬅️ Предыдущая")
+    returned = await engine.handle(inbound(3, previous_button.value, callback=True))
+    assert [button.label for button in returned.buttons if button.value.startswith("ag:manage:")] == [
+        f"Game {index}" for index in range(10)
     ]
+
+
+@pytest.mark.asyncio
+async def test_game_management_lists_closed_games_but_hides_archived_games(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    closed = Event(
+        event_id="event-closed",
+        name="Closed but managed",
+        disk_resource_path="disk:/larp-bot/events/event-closed-game.xlsx",
+        public_registration_url="https://disk.example/closed",
+        status=EventStatus.CLOSED,
+        created_at=now,
+        updated_at=now,
+    )
+    archived = Event.model_validate(
+        event.model_dump()
+        | {
+            "event_id": "event-archived",
+            "name": "Archived",
+            "archived_at": now,
+        }
+    )
+    engine, _, _, _ = await engine_setup(disk_store, closed, archived, admin=True)
+
+    games = await engine.handle(inbound(1, MANAGE_GAMES))
+
+    labels = [button.label for button in games.buttons if button.value.startswith("ag:manage:")]
+    assert labels == ["Closed but managed"]
 
 
 @pytest.mark.asyncio
@@ -1018,10 +1055,12 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
     menu = await engine.handle(inbound(1, ADMIN))
-    assert CHANGE_STATUS in [button.value for button in menu.buttons]
-    games = await engine.handle(inbound(2, CHANGE_STATUS, callback=True))
-    assert any(button.value == f"select:admin-status:{event.event_id}" for button in games.buttons)
-    status_prompt = await engine.handle(inbound(3, f"select:admin-status:{event.event_id}", callback=True))
+    assert MANAGE_GAMES in [button.value for button in menu.buttons]
+    games = await engine.handle(inbound(2, MANAGE_GAMES, callback=True))
+    assert any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
+    management = await engine.handle(inbound(3, f"ag:manage:{event.event_id}", callback=True))
+    assert CHANGE_STATUS in [button.label for button in management.buttons]
+    status_prompt = await engine.handle(inbound(4, f"ag:status:{event.event_id}", callback=True))
     assert "Текущий Статус: Регистрация" in status_prompt.text
     assert "могут записываться, но ещё не могут подтверждать" in status_prompt.text
     assert "могут записываться и подтверждать" in status_prompt.text
@@ -1037,12 +1076,12 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
         ("admin:status:confirmation", Operation.OPEN_CONFIRMATION),
         ("admin:status:closed", Operation.CLOSE_EVENT),
     ]
-    update = 4
+    update = 5
     for callback, operation in expected_operations:
-        if update > 4:
-            await engine.handle(inbound(update, CHANGE_STATUS, callback=True))
+        if update > 5:
+            await engine.handle(inbound(update, f"ag:manage:{event.event_id}", callback=True))
             update += 1
-            await engine.handle(inbound(update, f"select:admin-status:{event.event_id}", callback=True))
+            await engine.handle(inbound(update, f"ag:status:{event.event_id}", callback=True))
             update += 1
         queued = await engine.handle(inbound(update, callback, callback=True))
         update += 1
@@ -1052,6 +1091,7 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
             update += 1
         assert queued.deferred
         assert publisher.commands[-1].operation is operation
+        assert queued.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{event.event_id}")]
         if operation is Operation.OPEN_CONFIRMATION:
             payload = publisher.commands[-1].payload
             assert isinstance(payload, ConfirmationDeadlinePayload)
@@ -1065,10 +1105,9 @@ async def test_admin_confirmation_deadline_retries_invalid_input_with_same_optio
     event.status = EventStatus.CREATED
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
-    await engine.handle(inbound(1, CHANGE_STATUS))
-    await engine.handle(inbound(2, f"select:admin-status:{event.event_id}", callback=True))
-    prompt = await engine.handle(inbound(3, "admin:status:confirmation", callback=True))
-    invalid = await engine.handle(inbound(4, "9.09.26 19:00"))
+    await engine.handle(inbound(1, f"ag:status:{event.event_id}", callback=True))
+    prompt = await engine.handle(inbound(2, "admin:status:confirmation", callback=True))
+    invalid = await engine.handle(inbound(3, "9.09.26 19:00"))
 
     assert "DD.MM.YY HH:MM" in prompt.text
     assert prompt.buttons[0].label == "Ближайший четверг 19:00"
@@ -1088,10 +1127,9 @@ async def test_admin_can_choose_nearest_thursday_deadline(
     event.status = EventStatus.CREATED
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
-    await engine.handle(inbound(1, CHANGE_STATUS))
-    await engine.handle(inbound(2, f"select:admin-status:{event.event_id}", callback=True))
-    await engine.handle(inbound(3, "admin:status:confirmation", callback=True))
-    queued = await engine.handle(inbound(4, "admin:deadline:nearest-thursday", callback=True))
+    await engine.handle(inbound(1, f"ag:status:{event.event_id}", callback=True))
+    await engine.handle(inbound(2, "admin:status:confirmation", callback=True))
+    queued = await engine.handle(inbound(3, "admin:deadline:nearest-thursday", callback=True))
 
     assert "03.09.26 19:00" in queued.text
     payload = publisher.commands[-1].payload
@@ -1105,10 +1143,10 @@ async def test_admin_has_separate_confirmation_reminder_action(disk_store: Memor
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
     menu = await engine.handle(inbound(1, ADMIN))
-    assert SEND_CONFIRMATION_REMINDER in [button.value for button in menu.buttons]
-    games = await engine.handle(inbound(2, SEND_CONFIRMATION_REMINDER, callback=True))
-    assert any(button.value == f"select:admin-reminder:{event.event_id}" for button in games.buttons)
-    queued = await engine.handle(inbound(3, f"select:admin-reminder:{event.event_id}", callback=True))
+    assert MANAGE_GAMES in [button.value for button in menu.buttons]
+    management = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
+    assert SEND_CONFIRMATION_REMINDER in [button.label for button in management.buttons]
+    queued = await engine.handle(inbound(3, f"ag:remind:{event.event_id}", callback=True))
 
     assert queued.deferred
     assert publisher.commands[-1].operation is Operation.SEND_CONFIRMATION_REMINDER
@@ -1120,10 +1158,10 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
     menu = await engine.handle(inbound(1, ADMIN))
-    assert SEND_CONFIRMED_NOTIFICATION in [button.value for button in menu.buttons]
-    games = await engine.handle(inbound(2, SEND_CONFIRMED_NOTIFICATION, callback=True))
-    assert any(button.value == f"select:admin-notification:{event.event_id}" for button in games.buttons)
-    prompt = await engine.handle(inbound(3, f"select:admin-notification:{event.event_id}", callback=True))
+    assert MANAGE_GAMES in [button.value for button in menu.buttons]
+    management = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
+    assert SEND_CONFIRMED_NOTIFICATION in [button.label for button in management.buttons]
+    prompt = await engine.handle(inbound(3, f"ag:notify:{event.event_id}", callback=True))
     assert "просто вставить ссылку-приглашение" in prompt.text
     assert "бот сам добавит её и название игры" in prompt.text
 
@@ -1141,32 +1179,22 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
 
 
 @pytest.mark.asyncio
-async def test_admin_can_create_one_pass_table_and_list_its_permanent_link(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_event_tables_action_returns_all_three_permanent_links(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
 
-    menu = await engine.handle(inbound(1, ADMIN))
-    assert CREATE_PASS_TABLE in [button.value for button in menu.buttons]
-    assert LIST_PASS_TABLES in [button.value for button in menu.buttons]
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    assert EVENT_TABLES in [button.label for button in management.buttons]
 
-    games = await engine.handle(inbound(2, CREATE_PASS_TABLE, callback=True))
-    assert any(button.value == f"select:admin-pass-create:{event.event_id}" for button in games.buttons)
-    created = await engine.handle(inbound(3, f"select:admin-pass-create:{event.event_id}", callback=True))
-    assert "Участников: 0" in created.text
-    assert [(button.label, button.value) for button in created.buttons] == [(ADMIN_MENU, ADMIN_MENU)]
-    link = "https://disk.example/public/2"
-    assert link in created.text
+    tables = await engine.handle(inbound(2, f"ag:tables:{event.event_id}", callback=True))
+    assert tables.text.count("https://disk.example/") == 3
+    assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
+    assert "Административная таблица" in tables.text
+    assert "Таблица пропусков" in tables.text
+    assert MASTER_TABLE_DISCLAIMER in tables.text
+    assert tables.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{event.event_id}")]
 
-    await engine.handle(inbound(4, CREATE_PASS_TABLE, callback=True))
-    repeated = await engine.handle(inbound(5, f"select:admin-pass-create:{event.event_id}", callback=True))
-    assert "уже создана" in repeated.text
-    assert [(button.label, button.value) for button in repeated.buttons] == [(ADMIN_MENU, ADMIN_MENU)]
-    assert link in repeated.text
-
-    listed = await engine.handle(inbound(6, LIST_PASS_TABLES, callback=True))
-    assert event.name in listed.text
-    assert link in listed.text
+    repeated = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
+    assert repeated.text == tables.text
 
 
 @pytest.mark.asyncio
@@ -1206,10 +1234,9 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
         EventAdministrationService(event_repository, showcase, catalog, users, "secret"),
         StaticAdminProvider(tg_ids={1}),
     )
-    page = await engine.handle(inbound(1, "📋 Список игр"))
-    assert page.text.count("https://disk.example/") == min(count, 10) * 2
-    assert page.text.count(MASTER_TABLE_DISCLAIMER) == min(count, 10)
-    assert page.text.count("Публичная таблица (без контактов Telegram и VK)") == min(count, 10)
-    assert page.text.count("Статус: Регистрация") == min(count, 10)
-    has_next = any(button.label == "➡️ Далее" for button in page.buttons)
+    page = await engine.handle(inbound(1, MANAGE_GAMES))
+    game_buttons = [button for button in page.buttons if button.value.startswith("ag:manage:")]
+    assert len(game_buttons) == min(count, 10)
+    assert "https://disk.example/" not in page.text
+    has_next = any(button.label == "➡️ Следующая" for button in page.buttons)
     assert has_next is (count > 10)

@@ -24,6 +24,7 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "gamemaster_grant_operation_id"' in ydb
     assert 'name = "confirmed_notifications_json"' in ydb
     assert 'name = "last_confirmed_notification_operation_id"' in ydb
+    assert 'name = "archived_at"' in ydb
     assert 'primary_key = ["event_id", "platform", "platform_user_id"]' in ydb
     assert ydb.count('name = "telegram_handle"') == 2
 
@@ -93,7 +94,9 @@ def test_yandex_runtime_uses_oidc_protected_worker_config() -> None:
 
 def test_admin_page_size_is_ten_in_shared_engine() -> None:
     source = (ROOT / "src/larp_bot/application/conversation.py").read_text()
-    assert "self.events.list_page(after=after, limit=10)" in source
+    assert "async def _show_admin_games(" in source
+    assert "archived=False" in source
+    assert "limit=10" in source
 
 
 def test_gamemaster_ids_are_propagated_to_runtime_config() -> None:

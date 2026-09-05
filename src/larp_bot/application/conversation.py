@@ -67,6 +67,8 @@ SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтвержден�
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
+MANAGE_GAMES = "Управление играми"
+EVENT_TABLES = "Таблицы участников и пропусков"
 GRANT_GAMEMASTER = "🎖 Назначить гейммастера"
 ADD_EVENT_LEADER = "👑 Добавить ведущего игры"
 ARCHIVE_GAME = "📦 Архивировать игру"
@@ -87,13 +89,15 @@ ADMIN_STATUS_CHOICES = {
     "admin:status:confirmation": (STATUS_CONFIRMATION, Operation.OPEN_CONFIRMATION),
     "admin:status:closed": (STATUS_CLOSED, Operation.CLOSE_EVENT),
 }
-MASTER_TABLE_DISCLAIMER = "⚠️ Только для мастеров и администраторов. Не пересылайте эту ссылку игрокам!"
+MASTER_TABLE_DISCLAIMER = "⚠️ Только для ведущих этой игры. Не пересылайте эту ссылку игрокам!"
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
 ADMIN_ACTIONS = frozenset(
     {
         "➕ Создать игру",
+        MANAGE_GAMES,
+        EVENT_TABLES,
         CHANGE_STATUS,
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_NOTIFICATION,
@@ -145,9 +149,12 @@ def main_buttons(has_admin_access: bool) -> list[Button]:
 def event_table_links(event: Event) -> str:
     if event.public_table_public_url is None:
         raise RuntimeError("public game table is not initialized")
+    if event.pass_table_public_url is None:
+        raise RuntimeError("pass table is not initialized")
     return (
-        f"Мастерская таблица:\n{MASTER_TABLE_DISCLAIMER}\n{event.master_table_public_url}\n\n"
-        f"Публичная таблица (без контактов Telegram и VK):\n{event.public_table_public_url}"
+        f"Публичная таблица (без контактов Telegram и VK):\n{event.public_table_public_url}\n\n"
+        f"Административная таблица:\n{MASTER_TABLE_DISCLAIMER}\n{event.master_table_public_url}\n\n"
+        f"Таблица пропусков:\n{event.pass_table_public_url}"
     )
 
 
@@ -167,7 +174,11 @@ def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
 
 
-def _admin_status_response(event_name: str, current_status: EventStatus) -> BotResponse:
+def game_management_button(event_id: str) -> Button:
+    return Button(label=BACK, value=f"ag:manage:{event_id}")
+
+
+def _admin_status_response(event_name: str, current_status: EventStatus, event_id: str) -> BotResponse:
     return BotResponse(
         text=(
             f"Игра: «{event_name}»\n"
@@ -178,11 +189,11 @@ def _admin_status_response(event_name: str, current_status: EventStatus) -> BotR
             f"{STATUS_CLOSED} — игроки не могут ни записываться, ни подтверждать участие."
         ),
         buttons=[Button(label=label, value=value) for value, (label, _) in ADMIN_STATUS_CHOICES.items()]
-        + [Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+        + [game_management_button(event_id)],
     )
 
 
-def _confirmation_deadline_response(*, invalid: bool = False) -> BotResponse:
+def _confirmation_deadline_response(event_id: str, *, invalid: bool = False) -> BotResponse:
     prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n" if invalid else ""
     return BotResponse(
         text=(
@@ -190,12 +201,12 @@ def _confirmation_deadline_response(*, invalid: bool = False) -> BotResponse:
         ),
         buttons=[
             Button(label=NEAREST_THURSDAY, value="admin:deadline:nearest-thursday"),
-            Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+            game_management_button(event_id),
         ],
     )
 
 
-def _confirmed_notification_prompt(event_name: str, *, invalid: str = "") -> BotResponse:
+def _confirmed_notification_prompt(event_name: str, event_id: str, *, invalid: str = "") -> BotResponse:
     prefix = f"{invalid}\n\n" if invalid else ""
     return BotResponse(
         text=(
@@ -203,7 +214,7 @@ def _confirmed_notification_prompt(event_name: str, *, invalid: str = "") -> Bot
             "Можно просто вставить ссылку-приглашение в чат Telegram или VK: бот сам добавит её "
             "и название игры в уведомление."
         ),
-        buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+        buttons=[game_management_button(event_id)],
     )
 
 
@@ -256,7 +267,7 @@ class ConversationEngine:
             or value in {ADMIN, ADMIN_MENU}
             or value in ADMIN_ACTIONS
             or value in LEGACY_STATUS_ACTIONS
-            or value.startswith(("select:admin-", "page:admin-"))
+            or value.startswith(("ag:", "select:admin-", "page:admin-", "page:a:"))
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
         if (
@@ -281,6 +292,9 @@ class ConversationEngine:
         elif value == ADMIN_MENU:
             await self._clear(user)
             response = await self._admin_menu(user)
+        elif value.startswith("ag:manage:"):
+            await self._clear(user)
+            response = await self._admin_game_action(user, message, value)
         elif user.dialog_state != "IDLE":
             response = await self._continue(user, message, value)
         else:
@@ -333,6 +347,8 @@ class ConversationEngine:
             return await self._select_event(user, message, value)
         if value.startswith("page:"):
             return await self._page(user, value)
+        if value.startswith("ag:"):
+            return await self._admin_game_action(user, message, value)
         admin_response = await self.dispatch_idle_admin(user, value)
         if admin_response is not None:
             return admin_response
@@ -582,6 +598,16 @@ class ConversationEngine:
         return f"page:{flow}:{micros}:{event.event_id}"
 
     async def _page(self, user: User, value: str) -> BotResponse:
+        if value.startswith("page:a:"):
+            parts = value.split(":", 4)
+            if len(parts) != 5 or parts[2] not in {"n", "p"} or not parts[3].isdigit():
+                return BotResponse(text="Некорректная страница.")
+            if not await self._has_admin_access(user):
+                return BotResponse(text="Недостаточно прав.")
+            cursor = (datetime.fromtimestamp(int(parts[3]) / 1_000_000, UTC), parts[4])
+            if parts[2] == "p":
+                return await self._show_admin_games(before=cursor)
+            return await self._show_admin_games(after=cursor)
         parts = value.split(":", 3)
         if len(parts) != 4 or not parts[2].isdigit():
             return BotResponse(text="Некорректная страница.")
@@ -602,9 +628,9 @@ class ConversationEngine:
         if flow in event_flow_statuses:
             return await self._show_events(flow, event_flow_statuses[flow], after=after)
         if flow == "admin-list":
-            return await self._admin_list(after)
+            return await self._show_admin_games()
         if flow == "admin-pass-list":
-            return await self._admin_pass_list(after)
+            return await self._show_admin_games()
         return await self._show_registered(user, flow, after=after)
 
     async def _show_registered(
@@ -888,18 +914,11 @@ class ConversationEngine:
             return BotResponse(text="Недостаточно прав.")
         labels = [
             "➕ Создать игру",
-            CHANGE_STATUS,
-            SEND_CONFIRMATION_REMINDER,
-            SEND_CONFIRMED_NOTIFICATION,
-            CREATE_PASS_TABLE,
-            ADD_EVENT_LEADER,
-            LIST_PASS_TABLES,
-            ARCHIVE_GAME,
-            "📋 Список игр",
+            MANAGE_GAMES,
             BACK,
         ]
         if await self._is_admin(user):
-            labels.insert(-2, GRANT_GAMEMASTER)
+            labels.insert(-1, GRANT_GAMEMASTER)
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
     @staticmethod
@@ -995,14 +1014,17 @@ class ConversationEngine:
             }
             target_platform = platforms.get(value)
             if target_platform is None:
-                return self._event_leader_platform_prompt()
+                return self._event_leader_platform_prompt(str(user.dialog_context["event_id"]))
             user.dialog_state = "ADMIN_EVENT_LEADER_PROFILE"
             user.dialog_context["gamemaster_platform"] = target_platform.value
             if target_platform is Platform.TELEGRAM:
                 prompt = "Отправьте ссылку на профиль Telegram или @username гейммастера:"
             else:
                 prompt = "Отправьте ссылку на профиль VK гейммастера:"
-            return BotResponse(text=prompt, buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)])
+            return BotResponse(
+                text=prompt,
+                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+            )
         if user.dialog_state == "ADMIN_EVENT_LEADER_PROFILE":
             return await self._add_event_leader(user, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
@@ -1012,10 +1034,10 @@ class ConversationEngine:
             return BotResponse(
                 text=(
                     f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
-                    f"{event_table_links(event)}\n\n"
                     f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
                     "но пока не могут подтверждать участие."
-                )
+                ),
+                buttons=[game_management_button(event.event_id)],
             )
         if user.dialog_state == "ADMIN_STATUS_SELECT":
             choice = ADMIN_STATUS_CHOICES.get(value)
@@ -1023,11 +1045,12 @@ class ConversationEngine:
                 return _admin_status_response(
                     str(user.dialog_context["event_name"]),
                     EventStatus(str(user.dialog_context["event_status"])),
+                    str(user.dialog_context["event_id"]),
                 )
             status_label, operation = choice
             if operation is Operation.OPEN_CONFIRMATION:
                 user.dialog_state = "ADMIN_CONFIRMATION_DEADLINE"
-                return _confirmation_deadline_response()
+                return _confirmation_deadline_response(str(user.dialog_context["event_id"]))
             context = user.dialog_context.copy()
             await self._clear(user)
             await self.registrations.enqueue(
@@ -1038,11 +1061,16 @@ class ConversationEngine:
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
                     text_success=f"Статус игры «{context['event_name']}» изменён: {status_label}.",
-                    buttons=[admin_menu_button()],
+                    buttons=[game_management_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{operation.value}",
             )
-            return BotResponse(text="⏳ Изменение Статуса принято в обработку.", deferred=True, command_enqueued=True)
+            return BotResponse(
+                text="⏳ Изменение Статуса принято в обработку.",
+                buttons=[game_management_button(str(context["event_id"]))],
+                deferred=True,
+                command_enqueued=True,
+            )
         if user.dialog_state == "ADMIN_CONFIRMATION_DEADLINE":
             if value == "admin:deadline:nearest-thursday":
                 deadline = closest_thursday_19()
@@ -1050,7 +1078,7 @@ class ConversationEngine:
                 try:
                     deadline = parse_confirmation_deadline(value)
                 except ValueError:
-                    return _confirmation_deadline_response(invalid=True)
+                    return _confirmation_deadline_response(str(user.dialog_context["event_id"]), invalid=True)
             context = user.dialog_context.copy()
             await self._clear(user)
             await self.registrations.enqueue(
@@ -1061,7 +1089,7 @@ class ConversationEngine:
                 payload=ConfirmationDeadlinePayload(deadline=deadline),
                 reply_context=ReplyContext(
                     text_success=f"Статус игры «{context['event_name']}» изменён: {STATUS_CONFIRMATION}.",
-                    buttons=[admin_menu_button()],
+                    buttons=[game_management_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.OPEN_CONFIRMATION.value}",
             )
@@ -1070,21 +1098,27 @@ class ConversationEngine:
                     "⏳ Открытие подтверждения принято в обработку.\n\n"
                     f"Дедлайн: {format_confirmation_deadline(deadline)}"
                 ),
+                buttons=[game_management_button(str(context["event_id"]))],
                 deferred=True,
                 command_enqueued=True,
             )
         if user.dialog_state == "ADMIN_NOTIFICATION_TEXT":
             event_name = str(user.dialog_context["event_name"])
+            event_id = str(user.dialog_context["event_id"])
             if message.callback is not None:
                 return _confirmed_notification_prompt(
                     event_name,
+                    event_id,
                     invalid="Отправьте уведомление обычным текстовым сообщением.",
                 )
             if not value:
-                return _confirmed_notification_prompt(event_name, invalid="Текст уведомления не может быть пустым.")
+                return _confirmed_notification_prompt(
+                    event_name, event_id, invalid="Текст уведомления не может быть пустым."
+                )
             if len(value) > 4000:
                 return _confirmed_notification_prompt(
                     event_name,
+                    event_id,
                     invalid="Текст уведомления не должен превышать 4000 символов.",
                 )
             context = user.dialog_context.copy()
@@ -1095,22 +1129,26 @@ class ConversationEngine:
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
                 payload=NotificationPayload(text=value),
-                reply_context=ReplyContext(),
+                reply_context=ReplyContext(buttons=[game_management_button(str(context["event_id"]))]),
                 idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMED_NOTIFICATION.value}",
             )
             return BotResponse(
                 text="⏳ Уведомление принято в обработку.",
+                buttons=[game_management_button(str(context["event_id"]))],
                 deferred=True,
                 command_enqueued=True,
             )
         if user.dialog_state in {"ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"}:
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
-                return BotResponse(text=f"Название не совпало. Введите точно:\n\n{expected}")
+                return BotResponse(
+                    text=f"Название не совпало. Введите точно:\n\n{expected}",
+                    buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+                )
             event_id = str(user.dialog_context["event_id"])
             await self._clear(user)
             await self.registrations.enqueue(
-                operation=Operation.CLOSE_EVENT,
+                operation=Operation.ARCHIVE_EVENT,
                 event_id=event_id,
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
@@ -1119,11 +1157,16 @@ class ConversationEngine:
                     text_success=(
                         f"📦 Игра «{expected}» архивирована. Игра, записи и XLSX-таблицы сохранены в постоянном списке."
                     ),
-                    buttons=[admin_menu_button()],
+                    buttons=[Button(label=BACK, value=MANAGE_GAMES)],
                 ),
                 idempotency_key=f"{message.update_id}:ARCHIVE_EVENT",
             )
-            return BotResponse(text="⏳ Архивация принята в обработку.", deferred=True, command_enqueued=True)
+            return BotResponse(
+                text="⏳ Архивация принята в обработку.",
+                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                deferred=True,
+                command_enqueued=True,
+            )
         await self._clear(user)
         return BotResponse(text="Административный диалог сброшен.")
 
@@ -1197,13 +1240,13 @@ class ConversationEngine:
         return BotResponse(text=f"✅ Пользователь назначен гейммастером в {platform_name}.")
 
     @staticmethod
-    def _event_leader_platform_prompt() -> BotResponse:
+    def _event_leader_platform_prompt(event_id: str) -> BotResponse:
         return BotResponse(
             text="Выберите бот, которым пользуется добавляемый гейммастер:",
             buttons=[
                 Button(label="Telegram", value="admin:event-leader:telegram"),
                 Button(label="VK", value="admin:event-leader:vk"),
-                Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                game_management_button(event_id),
             ],
         )
 
@@ -1223,7 +1266,7 @@ class ConversationEngine:
         except ValueError as exc:
             return BotResponse(
                 text=f"❌ {exc}. Попробуйте ещё раз:",
-                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
             )
         if target is None:
             platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
@@ -1232,12 +1275,12 @@ class ConversationEngine:
                     f"Пользователь {platform_name} не найден. Убедитесь, что он уже написал этому боту "
                     "и полностью заполнил профиль, затем попробуйте ещё раз."
                 ),
-                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
             )
         if not target.profile_complete:
             return BotResponse(
                 text="Профиль этого пользователя заполнен не полностью. Попросите его завершить профиль и повторите.",
-                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
             )
 
         event_id = str(user.dialog_context["event_id"])
@@ -1245,18 +1288,193 @@ class ConversationEngine:
         identity = BotIdentity(platform=target_platform, platform_user_id=user_id(target))
         if identity in await self.events.list_leaders(event_id):
             await self._clear(user)
-            return BotResponse(text=f"Этот пользователь уже является ведущим игры «{event_name}».")
+            return BotResponse(
+                text=f"Этот пользователь уже является ведущим игры «{event_name}».",
+                buttons=[game_management_button(event_id)],
+            )
         if not target.is_gamemaster and not await self.admins.is_gamemaster(target_platform, identity.platform_user_id):
             return BotResponse(
                 text="Добавить ведущим можно только гейммастера.",
-                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[game_management_button(event_id)],
             )
 
         await self.events.add_leader(event_id, identity)
         if identity not in await self.events.list_leaders(event_id):
             raise RuntimeError("event leader grant was not persisted")
         await self._clear(user)
-        return BotResponse(text=f"✅ Гейммастер добавлен ведущим игры «{event_name}».")
+        return BotResponse(
+            text=f"✅ Гейммастер добавлен ведущим игры «{event_name}».",
+            buttons=[game_management_button(event_id)],
+        )
+
+    @staticmethod
+    def _admin_game_cursor(direction: str, event: Event) -> str:
+        micros = int(event.created_at.timestamp() * 1_000_000)
+        return f"page:a:{direction}:{micros}:{event.event_id}"
+
+    async def _show_admin_games(
+        self,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+    ) -> BotResponse:
+        events = list(
+            await self.events.list_page(
+                after=after,
+                before=before,
+                archived=False,
+                limit=10,
+            )
+        )
+        if not events:
+            return BotResponse(
+                text="Неархивированных игр нет.",
+                buttons=[Button(label=BACK, value=ADMIN_MENU)],
+            )
+
+        first, last = events[0], events[-1]
+        previous, following = await asyncio.gather(
+            self.events.list_page(
+                before=(first.created_at, first.event_id),
+                archived=False,
+                limit=1,
+            ),
+            self.events.list_page(
+                after=(last.created_at, last.event_id),
+                archived=False,
+                limit=1,
+            ),
+        )
+        buttons = [Button(label=event.name, value=f"ag:manage:{event.event_id}") for event in events]
+        if previous:
+            buttons.append(Button(label="⬅️ Предыдущая", value=self._admin_game_cursor("p", first)))
+        if following:
+            buttons.append(Button(label="➡️ Следующая", value=self._admin_game_cursor("n", last)))
+        buttons.append(Button(label=BACK, value=ADMIN_MENU))
+        return BotResponse(text="Управление играми\n\nВыберите игру:", buttons=buttons)
+
+    async def _game_management(self, user: User, event: Event) -> BotResponse:
+        if event.archived_at is not None:
+            return BotResponse(
+                text=f"Игра «{event.name}» уже архивирована.",
+                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+            )
+        is_leader = await self._is_event_leader(user, event.event_id)
+        text = f"Управление игрой «{event.name}»\n\nСтатус: {EVENT_STATUS_LABELS[event.status]}"
+        if event.confirmation_deadline is not None:
+            text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
+        if not is_leader:
+            return BotResponse(
+                text=text + "\n\nАдминистративные действия доступны только ведущим этой игры.",
+                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+            )
+        actions = [
+            (CHANGE_STATUS, "status"),
+            (SEND_CONFIRMATION_REMINDER, "remind"),
+            (SEND_CONFIRMED_NOTIFICATION, "notify"),
+            (EVENT_TABLES, "tables"),
+            (ADD_EVENT_LEADER, "leader"),
+            (ARCHIVE_GAME, "archive"),
+        ]
+        buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
+        buttons.append(Button(label=BACK, value=MANAGE_GAMES))
+        return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
+
+    async def _admin_game_action(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        try:
+            _, action, event_id = value.split(":", 2)
+        except ValueError:
+            return BotResponse(text="Некорректное действие.")
+        if not await self._has_admin_access(user):
+            await self._clear(user)
+            return BotResponse(text="Недостаточно прав.")
+        event = await self.events.get(event_id)
+        if event is None:
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+        if action == "manage":
+            return await self._game_management(user, event)
+        if event.archived_at is not None:
+            return BotResponse(
+                text=f"Игра «{event.name}» уже архивирована.",
+                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+            )
+        denied = await self._event_leader_required(user, event.event_id)
+        if denied is not None:
+            denied.buttons = [Button(label=BACK, value=MANAGE_GAMES)]
+            return denied
+
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "event_status": event.status.value,
+        }
+        if action == "status":
+            user.dialog_state = "ADMIN_STATUS_SELECT"
+            return _admin_status_response(event.name, event.status, event.event_id)
+        if action == "remind":
+            await self._clear(user)
+            if event.status is not EventStatus.CONFIRMATION_OPEN:
+                return BotResponse(
+                    text=f"Подтверждение участия для игры «{event.name}» не открыто.",
+                    buttons=[game_management_button(event.event_id)],
+                )
+            if event.confirmation_deadline is None:
+                return BotResponse(
+                    text=(
+                        f"Для игры «{event.name}» не задан дедлайн. "
+                        "Снова откройте статус подтверждения и укажите дедлайн."
+                    ),
+                    buttons=[game_management_button(event.event_id)],
+                )
+            back = game_management_button(event.event_id)
+            await self.registrations.enqueue(
+                operation=Operation.SEND_CONFIRMATION_REMINDER,
+                event_id=event.event_id,
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=EmptyPayload(),
+                reply_context=ReplyContext(buttons=[back]),
+                idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMATION_REMINDER.value}",
+            )
+            return BotResponse(
+                text="⏳ Напоминание принято в обработку.",
+                buttons=[back],
+                deferred=True,
+                command_enqueued=True,
+            )
+        if action == "notify":
+            user.dialog_state = "ADMIN_NOTIFICATION_TEXT"
+            return _confirmed_notification_prompt(event.name, event.event_id)
+        if action == "tables":
+            await self._clear(user)
+            event = await self.administration.ensure_event_tables(event)
+            await self.administration.create_pass_table(event.event_id)
+            refreshed = await self.events.get(event.event_id)
+            if refreshed is None:
+                return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+            return BotResponse(
+                text=f"Таблицы игры «{event.name}»\n\n{event_table_links(refreshed)}",
+                buttons=[game_management_button(event.event_id)],
+            )
+        if action == "leader":
+            user.dialog_state = "ADMIN_EVENT_LEADER_PLATFORM"
+            return self._event_leader_platform_prompt(event.event_id)
+        if action == "archive":
+            user.dialog_state = "ADMIN_ARCHIVE_NAME"
+            return BotResponse(
+                text=(
+                    "Игра будет закрыта для новых регистраций и скрыта из управления. "
+                    "Таблицы регистрации и пропусков и все записи будут сохранены.\n\n"
+                    f"Для подтверждения введите точное название:\n\n{event.name}"
+                ),
+                buttons=[game_management_button(event.event_id)],
+            )
+        return await self._game_management(user, event)
 
     async def _admin_select(
         self,
@@ -1265,105 +1483,16 @@ class ConversationEngine:
         event: Event,
         flow: str,
     ) -> BotResponse:
-        if not await self._has_admin_access(user):
-            return BotResponse(text="Недостаточно прав.")
-        denied = await self._event_leader_required(user, event.event_id)
-        if denied is not None:
-            return denied
-        user.dialog_context = {
-            "event_id": event.event_id,
-            "event_name": event.name,
-            "event_status": event.status.value,
-        }
-        if flow == "admin-status":
-            user.dialog_state = "ADMIN_STATUS_SELECT"
-            return _admin_status_response(event.name, event.status)
-        if flow == "admin-reminder":
-            await self._clear(user)
-            if event.confirmation_deadline is None:
-                return BotResponse(
-                    text=(
-                        f"Для игры «{event.name}» не задан дедлайн. "
-                        "Снова откройте статус подтверждения и укажите дедлайн."
-                    )
-                )
-            await self.registrations.enqueue(
-                operation=Operation.SEND_CONFIRMATION_REMINDER,
-                event_id=event.event_id,
-                platform=message.identity.platform,
-                user_id=message.identity.platform_user_id,
-                payload=EmptyPayload(),
-                reply_context=ReplyContext(),
-                idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMATION_REMINDER.value}",
-            )
-            return BotResponse(text="⏳ Напоминание принято в обработку.", deferred=True, command_enqueued=True)
-        if flow == "admin-notification":
-            user.dialog_state = "ADMIN_NOTIFICATION_TEXT"
-            return _confirmed_notification_prompt(event.name)
-        if flow == "admin-pass-create":
-            await self._clear(user)
-            result = await self.administration.create_pass_table(event.event_id)
-            if result.created:
-                return BotResponse(
-                    text=(
-                        f"✅ Таблица пропусков для игры «{event.name}» создана.\n"
-                        f"Участников: {result.row_count}\n\n{result.public_url}"
-                    )
-                )
-            return BotResponse(text=f"Таблица пропусков для игры «{event.name}» уже создана.\n\n{result.public_url}")
-        if flow == "admin-leader-add":
-            user.dialog_state = "ADMIN_EVENT_LEADER_PLATFORM"
-            return self._event_leader_platform_prompt()
-        user.dialog_state = "ADMIN_ARCHIVE_NAME"
-        return BotResponse(
-            text=(
-                "Игра будет закрыта для новых регистраций и останется в постоянном списке. "
-                "Таблицы регистрации и пропусков и все записи будут сохранены.\n\n"
-                f"Для подтверждения введите точное название:\n\n{event.name}"
-            )
-        )
-
-    async def _admin_list(self, after: tuple[datetime, str] | None = None) -> BotResponse:
-        events = list(await self.events.list_page(after=after, limit=10))
-        if not events:
-            return BotResponse(text="Игр нет.", buttons=[Button(label=BACK, value=BACK)])
-        semaphore = asyncio.Semaphore(3)
-
-        async def ensure_tables(event: Event) -> Event:
-            async with semaphore:
-                await self._sync_admin_leaders(event.event_id)
-                return await self.administration.ensure_event_tables(event)
-
-        events = list(await asyncio.gather(*(ensure_tables(event) for event in events)))
-        lines = []
-        for event in events:
-            lines.append(
-                f"{event.name}\nСтатус: {EVENT_STATUS_LABELS[event.status]} · {event.created_at:%d.%m.%Y}\n"
-                f"{event_table_links(event)}"
-            )
-        buttons: list[Button] = []
-        if len(events) == 10:
-            last = events[-1]
-            more = await self.events.list_page(after=(last.created_at, last.event_id), limit=1)
-            if more:
-                buttons.append(Button(label="➡️ Далее", value=self._cursor("admin-list", last)))
-        buttons.append(Button(label=BACK, value=BACK))
-        return BotResponse(text="📋 Список игр\n\n" + "\n\n".join(lines), buttons=buttons)
-
-    async def _admin_pass_list(self, after: tuple[datetime, str] | None = None) -> BotResponse:
-        events = list(await self.events.list_pass_tables_page(after=after, limit=10))
-        if not events:
-            return BotResponse(text="Таблицы пропусков ещё не создавались.", buttons=[Button(label=BACK, value=BACK)])
-        await asyncio.gather(*(self._sync_admin_leaders(event.event_id) for event in events))
-        lines = [f"{event.name}\n{event.pass_table_public_url}" for event in events]
-        buttons: list[Button] = []
-        if len(events) == 10:
-            last = events[-1]
-            more = await self.events.list_pass_tables_page(after=(last.created_at, last.event_id), limit=1)
-            if more:
-                buttons.append(Button(label="➡️ Далее", value=self._cursor("admin-pass-list", last)))
-        buttons.append(Button(label=BACK, value=BACK))
-        return BotResponse(text="🔗 Таблицы пропусков\n\n" + "\n\n".join(lines), buttons=buttons)
+        action = {
+            "admin-status": "status",
+            "admin-reminder": "remind",
+            "admin-notification": "notify",
+            "admin-pass-create": "tables",
+            "admin-leader-add": "leader",
+            "admin-archive": "archive",
+            "admin-delete": "archive",
+        }.get(flow, "manage")
+        return await self._admin_game_action(user, message, f"ag:{action}:{event.event_id}")
 
     async def _admin_start(self, user: User, value: str) -> BotResponse:
         if not await self._has_admin_access(user):
@@ -1371,22 +1500,20 @@ class ConversationEngine:
         if value == "➕ Создать игру":
             user.dialog_state = "ADMIN_CREATE_NAME"
             return BotResponse(text="Введите название игры:")
-        if value == CHANGE_STATUS or value in LEGACY_STATUS_ACTIONS:
-            return await self._show_events("admin-status", None, empty_text="Игр нет.")
-        if value == SEND_CONFIRMATION_REMINDER:
-            return await self._show_events(
-                "admin-reminder",
-                frozenset({EventStatus.CONFIRMATION_OPEN}),
-                empty_text="Нет игр с открытым подтверждением.",
-            )
-        if value == SEND_CONFIRMED_NOTIFICATION:
-            return await self._show_events("admin-notification", None, empty_text="Игр нет.")
-        if value == CREATE_PASS_TABLE:
-            return await self._show_events("admin-pass-create", None, empty_text="Игр нет.")
-        if value == ADD_EVENT_LEADER:
-            return await self._show_events("admin-leader-add", None, empty_text="Игр нет.")
-        if value == LIST_PASS_TABLES:
-            return await self._admin_pass_list()
+        if value == MANAGE_GAMES or value in {
+            CHANGE_STATUS,
+            SEND_CONFIRMATION_REMINDER,
+            SEND_CONFIRMED_NOTIFICATION,
+            CREATE_PASS_TABLE,
+            LIST_PASS_TABLES,
+            EVENT_TABLES,
+            ADD_EVENT_LEADER,
+            ARCHIVE_GAME,
+            LEGACY_DELETE_GAME,
+            "📋 Список игр",
+            *LEGACY_STATUS_ACTIONS,
+        }:
+            return await self._show_admin_games()
         if value == GRANT_GAMEMASTER:
             if not await self._is_admin(user):
                 return BotResponse(text="Недостаточно прав.")
@@ -1400,10 +1527,6 @@ class ConversationEngine:
                     Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
                 ],
             )
-        if value in {ARCHIVE_GAME, LEGACY_DELETE_GAME}:
-            return await self._show_events("admin-archive", None, empty_text="Игр нет.")
-        if value == "📋 Список игр":
-            return await self._admin_list()
         return await self._admin_menu(user)
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.

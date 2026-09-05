@@ -82,6 +82,7 @@ class Operation(StrEnum):
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
     CLOSE_EVENT = "CLOSE_EVENT"
+    ARCHIVE_EVENT = "ARCHIVE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
 
 
@@ -292,6 +293,7 @@ class Event(StrictModel):
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
     ] = Field(default_factory=list)
     last_confirmed_notification_operation_id: str | None = None
+    archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -432,6 +434,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.OPEN_REGISTRATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.CLOSE_EVENT,
+            Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }
         if self.operation in empty_payload_operations and not isinstance(self.payload, EmptyPayload):

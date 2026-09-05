@@ -54,6 +54,7 @@ def command(
                 Operation.SEND_CONFIRMATION_REMINDER,
                 Operation.SEND_CONFIRMED_NOTIFICATION,
                 Operation.CLOSE_EVENT,
+                Operation.ARCHIVE_EVENT,
                 Operation.DELETE_EVENT,
             }
             else key
@@ -348,5 +349,27 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
     stored_registration = await tables.get(event.event_id, "a" * 43)
     assert result == "Игра архивирована; таблицы и записи сохранены"
     assert stored_event is not None and stored_event.status is EventStatus.CLOSED
+    assert stored_event.archived_at is not None
     assert stored_registration is not None and stored_registration.character_wish == "Doctor"
     assert event.disk_resource_path in disk_store.files
+
+
+@pytest.mark.asyncio
+async def test_archive_operation_is_distinct_from_closing_registration(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, MemoryRegistrationRepository(), showcase))
+
+    await mutations.apply(command(event, Operation.CLOSE_EVENT, EmptyPayload()))
+    closed = await events.get(event.event_id)
+    assert closed is not None and closed.archived_at is None
+
+    result = await mutations.apply(command(event, Operation.ARCHIVE_EVENT, EmptyPayload()))
+    archived = await events.get(event.event_id)
+    assert result == "Игра архивирована; таблицы и записи сохранены"
+    assert archived is not None and archived.archived_at is not None
+    with pytest.raises(OperationNotAllowed, match="архивирована"):
+        await mutations.apply(command(event, Operation.OPEN_REGISTRATION, EmptyPayload()))

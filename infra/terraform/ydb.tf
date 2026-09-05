@@ -164,6 +164,10 @@ resource "yandex_ydb_table" "events" {
     type = "Utf8"
   }
   column {
+    name = "archived_at"
+    type = "Timestamp"
+  }
+  column {
     name     = "created_at"
     type     = "Timestamp"
     not_null = true
