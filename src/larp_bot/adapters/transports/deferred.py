@@ -5,10 +5,11 @@ import json
 import time
 from collections.abc import Sequence
 from typing import cast
+from urllib.parse import urlsplit
 
 import httpx
 
-from larp_bot.domain.models import Button, Platform
+from larp_bot.domain.models import Button, Platform, normalize_vk_url
 from larp_bot.domain.security import sign_request
 
 
@@ -63,7 +64,7 @@ class CloudflareTelegramEgress:
 
 
 class VkApiTransport:
-    API = "https://api.vk.com/method/messages.send"
+    API_BASE = "https://api.vk.com/method"
     CHATBOT_FEATURE_DISABLED = 912
 
     def __init__(
@@ -76,8 +77,8 @@ class VkApiTransport:
         self.api_version = api_version
         self.client = client or httpx.AsyncClient(timeout=10.0)
 
-    async def _post(self, data: dict[str, str | int]) -> dict[str, object]:
-        response = await self.client.post(self.API, data=data)
+    async def _post(self, method: str, data: dict[str, str | int]) -> dict[str, object]:
+        response = await self.client.post(f"{self.API_BASE}/{method}", data=data)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -143,7 +144,7 @@ class VkApiTransport:
         }
         if keyboard is not None:
             data["keyboard"] = keyboard
-        payload = await self._post(data)
+        payload = await self._post("messages.send", data)
         error = self._api_error(payload)
         if error is not None and error[0] == self.CHATBOT_FEATURE_DISABLED and keyboard is not None:
             # Community message tokens can send text but cannot enable the VK
@@ -152,10 +153,35 @@ class VkApiTransport:
             # expose the exact callback values as text commands.
             data.pop("keyboard")
             data["message"] = self._text_keyboard(text, buttons)
-            payload = await self._post(data)
+            payload = await self._post("messages.send", data)
             error = self._api_error(payload)
         if error is not None:
             raise RuntimeError(f"VK API error code {error[0]}: {error[1]}")
+
+    async def resolve_user_id(self, profile: str) -> int | None:
+        normalized = normalize_vk_url(profile)
+        screen_name = urlsplit(normalized).path.strip("/")
+        if screen_name.startswith("id") and screen_name[2:].isdigit():
+            user_id = int(screen_name[2:])
+            return user_id if user_id > 0 else None
+        payload = await self._post(
+            "users.get",
+            {
+                "access_token": self.access_token,
+                "v": self.api_version,
+                "user_ids": screen_name,
+            },
+        )
+        error = self._api_error(payload)
+        if error is not None:
+            raise RuntimeError(f"VK API error code {error[0]}: {error[1]}")
+        response = payload.get("response")
+        if not isinstance(response, list) or len(response) != 1 or not isinstance(response[0], dict):
+            return None
+        resolved_id = response[0].get("id")
+        if not isinstance(resolved_id, int) or isinstance(resolved_id, bool) or resolved_id <= 0:
+            return None
+        return resolved_id
 
 
 class MultiplexedDeferredTransport:

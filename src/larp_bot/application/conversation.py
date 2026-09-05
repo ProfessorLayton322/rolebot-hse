@@ -25,6 +25,7 @@ from larp_bot.domain.models import (
     User,
     normalize_mobile_phone,
     normalize_telegram_handle,
+    normalize_telegram_profile,
     normalize_vk_url,
     validate_cyrillic_name,
     validate_latin_name,
@@ -38,7 +39,14 @@ from .deadlines import (
     parse_confirmation_deadline,
 )
 from .navigation import ADMIN_MENU, MAIN_MENU, admin_menu_button, main_menu_button
-from .ports import AdminConfigProvider, EventRepository, UserRepository, new_user
+from .ports import (
+    AdminConfigProvider,
+    DeferredTransport,
+    EventRepository,
+    UserRepository,
+    VkUserIdResolver,
+    new_user,
+)
 from .services import EventAdministrationService, RegistrationService
 
 PROFILE = "📝 Профиль"
@@ -58,11 +66,13 @@ SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтвержден�
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
+GRANT_GAMEMASTER = "🎖 Назначить гейммастера"
 ARCHIVE_GAME = "📦 Архивировать игру"
 LEGACY_DELETE_GAME = "🗑 Удалить игру"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
+GAMEMASTER_NOTIFICATION = "Вам было присуждено звание гейммастера! 🎉🎉🎉"
 
 REGISTRATION_OPEN_STATUSES = frozenset({EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN})
 EVENT_STATUS_LABELS = {
@@ -87,6 +97,7 @@ ADMIN_ACTIONS = frozenset(
         SEND_CONFIRMED_NOTIFICATION,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
+        GRANT_GAMEMASTER,
         ARCHIVE_GAME,
         LEGACY_DELETE_GAME,
         "📋 Список игр",
@@ -109,6 +120,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_NAME",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_TEXT",
+        "ADMIN_GAMEMASTER_PROFILE",
         "ADMIN_ARCHIVE_NAME",
         "ADMIN_DELETE_NAME",
     }
@@ -201,12 +213,16 @@ class ConversationEngine:
         registrations: RegistrationService,
         administration: EventAdministrationService,
         admins: AdminConfigProvider,
+        transport: DeferredTransport | None = None,
+        vk_user_ids: VkUserIdResolver | None = None,
     ) -> None:
         self.users = users
         self.events = events
         self.registrations = registrations
         self.administration = administration
         self.admins = admins
+        self.transport = transport
+        self.vk_user_ids = vk_user_ids
 
     async def _main(self, user: User, text: str = "Выберите действие:") -> BotResponse:
         return BotResponse(text=text, buttons=main_buttons(await self._has_admin_access(user)))
@@ -227,6 +243,8 @@ class ConversationEngine:
         user = await self.users.get(platform, uid) or new_user(platform, uid)
         if user.last_update_id == message.update_id:
             return BotResponse(text="", silent=True, deferred=platform is Platform.TELEGRAM)
+        if isinstance(user, TelegramUser):
+            user.telegram_handle = normalize_telegram_handle(message.telegram_username)
 
         value = (message.callback or message.text).strip()
         admin_branch = (
@@ -873,6 +891,7 @@ class ConversationEngine:
             BACK,
         ]
         if await self._is_admin(user):
+            labels.insert(-2, GRANT_GAMEMASTER)
             labels.insert(-2, ARCHIVE_GAME)
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
@@ -883,6 +902,8 @@ class ConversationEngine:
     async def _has_admin_access(self, user: User) -> bool:
         if await self._is_admin(user):
             return True
+        if user.is_gamemaster:
+            return True
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         return await self.admins.is_gamemaster(platform, user_id(user))
 
@@ -890,6 +911,33 @@ class ConversationEngine:
         if not await self._has_admin_access(user):
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
+        if user.dialog_state == "ADMIN_GAMEMASTER_PLATFORM":
+            if not await self._is_admin(user):
+                await self._clear(user)
+                return BotResponse(text="Недостаточно прав.")
+            platforms = {
+                "admin:gamemaster:telegram": Platform.TELEGRAM,
+                "admin:gamemaster:vk": Platform.VK,
+            }
+            target_platform = platforms.get(value)
+            if target_platform is None:
+                return BotResponse(
+                    text="Выберите бот, которым пользуется новый гейммастер:",
+                    buttons=[
+                        Button(label="Telegram", value="admin:gamemaster:telegram"),
+                        Button(label="VK", value="admin:gamemaster:vk"),
+                        Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                    ],
+                )
+            user.dialog_state = "ADMIN_GAMEMASTER_PROFILE"
+            user.dialog_context = {"gamemaster_platform": target_platform.value}
+            if target_platform is Platform.TELEGRAM:
+                prompt = "Отправьте ссылку на профиль Telegram или @username будущего гейммастера:"
+            else:
+                prompt = "Отправьте ссылку на профиль VK будущего гейммастера:"
+            return BotResponse(text=prompt, buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)])
+        if user.dialog_state == "ADMIN_GAMEMASTER_PROFILE":
+            return await self._grant_gamemaster(user, message, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
             event = await self.administration.create_event(value)
             await self._clear(user)
@@ -1014,6 +1062,75 @@ class ConversationEngine:
         await self._clear(user)
         return BotResponse(text="Административный диалог сброшен.")
 
+    async def _grant_gamemaster(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        if not await self._is_admin(user):
+            await self._clear(user)
+            return BotResponse(text="Недостаточно прав.")
+        target_platform = Platform(str(user.dialog_context["gamemaster_platform"]))
+        target: User | None
+        try:
+            if target_platform is Platform.TELEGRAM:
+                handle = normalize_telegram_profile(value)
+                target = await self.users.find_telegram_by_handle(handle)
+            else:
+                normalized = normalize_vk_url(value)
+                if self.vk_user_ids is None:
+                    raise RuntimeError("VK user ID resolver is not configured")
+                target_id = await self.vk_user_ids.resolve_user_id(normalized)
+                target = None if target_id is None else await self.users.get(Platform.VK, target_id)
+        except ValueError as exc:
+            return BotResponse(
+                text=f"❌ {exc}. Попробуйте ещё раз:", buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)]
+            )
+        if target is None:
+            platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
+            return BotResponse(
+                text=(
+                    f"Пользователь {platform_name} не найден. Убедитесь, что он уже написал этому боту "
+                    "и полностью заполнил профиль, затем попробуйте ещё раз."
+                ),
+                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            )
+        if not target.profile_complete:
+            return BotResponse(
+                text="Профиль этого пользователя заполнен не полностью. Попросите его завершить профиль и повторите.",
+                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            )
+        target_id = user_id(target)
+        request_id = f"gamemaster-grant:{target_platform.value}:{target_id}:{message.update_id}"
+        configured_gamemaster = await self.admins.is_gamemaster(target_platform, target_id)
+        if configured_gamemaster or (target.is_gamemaster and target.gamemaster_grant_operation_id != request_id):
+            await self._clear(user)
+            return BotResponse(text="Этот пользователь уже является гейммастером.")
+
+        if not target.is_gamemaster:
+            await self.users.grant_gamemaster(target_platform, target_id, request_id)
+            refreshed = await self.users.get(target_platform, target_id)
+            if refreshed is None or not refreshed.is_gamemaster:
+                raise RuntimeError("gamemaster grant was not persisted")
+            target = refreshed
+        if target.gamemaster_grant_operation_id != request_id:
+            await self._clear(user)
+            return BotResponse(text="Этот пользователь уже является гейммастером.")
+        if target.last_delivery_operation_id != request_id:
+            if self.transport is None:
+                raise RuntimeError("deferred transport is not configured")
+            await self.transport.send(
+                platform=target_platform,
+                user_id=target_id,
+                request_id=request_id,
+                text=GAMEMASTER_NOTIFICATION,
+            )
+            await self.users.claim_delivery(target_platform, target_id, request_id)
+
+        if message.identity.platform is target_platform and message.identity.platform_user_id == target_id:
+            user.is_gamemaster = True
+            user.gamemaster_grant_operation_id = request_id
+            user.last_delivery_operation_id = request_id
+        await self._clear(user)
+        platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
+        return BotResponse(text=f"✅ Пользователь назначен гейммастером в {platform_name}.")
+
     async def _admin_select(
         self,
         user: User,
@@ -1135,6 +1252,19 @@ class ConversationEngine:
             return await self._show_events("admin-pass-create", None, empty_text="Игр нет.")
         if value == LIST_PASS_TABLES:
             return await self._admin_pass_list()
+        if value == GRANT_GAMEMASTER:
+            if not await self._is_admin(user):
+                return BotResponse(text="Недостаточно прав.")
+            user.dialog_state = "ADMIN_GAMEMASTER_PLATFORM"
+            user.dialog_context = {}
+            return BotResponse(
+                text="Выберите бот, которым пользуется новый гейммастер:",
+                buttons=[
+                    Button(label="Telegram", value="admin:gamemaster:telegram"),
+                    Button(label="VK", value="admin:gamemaster:vk"),
+                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                ],
+            )
         if value in {ARCHIVE_GAME, LEGACY_DELETE_GAME}:
             if not await self._is_admin(user):
                 return BotResponse(text="Недостаточно прав.")

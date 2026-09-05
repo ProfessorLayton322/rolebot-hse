@@ -95,8 +95,8 @@ Terraform declares exactly these application tables:
 
 | Table | Primary key | Purpose |
 |---|---|---|
-| `tg_users` | `tg_id` | Telegram profile, mandatory VK URL, FSM context, update/delivery metadata |
-| `vk_users` | `vk_id` | VK profile, optional Telegram handle, FSM context, update/delivery metadata |
+| `tg_users` | `tg_id` | Telegram profile, current Telegram handle, mandatory VK URL, YDB game-master membership, FSM/update metadata |
+| `vk_users` | `vk_id` | VK profile, optional Telegram handle, YDB game-master membership, FSM/update metadata |
 | `events` | `event_id` | Name, stable master/public registration and optional pass-table Disk paths/URLs, status, confirmation deadline, migration timestamp |
 | `registrations` | `(event_id, participant_key)` | Authoritative per-game registration, public profile projection, attendance, operation metadata |
 
@@ -436,9 +436,11 @@ Use the Terraform `vk_callback_url`, numeric `VK_GROUP_ID`, matching `VK_CALLBAC
 
 ## Admin management
 
-Update the public GitHub Actions repository variables `TG_ADMIN_IDS`, `VK_ADMIN_IDS`, `TG_GAMEMASTER_IDS`, or `VK_GAMEMASTER_IDS` and rerun `deploy.yml`. Values must be JSON arrays of stable numeric platform IDs—not usernames. Empty gamemaster lists are represented as `[]`. Resolve a VK vanity URL such as `vk.ru/foobar` to its numeric user ID first; aliases can change, while numeric IDs are stable. The workflow replaces the Worker bindings and warm Functions refresh within 60 seconds.
+Admin IDs remain exclusively in the public GitHub Actions repository variables `TG_ADMIN_IDS` and `VK_ADMIN_IDS`; they are not stored in YDB. The existing `TG_GAMEMASTER_IDS` and `VK_GAMEMASTER_IDS` variables also remain supported as deployment-configured game-master lists. Values in all four variables are JSON arrays of stable numeric platform IDs, and empty game-master variables are represented as `[]`. Changing a variable requires rerunning `deploy.yml`; the workflow replaces the Worker bindings and warm Functions refresh within 60 seconds.
 
-Every privileged request rechecks the latest role sets. Gamemasters receive the same administrative interface and functions as admins except that they cannot see or invoke game archival, including through stale buttons. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Archival requires the exact case-sensitive game name after trimming outer whitespace and remains admin-only. Admin listing is oldest-first with exactly ten entries per page.
+Admins can additionally choose `🎖 Назначить гейммастера` in either bot, select the target bot, and provide the target's profile. Telegram accepts `@username` or a public `t.me`/`telegram.me` profile URL. VK accepts an `https://vk.com` or `https://vk.ru` profile URL and resolves vanity names to the stable numeric VK ID. The target must already have messaged the selected bot and completed that bot's profile. Telegram users created before this feature must message the bot once so their current username is recorded before an admin can find them. Successful grants set `is_gamemaster` on the target row in `tg_users` or `vk_users`; the two sets of flagged numeric primary keys are the persistent YDB game-master lists and are combined with the corresponding environment list during authorization. No fifth application table is created. The new game master receives `Вам было присуждено звание гейммастера! 🎉🎉🎉` through the selected bot.
+
+Every privileged request rechecks both the latest environment role sets and the user's YDB role. Gamemasters receive the same administrative interface and functions as admins except that they cannot appoint other game masters or see/invoke game archival, including through stale buttons. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Archival requires the exact case-sensitive game name after trimming outer whitespace and remains admin-only. Admin listing is oldest-first with exactly ten entries per page.
 
 ## Secret rotation
 

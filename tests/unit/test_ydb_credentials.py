@@ -172,6 +172,74 @@ async def test_user_repository_serializes_the_last_bot_keyboard() -> None:
     assert params["$last_bot_buttons"] == '[{"label":"Visible","value":"callback:value"}]'
 
 
+@pytest.mark.asyncio
+async def test_user_repository_persists_telegram_identity_without_overwriting_role() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+    user = TelegramUser(
+        tg_id=42,
+        telegram_handle="@Game_Master",
+        is_gamemaster=True,
+        gamemaster_grant_operation_id="grant-1",
+    )
+
+    await YdbUserRepository(executor).save(user)
+
+    query, params = executor.query.await_args.args
+    assert "telegram_handle" in query
+    assert params["$telegram_handle"] == "@game_master"
+    assert "is_gamemaster" not in query
+    assert "$is_gamemaster" not in params
+
+
+@pytest.mark.asyncio
+async def test_user_repository_finds_telegram_user_by_own_handle() -> None:
+    timestamp = datetime(2026, 9, 5, tzinfo=UTC)
+    executor = SimpleNamespace(
+        query=AsyncMock(
+            return_value=[
+                {
+                    "tg_id": 42,
+                    "vk_url": "https://vk.com/player",
+                    "telegram_handle": "@player_name",
+                    "full_name": "Иванов Иван",
+                    "crossplay": True,
+                    "larp_experience": False,
+                    "needs_pass": False,
+                    "pass_details_json": None,
+                    "dialog_state": "IDLE",
+                    "dialog_context_json": "{}",
+                    "last_update_id": None,
+                    "last_update_at": None,
+                    "last_delivery_operation_id": None,
+                    "last_bot_buttons_json": None,
+                    "is_gamemaster": True,
+                    "gamemaster_grant_operation_id": "grant-1",
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                }
+            ]
+        )
+    )
+
+    user = await YdbUserRepository(executor).find_telegram_by_handle("@player_name")
+
+    assert user is not None and user.tg_id == 42 and user.profile_complete
+    assert user.is_gamemaster and user.gamemaster_grant_operation_id == "grant-1"
+    assert executor.query.await_args.args[1] == {"$handle": "@player_name"}
+
+
+@pytest.mark.asyncio
+async def test_user_repository_grants_gamemaster_in_selected_platform_table() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+
+    await YdbUserRepository(executor).grant_gamemaster(Platform.VK, 84, "grant-1")
+
+    query, params = executor.query.await_args.args
+    assert "UPDATE `vk_users`" in query
+    assert "SET is_gamemaster = TRUE" in query
+    assert params == {"$user_id": 84, "$operation_id": "grant-1"}
+
+
 def test_legacy_pass_json_makes_profile_incomplete_until_refilled() -> None:
     assert (
         _optional_pass(

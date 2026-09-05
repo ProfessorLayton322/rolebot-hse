@@ -96,7 +96,15 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         users,
         secrets["PARTICIPANT_KEY_HMAC_SECRET"],
     )
-    conversation = ConversationEngine(users, events, registration_service, administration, config)
+    conversation = ConversationEngine(
+        users,
+        events,
+        registration_service,
+        administration,
+        config,
+        transport=transport,
+        vk_user_ids=vk,
+    )
     mutations = OrderedMutationService(events, catalog, users, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
     notifications = ConfirmationNotificationService(
         events,

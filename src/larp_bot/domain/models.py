@@ -166,10 +166,43 @@ def normalize_vk_url(value: str) -> str:
 def normalize_telegram_handle(value: str | None) -> str | None:
     if value is None or value.strip() in {"", "-", "Пропустить"}:
         return None
-    candidate = value.strip().removeprefix("@")
+    candidate = value.strip().removeprefix("@").casefold()
     if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", candidate):
         raise ValueError("Некорректный Telegram username")
     return f"@{candidate}"
+
+
+_TELEGRAM_PROFILE_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
+
+
+def normalize_telegram_profile(value: str) -> str:
+    """Normalize an admin-supplied Telegram @handle or public profile URL."""
+
+    from urllib.parse import urlsplit
+
+    candidate = value.strip()
+    if candidate.startswith("@"):
+        handle = normalize_telegram_handle(candidate)
+        assert handle is not None
+        return handle
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _TELEGRAM_PROFILE_HOSTS
+        or parsed.port is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Нужна ссылка t.me или @username")
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if len(path_parts) != 1:
+        raise ValueError("Некорректная ссылка на профиль Telegram")
+    handle = normalize_telegram_handle(path_parts[0])
+    if handle is None:
+        raise ValueError("Некорректная ссылка на профиль Telegram")
+    return handle
 
 
 class UserBase(StrictModel):
@@ -184,6 +217,8 @@ class UserBase(StrictModel):
     last_update_at: datetime | None = None
     last_delivery_operation_id: str | None = None
     last_bot_buttons: list[Button] = Field(default_factory=list)
+    is_gamemaster: bool = False
+    gamemaster_grant_operation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -207,11 +242,17 @@ class UserBase(StrictModel):
 class TelegramUser(UserBase):
     tg_id: int = Field(gt=0)
     vk_url: str | None = None
+    telegram_handle: str | None = None
 
     @field_validator("vk_url")
     @classmethod
     def validate_vk_url(cls, value: str | None) -> str | None:
         return None if value is None else normalize_vk_url(value)
+
+    @field_validator("telegram_handle")
+    @classmethod
+    def validate_handle(cls, value: str | None) -> str | None:
+        return normalize_telegram_handle(value)
 
     @property
     def profile_complete(self) -> bool:
