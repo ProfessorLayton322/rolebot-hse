@@ -1,6 +1,6 @@
 # LARP registration bot
 
-Production-oriented Telegram and VK community bots for LARP profile collection, per-game registration, attendance confirmation, and administration. Both gateways use one Python domain/application layer. Profiles, events, and registrations live in four YDB tables; each game owns a restricted master XLSX and a contact-free public XLSX on Yandex Disk and may own one pass table.
+Production-oriented Telegram and VK community bots for LARP profile collection, per-game registration, attendance confirmation, and administration. Both gateways use one Python domain/application layer. Profiles, events, registrations, and per-event leaders live in five YDB tables; each game owns a restricted master XLSX and a contact-free public XLSX on Yandex Disk and may own one pass table.
 
 The default user-facing language is Russian. Python 3.12 is required.
 
@@ -46,22 +46,22 @@ The old `main.py` was a 286-line Telegram polling script with an in-memory aiogr
 
 There is deliberately no `character_wish` field on `TelegramUser`, `VkUser`, `tg_users`, or `vk_users`. Pydantic rejects unknown fields, and a contract test prevents this field from being reintroduced.
 
-Every game has exactly three states. Admins may move a game freely between them:
+Every game has exactly three states. Its leaders may move it freely between them:
 
 ```mermaid
 stateDiagram-v2
     [*] --> CREATED: game created / signup available
-    CREATED --> CONFIRMATION_OPEN: admin opens confirmation
-    CREATED --> CLOSED: admin closes registration
-    CONFIRMATION_OPEN --> CREATED: admin returns to signup only
-    CONFIRMATION_OPEN --> CLOSED: admin closes registration
-    CLOSED --> CREATED: admin reopens signup only
-    CLOSED --> CONFIRMATION_OPEN: admin reopens signup and confirmation
+    CREATED --> CONFIRMATION_OPEN: leader opens confirmation
+    CREATED --> CLOSED: leader closes registration
+    CONFIRMATION_OPEN --> CREATED: leader returns to signup only
+    CONFIRMATION_OPEN --> CLOSED: leader closes registration
+    CLOSED --> CREATED: leader reopens signup only
+    CLOSED --> CONFIRMATION_OPEN: leader reopens signup and confirmation
 ```
 
 The admin interface names these states `Регистрация`, `Подтверждение`, and `Закрытие регистрации`. Players may enlist in `CREATED` (`Регистрация`) and `CONFIRMATION_OPEN` (`Подтверждение`). They may confirm attendance only in `CONFIRMATION_OPEN`; `CLOSED` (`Закрытие регистрации`) accepts neither enlistment nor confirmation. Existing persisted `OPEN` events are interpreted as `CONFIRMATION_OPEN` during the rollout.
 
-Opening confirmation requires a Moscow-time deadline in `DD.MM.YY HH:MM` format; the admin may instead choose the nearest Thursday at 19:00, including the current day. The ordered worker stores the deadline and notifies registrations still in `Ожидается`. These notifications contain one `✅ Подтвердить участие` button that opens the confirmation dialogue for that game directly. Admins can send the same audience a separate reminder from the administration menu. They can also select any game and send arbitrary text to registrations currently in `Подтверждено`. Every such confirmed-player notification is retained on the event in YDB, and each player receives the full prior history immediately after confirming. A notification containing only a Telegram or VK chat link is stored as the plain link and expanded with the game name and an invitation to join that chat only when delivered. No per-player notification status is stored. No timer or cron closes confirmation: every later status change remains an explicit admin action.
+Opening confirmation requires a Moscow-time deadline in `DD.MM.YY HH:MM` format; a leader may instead choose the nearest Thursday at 19:00, including the current day. The ordered worker stores the deadline and notifies registrations still in `Ожидается`. These notifications contain one `✅ Подтвердить участие` button that opens the confirmation dialogue for that game directly. Leaders can send the same audience a separate reminder from the administration menu. They can also select their game and send arbitrary text to registrations currently in `Подтверждено`. Every such confirmed-player notification is retained on the event in YDB, and each player receives the full prior history immediately after confirming. A notification containing only a Telegram or VK chat link is stored as the plain link and expanded with the game name and an invitation to join that chat only when delivered. No per-player notification status is stored. No timer or cron closes confirmation: every later status change remains an explicit leader action.
 
 ```mermaid
 stateDiagram-v2
@@ -98,9 +98,10 @@ Terraform declares exactly these application tables:
 | `tg_users` | `tg_id` | Telegram profile, current Telegram handle, mandatory VK URL, YDB game-master membership, FSM/update metadata |
 | `vk_users` | `vk_id` | VK profile, optional Telegram handle, YDB game-master membership, FSM/update metadata |
 | `events` | `event_id` | Name, stable master/public registration and optional pass-table Disk paths/URLs, status, confirmation deadline, confirmed-player notification history, migration timestamp |
+| `event_leaders` | `(event_id, platform, platform_user_id)` | Per-game privileged-user leadership membership |
 | `registrations` | `(event_id, participant_key)` | Authoritative per-game registration, public profile projection, attendance, operation metadata |
 
-The composite registration key makes exact participant lookups constant-cost and keeps every game's rows contiguous for an efficient showcase rebuild. No secondary index or duplicated participant array is maintained. Profile/FSM writes use parameterized YQL and serializable read/write semantics. Event pages are keyset-ordered by `(created_at, event_id)` and never load the complete history just to paginate.
+The composite registration key makes exact participant lookups constant-cost and keeps every game's rows contiguous for an efficient showcase rebuild. The composite leader key makes repeated grants idempotent and keeps authorization platform-specific. No secondary index or duplicated participant array is maintained. Profile/FSM writes use parameterized YQL and serializable read/write semantics. Event pages are keyset-ordered by `(created_at, event_id)` and never load the complete history just to paginate.
 
 ### XLSX
 
@@ -179,7 +180,7 @@ bounded ordered FIFO drainer
 
 Do not attach the trigger directly to FIFO unless Yandex officially adds support and this architecture is deliberately migrated. The kick has no business-ordering role. The publisher first makes the FIFO command durable, then emits a kick. If kick publishing fails, the platform retry uses the same operation ID: FIFO deduplicates the command while the retry emits another kick.
 
-YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Participant notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys. Confirmation-open and reminder messages select only `Ожидается` registrations; arbitrary admin broadcasts are appended to the event's plain notification list and sent to registrations currently in `Подтверждено`. A later confirmation replays that entire list to the newly confirmed participant without maintaining a per-notification delivery ledger. All admin status changes, reminders, broadcasts, and archival share the same per-event FIFO group as participant mutations. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
+YDB or showcase-upload failures leave the FIFO message undeleted. A YDB mutation is authoritative even if showcase generation or bot delivery fails; retrying the same operation ID regenerates the showcase without logically reapplying the mutation. The delivery marker is written only after the transport accepts the response. Participant notifications resolve private Telegram/VK recipients by comparing the existing per-event HMAC participant keys. Confirmation-open and reminder messages select only `Ожидается` registrations; arbitrary leader broadcasts are appended to the event's plain notification list and sent to registrations currently in `Подтверждено`. A later confirmation replays that entire list to the newly confirmed participant without maintaining a per-notification delivery ledger. All leader status changes, reminders, broadcasts, and archival share the same per-event FIFO group as participant mutations. The worker rechecks the command author's current YDB event-leader membership before applying any of them. Worker-time YDB state—not an earlier button or XLSX content—is authoritative.
 
 ## Telegram transport
 
@@ -230,6 +231,8 @@ VK Callback API posts directly through API Gateway/SWS to the same gateway Funct
 - Every Telegram Cloudflare→Yandex request and Yandex→Cloudflare egress request uses HMAC-SHA256 with timestamp freshness and body integrity.
 - Runtime Functions exchange their platform-provided IAM credentials for one-hour Yandex OIDC ID tokens. The egress Worker verifies the Yandex signature, exact audience, expiry, and an allowlist containing only the gateway and ordered-worker service accounts before returning runtime configuration.
 - Admin IDs are JSON numeric arrays in the Worker configuration, cached no longer than 60 seconds. Every privileged action rechecks authorization.
+- Admins and game masters are privileged users. Every configured admin is automatically attached to every event as a leader; a game master is attached only when creating that game or being added by one of its leaders.
+- Only event leaders can change status, send participant notifications, create a pass table, add another game master as a leader, or archive that event. All privileged users can create games and view game and pass-table listings.
 - Event IDs and participant state are reloaded server-side; callback values are never trusted as authorization.
 - Profile/pass data stays in private YDB and structured logs omit request bodies, email, legal names, and credentials.
 - Smart Web Security in API mode and Advanced Rate Limiter enforce a configurable global 25 requests/second. It is intentionally not grouped by Cloudflare source IP.
@@ -346,8 +349,8 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
-| `TG_GAMEMASTER_IDS` | Public JSON array of Telegram gamemaster user IDs; gamemasters have administrative access except game archival |
-| `VK_GAMEMASTER_IDS` | Public JSON array of stable numeric VK gamemaster user IDs; gamemasters have administrative access except game archival |
+| `TG_GAMEMASTER_IDS` | Public JSON array of Telegram game-master user IDs; game masters have privileged read access and can mutate events they lead |
+| `VK_GAMEMASTER_IDS` | Public JSON array of stable numeric VK game-master user IDs; game masters have privileged read access and can mutate events they lead |
 
 ### OIDC-protected runtime configuration
 
@@ -409,7 +412,7 @@ YANDEX_SERVICE_ACCOUNT_IDS
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
 4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the eleven GitHub Variables above.
 5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
-6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, four YDB tables, and public Worker endpoints.
+6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, five YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, injects every application secret into Workers, calls Telegram `setWebhook`, and runs live Telegram/VK smoke tests.
 8. In VK community settings, add the emitted `vk_callback_url`, set the same callback secret, select the current API version, confirm the server using `VK_CONFIRMATION_STRING`, and enable message events.
 9. Send `/start` to Telegram and a message to the VK community. Create a test game as an admin, verify the returned master link carries the no-sharing warning, open the contact-free public workbook, enlist while confirmation is unavailable, change its Статус to `Подтверждение`, confirm with a wish, change it to `Закрытие регистрации`, and verify signup and confirmation are unavailable.
@@ -436,11 +439,11 @@ Use the Terraform `vk_callback_url`, numeric `VK_GROUP_ID`, matching `VK_CALLBAC
 
 ## Admin management
 
-Admin IDs remain exclusively in the public GitHub Actions repository variables `TG_ADMIN_IDS` and `VK_ADMIN_IDS`; they are not stored in YDB. The existing `TG_GAMEMASTER_IDS` and `VK_GAMEMASTER_IDS` variables also remain supported as deployment-configured game-master lists. Values in all four variables are JSON arrays of stable numeric platform IDs, and empty game-master variables are represented as `[]`. Changing a variable requires rerunning `deploy.yml`; the workflow replaces the Worker bindings and warm Functions refresh within 60 seconds.
+Admin role assignment remains exclusively in the public GitHub Actions repository variables `TG_ADMIN_IDS` and `VK_ADMIN_IDS`. Admin identities are also copied into each event's YDB leader membership, but that membership does not grant the global admin role. The existing `TG_GAMEMASTER_IDS` and `VK_GAMEMASTER_IDS` variables also remain supported as deployment-configured game-master lists. Values in all four variables are JSON arrays of stable numeric platform IDs, and empty game-master variables are represented as `[]`. Changing a variable requires rerunning `deploy.yml`; the workflow replaces the Worker bindings and warm Functions refresh within 60 seconds.
 
-Admins can additionally choose `🎖 Назначить гейммастера` in either bot, select the target bot, and provide the target's profile. Telegram accepts `@username` or a public `t.me`/`telegram.me` profile URL. VK accepts an `https://vk.com` or `https://vk.ru` profile URL and resolves vanity names to the stable numeric VK ID. The target must already have messaged the selected bot and completed that bot's profile. Telegram users created before this feature must message the bot once so their current username is recorded before an admin can find them. Successful grants set `is_gamemaster` on the target row in `tg_users` or `vk_users`; the two sets of flagged numeric primary keys are the persistent YDB game-master lists and are combined with the corresponding environment list during authorization. No fifth application table is created. The new game master receives `Вам было присуждено звание гейммастера! 🎉🎉🎉` through the selected bot.
+Admins can additionally choose `🎖 Назначить гейммастера` in either bot, select the target bot, and provide the target's profile. Telegram accepts `@username` or a public `t.me`/`telegram.me` profile URL. VK accepts an `https://vk.com` or `https://vk.ru` profile URL and resolves vanity names to the stable numeric VK ID. The target must already have messaged the selected bot and completed that bot's profile. Telegram users created before this feature must message the bot once so their current username is recorded before an admin can find them. Successful grants set `is_gamemaster` on the target row in `tg_users` or `vk_users`; the two sets of flagged numeric primary keys are the persistent YDB game-master lists and are combined with the corresponding environment list during authorization. The new game master receives `Вам было присуждено звание гейммастера! 🎉🎉🎉` through the selected bot.
 
-Every privileged request rechecks both the latest environment role sets and the user's YDB role. Gamemasters receive the same administrative interface and functions as admins except that they cannot appoint other game masters or see/invoke game archival, including through stale buttons. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Archival requires the exact case-sensitive game name after trimming outer whitespace and remains admin-only. Admin listing is oldest-first with exactly ten entries per page.
+Every privileged request rechecks both the latest environment role sets and the user's YDB role. Any privileged user can create a game and becomes its leader; every configured admin is included at creation as well. A leader can use `👑 Добавить ведущего игры` to attach another existing game master. Status changes, reminders, confirmed-player notifications, pass-table creation, and archival are leader-only, including through stale buttons and queued commands. Game and pass-table listings remain readable by all privileged users. The `📣 Уведомить подтвердивших` flow accepts up to 4000 characters and explains that pasting only a Telegram or VK chat invitation is enough for the bot to add the game name and invitation copy. Archival requires the exact case-sensitive game name after trimming outer whitespace. Administrative listing is oldest-first with exactly ten entries per page.
 
 ## Secret rotation
 
@@ -458,7 +461,7 @@ Worker binding updates create a new encrypted Worker version; Yandex runtimes ne
 Terraform manages:
 
 - five least-purpose service accounts, runtime IAM and invocation bindings;
-- one Serverless YDB database and four application tables;
+- one Serverless YDB database and five application tables;
 - one FIFO command queue and one standard kick queue;
 - gateway and ordered-worker Functions, versions, logging, and scaling policies;
 - one standard-queue Function trigger (never a FIFO trigger);
@@ -488,9 +491,9 @@ terraform plan
 
 ## Tests and enforced contracts
 
-Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, dual master/public workbook projection and contact removal, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, persisted confirmed-only broadcasts, late-confirmation replay and delivery-time chat-link expansion, duplicate operation IDs, formula injection, permanent game archival, exact-name archival, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
+Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, signup before confirmation opens, ordered status changes, per-event isolation, creator/admin leader seeding, leader delegation and worker-time authorization, privileged read access, dual master/public workbook projection and contact removal, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, persisted confirmed-only broadcasts, late-confirmation replay and delivery-time chat-link expansion, duplicate operation IDs, formula injection, permanent game archival, exact-name archival, pagination boundaries, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
-Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the four-table YDB model, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
+Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the five-table YDB model, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
 
 ## Observability
 

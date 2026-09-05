@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_ydb_tables_include_registration_source_of_truth() -> None:
     terraform = "\n".join(path.read_text() for path in (ROOT / "infra/terraform").glob("*.tf"))
     resources = re.findall(r'resource\s+"yandex_ydb_table"\s+"([^"]+)"', terraform)
-    assert sorted(resources) == ["events", "registrations", "tg_users", "vk_users"]
+    assert sorted(resources) == ["event_leaders", "events", "registrations", "tg_users", "vk_users"]
     ydb = (ROOT / "infra/terraform/ydb.tf").read_text()
     assert 'primary_key = ["event_id", "participant_key"]' in ydb
     assert 'name = "confirmation_deadline"' in ydb
@@ -24,6 +24,7 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "gamemaster_grant_operation_id"' in ydb
     assert 'name = "confirmed_notifications_json"' in ydb
     assert 'name = "last_confirmed_notification_operation_id"' in ydb
+    assert 'primary_key = ["event_id", "platform", "platform_user_id"]' in ydb
     assert ydb.count('name = "telegram_handle"') == 2
 
 

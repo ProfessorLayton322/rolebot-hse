@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Protocol
 
 from larp_bot.domain.models import (
+    BotIdentity,
     Button,
     Event,
     EventStatus,
@@ -35,7 +36,11 @@ class UserRepository(Protocol):
 class EventRepository(Protocol):
     async def get(self, event_id: str) -> Event | None: ...
 
-    async def create(self, event: Event) -> None: ...
+    async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None: ...
+
+    async def add_leader(self, event_id: str, leader: BotIdentity) -> bool: ...
+
+    async def list_leaders(self, event_id: str) -> Sequence[BotIdentity]: ...
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool: ...
 
@@ -140,6 +145,8 @@ class OrderedCommandConsumer(Protocol):
 
 
 class AdminConfigProvider(Protocol):
+    async def list_admins(self) -> Sequence[BotIdentity]: ...
+
     async def is_admin(self, platform: Platform, user_id: int) -> bool: ...
 
     async def is_gamemaster(self, platform: Platform, user_id: int) -> bool: ...

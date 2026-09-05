@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     Button,
     Event,
     EventStatus,
@@ -65,15 +66,35 @@ class MemoryUserRepository:
 class MemoryEventRepository:
     def __init__(self, events: Sequence[Event] = ()) -> None:
         self.rows = {event.event_id: deepcopy(event) for event in events}
+        self.leaders: dict[str, set[tuple[Platform, int]]] = {event.event_id: set() for event in events}
 
     async def get(self, event_id: str) -> Event | None:
         event = self.rows.get(event_id)
         return None if event is None else deepcopy(event)
 
-    async def create(self, event: Event) -> None:
+    async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None:
         if event.event_id in self.rows:
             raise ValueError("event exists")
         self.rows[event.event_id] = deepcopy(event)
+        self.leaders[event.event_id] = {(leader.platform, leader.platform_user_id) for leader in leaders}
+
+    async def add_leader(self, event_id: str, leader: BotIdentity) -> bool:
+        if event_id not in self.rows:
+            return False
+        identity = (leader.platform, leader.platform_user_id)
+        event_leaders = self.leaders.setdefault(event_id, set())
+        if identity in event_leaders:
+            return False
+        event_leaders.add(identity)
+        return True
+
+    async def list_leaders(self, event_id: str) -> Sequence[BotIdentity]:
+        return [
+            BotIdentity(platform=platform, platform_user_id=user_id)
+            for platform, user_id in sorted(
+                self.leaders.get(event_id, set()), key=lambda item: (item[0].value, item[1])
+            )
+        ]
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool:
         event = self.rows.get(event_id)
@@ -139,6 +160,7 @@ class MemoryEventRepository:
         return True
 
     async def delete(self, event_id: str) -> bool:
+        self.leaders.pop(event_id, None)
         return self.rows.pop(event_id, None) is not None
 
     async def list_page(
@@ -306,6 +328,12 @@ class StaticAdminProvider:
         self.tg_gamemaster_ids = tg_gamemaster_ids or set()
         self.vk_gamemaster_ids = vk_gamemaster_ids or set()
         self.secrets = secrets or {}
+
+    async def list_admins(self) -> Sequence[BotIdentity]:
+        return [
+            *(BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id) for user_id in sorted(self.tg_ids)),
+            *(BotIdentity(platform=Platform.VK, platform_user_id=user_id) for user_id in sorted(self.vk_ids)),
+        ]
 
     async def is_admin(self, platform: Platform, user_id: int) -> bool:
         return user_id in (self.tg_ids if platform is Platform.TELEGRAM else self.vk_ids)

@@ -178,6 +178,37 @@ resource "yandex_ydb_table" "events" {
   depends_on = [time_sleep.ydb_ready]
 }
 
+# Privileged users are attached to individual games through this normalized
+# membership list. A composite primary key makes repeated grants idempotent.
+resource "yandex_ydb_table" "event_leaders" {
+  path              = "event_leaders"
+  connection_string = yandex_ydb_database_serverless.application.ydb_full_endpoint
+
+  column {
+    name     = "event_id"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "platform"
+    type     = "Utf8"
+    not_null = true
+  }
+  column {
+    name     = "platform_user_id"
+    type     = "Uint64"
+    not_null = true
+  }
+  column {
+    name     = "created_at"
+    type     = "Timestamp"
+    not_null = true
+  }
+  primary_key = ["event_id", "platform", "platform_user_id"]
+
+  depends_on = [time_sleep.ydb_ready]
+}
+
 resource "yandex_ydb_table" "registrations" {
   path              = "registrations"
   connection_string = yandex_ydb_database_serverless.application.ydb_full_endpoint

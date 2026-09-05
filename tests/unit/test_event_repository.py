@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from larp_bot.adapters.ydb.repositories import YdbEventRepository
-from larp_bot.domain.models import EventStatus
+from larp_bot.domain.models import BotIdentity, EventStatus, Platform
 
 
 def event_row(status: str) -> dict[str, Any]:
@@ -28,6 +28,7 @@ class RecordingExecutor:
         self.rows = rows
         self.query_text = ""
         self.params: dict[str, Any] = {}
+        self.insert_params: dict[str, Any] = {}
 
     async def query(
         self,
@@ -40,6 +41,19 @@ class RecordingExecutor:
         self.query_text = yql
         self.params = params or {}
         return self.rows
+
+    async def insert_if_absent(
+        self,
+        *,
+        select_yql: str,
+        select_params: dict[str, Any],
+        insert_yql: str,
+        insert_params: dict[str, Any],
+    ) -> bool:
+        self.query_text = f"{select_yql}\n{insert_yql}"
+        self.params = select_params
+        self.insert_params = insert_params
+        return True
 
 
 def test_legacy_open_status_is_read_as_confirmation_open() -> None:
@@ -60,6 +74,43 @@ def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
 
     assert event.confirmed_notifications == ["Сбор в 18:30", "https://t.me/+GameChat_123"]
     assert event.last_confirmed_notification_operation_id == "notification-operation"
+
+
+@pytest.mark.asyncio
+async def test_event_creation_atomically_seeds_platform_specific_leaders() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    event = YdbEventRepository._from_row(event_row("CREATED"))
+
+    await repository.create(
+        event,
+        [
+            BotIdentity(platform=Platform.TELEGRAM, platform_user_id=10),
+            BotIdentity(platform=Platform.VK, platform_user_id=20),
+        ],
+    )
+
+    assert executor.query_text.count("UPSERT INTO `event_leaders`") == 2
+    assert executor.params["$leader_platform_0"] == Platform.TELEGRAM.value
+    assert executor.params["$leader_user_id_0"] == 10
+    assert executor.params["$leader_platform_1"] == Platform.VK.value
+    assert executor.params["$leader_user_id_1"] == 20
+
+
+@pytest.mark.asyncio
+async def test_event_leaders_are_added_idempotently_and_listed_by_platform_identity() -> None:
+    identity = BotIdentity(platform=Platform.VK, platform_user_id=22)
+    add_executor = RecordingExecutor([event_row("CREATED")])
+    repository = YdbEventRepository(add_executor)  # type: ignore[arg-type]
+
+    assert await repository.add_leader("event-a1", identity)
+    assert "INSERT INTO `event_leaders`" in add_executor.query_text
+    assert add_executor.insert_params["$platform"] == Platform.VK.value
+    assert add_executor.insert_params["$platform_user_id"] == 22
+
+    list_executor = RecordingExecutor([{"platform": "vk", "platform_user_id": 22}])
+    listed = await YdbEventRepository(list_executor).list_leaders("event-a1")  # type: ignore[arg-type]
+    assert listed == [identity]
 
 
 @pytest.mark.asyncio

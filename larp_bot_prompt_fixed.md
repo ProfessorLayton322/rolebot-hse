@@ -145,12 +145,13 @@ Do not use Telegram or VK long polling in production.
 
 # 3. YDB STORAGE MODEL
 
-There must be **exactly four application tables in YDB Serverless**:
+There must be **exactly five application tables in YDB Serverless**:
 
 1. `tg_users`
 2. `vk_users`
 3. `events`
-4. `registrations`
+4. `event_leaders`
+5. `registrations`
 
 There MUST NOT be any other application YDB table.
 
@@ -162,7 +163,7 @@ Do not create:
 - queue state;
 - outbox;
 - idempotency;
-- admins;
+- global admin roles;
 - sessions;
 - audit;
 - notification;
@@ -171,6 +172,8 @@ Do not create:
 tables.
 
 Game registration data belongs in `registrations`, keyed by `(event_id, participant_key)`. YDB is authoritative. Each public XLSX is only a derived showcase of those rows.
+
+Per-event leadership belongs in `event_leaders`, keyed by `(event_id, platform, platform_user_id)`. Every configured bot admin and the creating privileged user must be attached when a game is created. Other game masters are attached only by an existing event leader.
 
 ---
 
@@ -283,7 +286,7 @@ CONFIRMATION_OPEN
 CLOSED
 ```
 
-Admins may change freely between any of the three states. Enlistment is allowed in the first two states.
+Event leaders may change freely between any of the three states. Enlistment is allowed in the first two states.
 Attendance confirmation is allowed only in `CONFIRMATION_OPEN`.
 
 Do NOT store participants inside `events`.
@@ -1241,7 +1244,7 @@ Preserve character wish.
 
 # 29. Changing game status
 
-Admins may freely set any game to any of the three states. Every status command MUST enter the same FIFO group
+Event leaders may freely set their game to any of the three states. Every status command MUST enter the same FIFO group
 for that `event_id` as participant commands.
 
 The ordered command mapping is:
@@ -2454,7 +2457,7 @@ Manage at minimum:
 - service accounts;
 - IAM bindings;
 - YDB Serverless database;
-- exactly four application YDB tables;
+- exactly five application YDB tables;
 - FIFO command queue;
 - standard kick queue;
 - Cloud Functions;
@@ -3332,10 +3335,11 @@ The project is complete only when:
 - slow Telegram responses receive immediate HTTP 200 empty webhook acknowledgment;
 - slow Telegram responses are later delivered through telegram-egress;
 - VK Callback API works through Yandex;
-- exactly four YDB application tables exist;
+- exactly five YDB application tables exist, including per-event leader memberships;
 - Telegram and VK users use separate tables;
 - event metadata uses one events table;
 - registration data is authoritative in YDB;
+- event leaders are authoritative in YDB for privileged event mutations;
 - every game owns one public stable Yandex Disk XLSX;
 - ENLIST does NOT request character wishes;
 - ENLIST creates blank character wishes;

@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     BotResponse,
     Button,
     CharacterWishPayload,
@@ -67,6 +68,7 @@ SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивши�
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 GRANT_GAMEMASTER = "🎖 Назначить гейммастера"
+ADD_EVENT_LEADER = "👑 Добавить ведущего игры"
 ARCHIVE_GAME = "📦 Архивировать игру"
 LEGACY_DELETE_GAME = "🗑 Удалить игру"
 STATUS_REGISTRATION = "Регистрация"
@@ -98,6 +100,7 @@ ADMIN_ACTIONS = frozenset(
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
         GRANT_GAMEMASTER,
+        ADD_EVENT_LEADER,
         ARCHIVE_GAME,
         LEGACY_DELETE_GAME,
         "📋 Список игр",
@@ -121,6 +124,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_TEXT",
         "ADMIN_GAMEMASTER_PROFILE",
+        "ADMIN_EVENT_LEADER_PROFILE",
         "ADMIN_ARCHIVE_NAME",
         "ADMIN_DELETE_NAME",
     }
@@ -550,6 +554,8 @@ class ConversationEngine:
         events = list(await self.events.list_page(statuses=statuses, after=after, limit=10))
         if not events:
             return BotResponse(text=empty_text, buttons=[Button(label=BACK, value=BACK)])
+        if flow.startswith("admin-"):
+            await asyncio.gather(*(self._sync_admin_leaders(event.event_id) for event in events))
         buttons = _event_buttons(events, flow)
         if len(events) == 10:
             last = events[-1]
@@ -580,8 +586,6 @@ class ConversationEngine:
         if len(parts) != 4 or not parts[2].isdigit():
             return BotResponse(text="Некорректная страница.")
         _, flow, micros, event_id = parts
-        if flow in {"admin-archive", "admin-delete"} and not await self._is_admin(user):
-            return BotResponse(text="Недостаточно прав.")
         if flow.startswith("admin-") and not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
         after = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
@@ -593,6 +597,7 @@ class ConversationEngine:
             "admin-reminder": frozenset({EventStatus.CONFIRMATION_OPEN}),
             "admin-notification": None,
             "admin-pass-create": None,
+            "admin-leader-add": None,
         }
         if flow in event_flow_statuses:
             return await self._show_events(flow, event_flow_statuses[flow], after=after)
@@ -681,6 +686,7 @@ class ConversationEngine:
             "admin-reminder",
             "admin-notification",
             "admin-pass-create",
+            "admin-leader-add",
         }:
             return await self._admin_select(user, message, event, flow)
         registration = await self.registrations.get_registration(event_id, platform, uid)
@@ -886,14 +892,45 @@ class ConversationEngine:
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_NOTIFICATION,
             CREATE_PASS_TABLE,
+            ADD_EVENT_LEADER,
             LIST_PASS_TABLES,
+            ARCHIVE_GAME,
             "📋 Список игр",
             BACK,
         ]
         if await self._is_admin(user):
             labels.insert(-2, GRANT_GAMEMASTER)
-            labels.insert(-2, ARCHIVE_GAME)
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
+
+    @staticmethod
+    def _identity(user: User) -> BotIdentity:
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        return BotIdentity(platform=platform, platform_user_id=user_id(user))
+
+    async def _sync_admin_leaders(self, event_id: str) -> None:
+        admins = list(await self.admins.list_admins())
+        if not admins:
+            return
+        current = {
+            (identity.platform, identity.platform_user_id) for identity in await self.events.list_leaders(event_id)
+        }
+        await asyncio.gather(
+            *(
+                self.events.add_leader(event_id, identity)
+                for identity in admins
+                if (identity.platform, identity.platform_user_id) not in current
+            )
+        )
+
+    async def _is_event_leader(self, user: User, event_id: str) -> bool:
+        await self._sync_admin_leaders(event_id)
+        return self._identity(user) in await self.events.list_leaders(event_id)
+
+    async def _event_leader_required(self, user: User, event_id: str) -> BotResponse | None:
+        if await self._is_event_leader(user, event_id):
+            return None
+        await self._clear(user)
+        return BotResponse(text="Только ведущие этой игры могут изменять её данные.")
 
     async def _is_admin(self, user: User) -> bool:
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
@@ -911,6 +948,19 @@ class ConversationEngine:
         if not await self._has_admin_access(user):
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
+        event_bound_states = {
+            "ADMIN_STATUS_SELECT",
+            "ADMIN_CONFIRMATION_DEADLINE",
+            "ADMIN_NOTIFICATION_TEXT",
+            "ADMIN_ARCHIVE_NAME",
+            "ADMIN_DELETE_NAME",
+            "ADMIN_EVENT_LEADER_PLATFORM",
+            "ADMIN_EVENT_LEADER_PROFILE",
+        }
+        if user.dialog_state in event_bound_states:
+            denied = await self._event_leader_required(user, str(user.dialog_context["event_id"]))
+            if denied is not None:
+                return denied
         if user.dialog_state == "ADMIN_GAMEMASTER_PLATFORM":
             if not await self._is_admin(user):
                 await self._clear(user)
@@ -938,8 +988,26 @@ class ConversationEngine:
             return BotResponse(text=prompt, buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)])
         if user.dialog_state == "ADMIN_GAMEMASTER_PROFILE":
             return await self._grant_gamemaster(user, message, value)
+        if user.dialog_state == "ADMIN_EVENT_LEADER_PLATFORM":
+            platforms = {
+                "admin:event-leader:telegram": Platform.TELEGRAM,
+                "admin:event-leader:vk": Platform.VK,
+            }
+            target_platform = platforms.get(value)
+            if target_platform is None:
+                return self._event_leader_platform_prompt()
+            user.dialog_state = "ADMIN_EVENT_LEADER_PROFILE"
+            user.dialog_context["gamemaster_platform"] = target_platform.value
+            if target_platform is Platform.TELEGRAM:
+                prompt = "Отправьте ссылку на профиль Telegram или @username гейммастера:"
+            else:
+                prompt = "Отправьте ссылку на профиль VK гейммастера:"
+            return BotResponse(text=prompt, buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)])
+        if user.dialog_state == "ADMIN_EVENT_LEADER_PROFILE":
+            return await self._add_event_leader(user, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
-            event = await self.administration.create_event(value)
+            leaders = [*(await self.admins.list_admins()), self._identity(user)]
+            event = await self.administration.create_event(value, leaders)
             await self._clear(user)
             return BotResponse(
                 text=(
@@ -1036,9 +1104,6 @@ class ConversationEngine:
                 command_enqueued=True,
             )
         if user.dialog_state in {"ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"}:
-            if not await self._is_admin(user):
-                await self._clear(user)
-                return BotResponse(text="Недостаточно прав.")
             expected = str(user.dialog_context["event_name"])
             if value.strip() != expected:
                 return BotResponse(text=f"Название не совпало. Введите точно:\n\n{expected}")
@@ -1131,6 +1196,68 @@ class ConversationEngine:
         platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
         return BotResponse(text=f"✅ Пользователь назначен гейммастером в {platform_name}.")
 
+    @staticmethod
+    def _event_leader_platform_prompt() -> BotResponse:
+        return BotResponse(
+            text="Выберите бот, которым пользуется добавляемый гейммастер:",
+            buttons=[
+                Button(label="Telegram", value="admin:event-leader:telegram"),
+                Button(label="VK", value="admin:event-leader:vk"),
+                Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+            ],
+        )
+
+    async def _add_event_leader(self, user: User, value: str) -> BotResponse:
+        target_platform = Platform(str(user.dialog_context["gamemaster_platform"]))
+        target: User | None
+        try:
+            if target_platform is Platform.TELEGRAM:
+                handle = normalize_telegram_profile(value)
+                target = await self.users.find_telegram_by_handle(handle)
+            else:
+                normalized = normalize_vk_url(value)
+                if self.vk_user_ids is None:
+                    raise RuntimeError("VK user ID resolver is not configured")
+                target_id = await self.vk_user_ids.resolve_user_id(normalized)
+                target = None if target_id is None else await self.users.get(Platform.VK, target_id)
+        except ValueError as exc:
+            return BotResponse(
+                text=f"❌ {exc}. Попробуйте ещё раз:",
+                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            )
+        if target is None:
+            platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
+            return BotResponse(
+                text=(
+                    f"Пользователь {platform_name} не найден. Убедитесь, что он уже написал этому боту "
+                    "и полностью заполнил профиль, затем попробуйте ещё раз."
+                ),
+                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            )
+        if not target.profile_complete:
+            return BotResponse(
+                text="Профиль этого пользователя заполнен не полностью. Попросите его завершить профиль и повторите.",
+                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            )
+
+        event_id = str(user.dialog_context["event_id"])
+        event_name = str(user.dialog_context["event_name"])
+        identity = BotIdentity(platform=target_platform, platform_user_id=user_id(target))
+        if identity in await self.events.list_leaders(event_id):
+            await self._clear(user)
+            return BotResponse(text=f"Этот пользователь уже является ведущим игры «{event_name}».")
+        if not target.is_gamemaster and not await self.admins.is_gamemaster(target_platform, identity.platform_user_id):
+            return BotResponse(
+                text="Добавить ведущим можно только гейммастера.",
+                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            )
+
+        await self.events.add_leader(event_id, identity)
+        if identity not in await self.events.list_leaders(event_id):
+            raise RuntimeError("event leader grant was not persisted")
+        await self._clear(user)
+        return BotResponse(text=f"✅ Гейммастер добавлен ведущим игры «{event_name}».")
+
     async def _admin_select(
         self,
         user: User,
@@ -1138,10 +1265,11 @@ class ConversationEngine:
         event: Event,
         flow: str,
     ) -> BotResponse:
-        if flow in {"admin-archive", "admin-delete"} and not await self._is_admin(user):
-            return BotResponse(text="Недостаточно прав.")
         if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
+        denied = await self._event_leader_required(user, event.event_id)
+        if denied is not None:
+            return denied
         user.dialog_context = {
             "event_id": event.event_id,
             "event_name": event.name,
@@ -1183,6 +1311,9 @@ class ConversationEngine:
                     )
                 )
             return BotResponse(text=f"Таблица пропусков для игры «{event.name}» уже создана.\n\n{result.public_url}")
+        if flow == "admin-leader-add":
+            user.dialog_state = "ADMIN_EVENT_LEADER_PLATFORM"
+            return self._event_leader_platform_prompt()
         user.dialog_state = "ADMIN_ARCHIVE_NAME"
         return BotResponse(
             text=(
@@ -1200,6 +1331,7 @@ class ConversationEngine:
 
         async def ensure_tables(event: Event) -> Event:
             async with semaphore:
+                await self._sync_admin_leaders(event.event_id)
                 return await self.administration.ensure_event_tables(event)
 
         events = list(await asyncio.gather(*(ensure_tables(event) for event in events)))
@@ -1222,6 +1354,7 @@ class ConversationEngine:
         events = list(await self.events.list_pass_tables_page(after=after, limit=10))
         if not events:
             return BotResponse(text="Таблицы пропусков ещё не создавались.", buttons=[Button(label=BACK, value=BACK)])
+        await asyncio.gather(*(self._sync_admin_leaders(event.event_id) for event in events))
         lines = [f"{event.name}\n{event.pass_table_public_url}" for event in events]
         buttons: list[Button] = []
         if len(events) == 10:
@@ -1250,6 +1383,8 @@ class ConversationEngine:
             return await self._show_events("admin-notification", None, empty_text="Игр нет.")
         if value == CREATE_PASS_TABLE:
             return await self._show_events("admin-pass-create", None, empty_text="Игр нет.")
+        if value == ADD_EVENT_LEADER:
+            return await self._show_events("admin-leader-add", None, empty_text="Игр нет.")
         if value == LIST_PASS_TABLES:
             return await self._admin_pass_list()
         if value == GRANT_GAMEMASTER:
@@ -1266,8 +1401,6 @@ class ConversationEngine:
                 ],
             )
         if value in {ARCHIVE_GAME, LEGACY_DELETE_GAME}:
-            if not await self._is_admin(user):
-                return BotResponse(text="Недостаточно прав.")
             return await self._show_events("admin-archive", None, empty_text="Игр нет.")
         if value == "📋 Список игр":
             return await self._admin_list()

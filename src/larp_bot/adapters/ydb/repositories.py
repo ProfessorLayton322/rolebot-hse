@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     Button,
     Event,
     EventStatus,
@@ -412,9 +413,35 @@ class YdbEventRepository:
         )
         return None if not rows else self._from_row(rows[0])
 
-    async def create(self, event: Event) -> None:
+    async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None:
+        unique_leaders = sorted(
+            {(leader.platform, leader.platform_user_id) for leader in leaders},
+            key=lambda item: (item[0].value, item[1]),
+        )
+        leader_declarations = []
+        leader_upserts = []
+        leader_params: dict[str, Any] = {}
+        for index, (platform, platform_user_id) in enumerate(unique_leaders):
+            leader_declarations.extend(
+                [
+                    f"DECLARE $leader_platform_{index} AS Utf8;",
+                    f"DECLARE $leader_user_id_{index} AS Uint64;",
+                ]
+            )
+            leader_upserts.append(
+                f"""
+                UPSERT INTO `event_leaders` (event_id, platform, platform_user_id, created_at)
+                VALUES ($event_id, $leader_platform_{index}, $leader_user_id_{index}, $created_at);
+                """
+            )
+            leader_params.update(
+                {
+                    f"$leader_platform_{index}": platform.value,
+                    f"$leader_user_id_{index}": platform_user_id,
+                }
+            )
         await self.db.query(
-            """
+            f"""
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
@@ -427,6 +454,7 @@ class YdbEventRepository:
             DECLARE $confirmed_notifications_json AS Utf8;
             DECLARE $last_confirmed_notification_operation_id AS Optional<Utf8>;
             DECLARE $updated_at AS Timestamp;
+            {" ".join(leader_declarations)}
             INSERT INTO `events` (
                 event_id, name, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
@@ -442,6 +470,7 @@ class YdbEventRepository:
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $created_at, $updated_at
             );
+            {" ".join(leader_upserts)}
             """,
             {
                 "$event_id": event.event_id,
@@ -463,8 +492,51 @@ class YdbEventRepository:
                 "$last_confirmed_notification_operation_id": event.last_confirmed_notification_operation_id,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
+                **leader_params,
             },
         )
+
+    async def add_leader(self, event_id: str, leader: BotIdentity) -> bool:
+        if await self.get(event_id) is None:
+            return False
+        params = {
+            "$event_id": event_id,
+            "$platform": leader.platform.value,
+            "$platform_user_id": leader.platform_user_id,
+        }
+        return await self.db.insert_if_absent(
+            select_yql="""
+                DECLARE $event_id AS Utf8; DECLARE $platform AS Utf8;
+                DECLARE $platform_user_id AS Uint64;
+                SELECT event_id FROM `event_leaders`
+                WHERE event_id = $event_id AND platform = $platform
+                  AND platform_user_id = $platform_user_id;
+            """,
+            select_params=params,
+            insert_yql="""
+                DECLARE $event_id AS Utf8; DECLARE $platform AS Utf8;
+                DECLARE $platform_user_id AS Uint64; DECLARE $created_at AS Timestamp;
+                INSERT INTO `event_leaders` (event_id, platform, platform_user_id, created_at)
+                VALUES ($event_id, $platform, $platform_user_id, $created_at);
+            """,
+            insert_params=params | {"$created_at": datetime.now(UTC)},
+        )
+
+    async def list_leaders(self, event_id: str) -> Sequence[BotIdentity]:
+        rows = await self.db.query(
+            """
+            DECLARE $event_id AS Utf8;
+            SELECT platform, platform_user_id FROM `event_leaders`
+            WHERE event_id = $event_id
+            ORDER BY platform, platform_user_id;
+            """,
+            {"$event_id": event_id},
+            read_only=True,
+        )
+        return [
+            BotIdentity(platform=Platform(str(row["platform"])), platform_user_id=int(row["platform_user_id"]))
+            for row in rows
+        ]
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool:
         event = await self.get(event_id)
@@ -600,7 +672,11 @@ class YdbEventRepository:
         if exists is None:
             return False
         await self.db.query(
-            "DECLARE $event_id AS Utf8; DELETE FROM `events` WHERE event_id = $event_id;",
+            """
+            DECLARE $event_id AS Utf8;
+            DELETE FROM `event_leaders` WHERE event_id = $event_id;
+            DELETE FROM `events` WHERE event_id = $event_id;
+            """,
             {"$event_id": event_id},
         )
         return True
