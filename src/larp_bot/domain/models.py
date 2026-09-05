@@ -240,6 +240,8 @@ class Event(StrictModel):
     name: str = Field(min_length=1, max_length=200)
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
+    public_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
+    public_table_public_url: str | None = None
     status: EventStatus = EventStatus.CREATED
     confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
@@ -249,10 +251,24 @@ class Event(StrictModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
-    def pass_table_fields_are_atomic(self) -> Event:
+    def table_fields_are_atomic(self) -> Event:
+        if (self.public_table_resource_path is None) != (self.public_table_public_url is None):
+            raise ValueError("public table resource path and public URL must be set together")
         if (self.pass_table_resource_path is None) != (self.pass_table_public_url is None):
             raise ValueError("pass table resource path and public URL must be set together")
         return self
+
+    @property
+    def master_table_resource_path(self) -> str:
+        """The legacy column is retained as the stable master-table resource."""
+
+        return self.disk_resource_path
+
+    @property
+    def master_table_public_url(self) -> str:
+        """The legacy column is retained as the stable master-table URL."""
+
+        return self.public_registration_url
 
 
 class Registration(StrictModel):

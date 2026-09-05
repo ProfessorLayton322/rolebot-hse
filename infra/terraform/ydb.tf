@@ -121,6 +121,14 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   column {
+    name = "public_table_resource_path"
+    type = "Utf8"
+  }
+  column {
+    name = "public_table_public_url"
+    type = "Utf8"
+  }
+  column {
     name     = "status"
     type     = "Utf8"
     not_null = true

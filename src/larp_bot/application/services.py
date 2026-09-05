@@ -64,6 +64,20 @@ def event_slug(name: str) -> str:
     return (slug or "game")[:40]
 
 
+def event_table_paths(event_id: str, name: str) -> tuple[str, str]:
+    """Build unique Disk paths while keeping the requested game name in each filename."""
+
+    safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "-", name.strip())
+    safe_name = re.sub(r"\s+", " ", safe_name).strip(" .")[:120].rstrip(" .")
+    if not safe_name:
+        safe_name = event_slug(name)
+    directory = f"disk:/larp-bot/events/{event_id}"
+    return (
+        f"{directory}/master_table_{safe_name}.xlsx",
+        f"{directory}/public_table_{safe_name}.xlsx",
+    )
+
+
 class RegistrationCatalog:
     """YDB registration source of truth plus its derived public showcase."""
 
@@ -84,7 +98,7 @@ class RegistrationCatalog:
         await self.registrations.import_missing(legacy)
         # Publish the YDB projection before setting the marker. If Disk is
         # temporarily unavailable, the next request safely retries migration.
-        await self.refresh(event)
+        event = await self.refresh(event)
         migrated_at = datetime.now(UTC)
         await self.events.mark_registrations_migrated(event.event_id, migrated_at)
         event.registrations_migrated_at = migrated_at
@@ -94,9 +108,47 @@ class RegistrationCatalog:
         await self.ensure_migrated(event)
         return await self.registrations.get(event.event_id, participant_key)
 
-    async def refresh(self, event: Event) -> None:
-        rows = await self.registrations.list_for_event(event.event_id)
+    async def ensure_public_table(
+        self,
+        event: Event,
+        registrations: list[Registration] | None = None,
+    ) -> Event:
+        """Attach the contact-free workbook to an event created before the dual-table rollout."""
+
+        if event.public_table_resource_path is not None:
+            return event
+        rows = registrations
+        if rows is None:
+            rows = list(await self.registrations.list_for_event(event.event_id))
+        _, disk_path = event_table_paths(event.event_id, event.name)
+        public_url = await self.showcase.create_public_event_workbook(disk_path, rows)
+        try:
+            attached = await self.events.set_public_table(event.event_id, disk_path, public_url)
+        except Exception:
+            await self.showcase.delete_event_workbook(disk_path)
+            raise
+        if attached:
+            return Event.model_validate(
+                event.model_dump()
+                | {
+                    "public_table_resource_path": disk_path,
+                    "public_table_public_url": public_url,
+                }
+            )
+
+        current = await self.events.get(event.event_id)
+        if current is not None and current.public_table_resource_path is not None:
+            if current.public_table_resource_path != disk_path:
+                await self.showcase.delete_event_workbook(disk_path)
+            return current
+        await self.showcase.delete_event_workbook(disk_path)
+        raise EventNotFound("Игра была удалена во время создания публичной таблицы")
+
+    async def refresh(self, event: Event) -> Event:
+        rows = list(await self.registrations.list_for_event(event.event_id))
+        event = await self.ensure_public_table(event, rows)
         await self.showcase.replace(event, rows)
+        return event
 
     async def archive(self, event: Event) -> None:
         await self.events.set_status(event.event_id, EventStatus.CLOSED)
@@ -239,20 +291,33 @@ class EventAdministrationService:
         if not clean_name:
             raise ValueError("Название игры не может быть пустым")
         event_id = str(uuid4())
-        disk_path = f"disk:/larp-bot/events/{event_id}-{event_slug(clean_name)}.xlsx"
-        public_url = await self.showcase.create_event_workbook(disk_path)
-        event = Event(
-            event_id=event_id,
-            name=clean_name,
-            disk_resource_path=disk_path,
-            public_registration_url=public_url,
-        )
+        master_path, public_path = event_table_paths(event_id, clean_name)
+        created_paths: list[str] = []
         try:
+            master_url = await self.showcase.create_event_workbook(master_path)
+            created_paths.append(master_path)
+            public_url = await self.showcase.create_public_event_workbook(public_path)
+            created_paths.append(public_path)
+            event = Event(
+                event_id=event_id,
+                name=clean_name,
+                disk_resource_path=master_path,
+                public_registration_url=master_url,
+                public_table_resource_path=public_path,
+                public_table_public_url=public_url,
+            )
             await self.events.create(event)
         except Exception:
-            await self.showcase.delete_event_workbook(disk_path)
+            await asyncio.gather(
+                *(self.showcase.delete_event_workbook(path) for path in created_paths),
+                return_exceptions=True,
+            )
             raise
         return event
+
+    async def ensure_event_tables(self, event: Event) -> Event:
+        event = await self.catalog.ensure_migrated(event)
+        return await self.catalog.ensure_public_table(event)
 
     async def create_pass_table(self, event_id: str) -> PassTableExport:
         event = await self.events.get(event_id)
@@ -474,7 +539,7 @@ class OrderedMutationService:
             return "Игра архивирована; таблицы и записи сохранены"
 
         assert command.participant_key is not None
-        await self.catalog.ensure_migrated(event)
+        event = await self.catalog.ensure_migrated(event)
         if command.operation is Operation.ENLIST:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")
