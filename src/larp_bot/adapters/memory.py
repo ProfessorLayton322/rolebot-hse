@@ -173,6 +173,22 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return True
 
+    async def set_reserve_promotion(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str | None,
+    ) -> None:
+        event = self.rows[event_id]
+        event.last_reserve_promotion_operation_id = operation_id
+        event.last_reserve_promotion_participant_key = participant_key
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+
+    async def mark_reserve_promotion_delivered(self, event_id: str, operation_id: str) -> None:
+        event = self.rows[event_id]
+        event.last_reserve_promotion_delivered_operation_id = operation_id
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+
     async def delete(self, event_id: str) -> bool:
         self.leaders.pop(event_id, None)
         return self.rows.pop(event_id, None) is not None

@@ -7,6 +7,7 @@ from secrets import token_urlsafe
 from pydantic import ValidationError
 
 from larp_bot.domain.models import (
+    MAX_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
     BotResponse,
@@ -131,6 +132,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "CONFIRM_WISH",
         "CHARACTER_EDIT",
         "ADMIN_CREATE_NAME",
+        "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_TEXT",
         "ADMIN_GAMEMASTER_PROFILE",
@@ -844,11 +846,6 @@ class ConversationEngine:
             reply_context=ReplyContext(
                 chat_id=message.chat_id,
                 peer_id=message.peer_id,
-                text_success=(
-                    f"🎲 Вы записаны на игру «{context['event_name']}».\n\n"
-                    "Когда придёт время окончательно подтвердить участие, выберите "
-                    "«✅ Подтвердить участие». Тогда бот попросит пожелания по персонажу."
-                ),
                 buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:ENLIST",
@@ -1046,12 +1043,32 @@ class ConversationEngine:
         if user.dialog_state == "ADMIN_WAITING_PICK":
             return await self._admin_waiting_pick(user, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
+            clean_name = value.strip()
+            if not clean_name:
+                return BotResponse(text="Название игры не может быть пустым. Введите название игры:")
+            if len(clean_name) > 200:
+                return BotResponse(text="Название игры не должно превышать 200 символов. Введите название игры:")
+            user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
+            user.dialog_context = {"event_name": clean_name}
+            return BotResponse(text=f"Введите количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):")
+        if user.dialog_state == "ADMIN_CREATE_PLAYER_AMOUNT":
+            raw_amount = value.strip()
+            if not raw_amount.isdecimal():
+                return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
+            player_amount = int(raw_amount)
+            if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
+                return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
             leaders = [*(await self.admins.list_admins()), self._identity(user)]
-            event = await self.administration.create_event(value, leaders)
+            event = await self.administration.create_event(
+                str(user.dialog_context["event_name"]),
+                player_amount,
+                leaders,
+            )
             await self._clear(user)
             return BotResponse(
                 text=(
                     f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
+                    f"Количество игроков: {event.player_amount}\n\n"
                     f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
                     "но пока не могут подтверждать участие."
                 ),
@@ -1692,7 +1709,11 @@ class ConversationEngine:
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
         is_leader = await self._is_event_leader(user, event.event_id)
-        text = f"Управление игрой «{event.name}»\n\nСтатус: {EVENT_STATUS_LABELS[event.status]}"
+        text = (
+            f"Управление игрой «{event.name}»\n\n"
+            f"Количество игроков: {event.player_amount}\n"
+            f"Статус: {EVENT_STATUS_LABELS[event.status]}"
+        )
         if event.confirmation_deadline is not None:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
         if not is_leader:
@@ -1837,6 +1858,7 @@ class ConversationEngine:
             return BotResponse(text="Недостаточно прав.")
         if value == "➕ Создать игру":
             user.dialog_state = "ADMIN_CREATE_NAME"
+            user.dialog_context = {}
             return BotResponse(text="Введите название игры:")
         if value == MANAGE_GAMES or value in {
             CHANGE_STATUS,

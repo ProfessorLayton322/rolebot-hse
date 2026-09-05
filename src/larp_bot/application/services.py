@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
+    MAX_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
     Button,
@@ -124,7 +125,11 @@ class RegistrationCatalog:
         if rows is None:
             rows = list(await self.registrations.list_for_event(event.event_id))
         _, disk_path = event_table_paths(event.event_id, event.name)
-        public_url = await self.showcase.create_public_event_workbook(disk_path, rows)
+        public_url = await self.showcase.create_public_event_workbook(
+            disk_path,
+            rows,
+            player_amount=event.player_amount,
+        )
         try:
             attached = await self.events.set_public_table(event.event_id, disk_path, public_url)
         except Exception:
@@ -333,23 +338,26 @@ class EventAdministrationService:
         self.users = users
         self.participant_secret = participant_secret
 
-    async def create_event(self, name: str, leaders: Sequence[BotIdentity]) -> Event:
+    async def create_event(self, name: str, player_amount: int, leaders: Sequence[BotIdentity]) -> Event:
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Название игры не может быть пустым")
+        if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
+            raise ValueError(f"Количество игроков должно быть от 1 до {MAX_PLAYER_AMOUNT}")
         if not leaders:
             raise ValueError("У игры должен быть хотя бы один ведущий")
         event_id = str(uuid4())
         master_path, public_path = event_table_paths(event_id, clean_name)
         created_paths: list[str] = []
         try:
-            master_url = await self.showcase.create_event_workbook(master_path)
+            master_url = await self.showcase.create_event_workbook(master_path, player_amount=player_amount)
             created_paths.append(master_path)
-            public_url = await self.showcase.create_public_event_workbook(public_path)
+            public_url = await self.showcase.create_public_event_workbook(public_path, player_amount=player_amount)
             created_paths.append(public_path)
             event = Event(
                 event_id=event_id,
                 name=clean_name,
+                player_amount=player_amount,
                 disk_resource_path=master_path,
                 public_registration_url=master_url,
                 public_table_resource_path=public_path,
@@ -531,6 +539,30 @@ def confirmed_notification_text(event_name: str, message: str) -> str:
     )
 
 
+def enlistment_success_text(event: Event, queue_position: int) -> str:
+    if event.public_table_public_url is None:
+        raise RuntimeError("public game table is not initialized")
+    if queue_position <= event.player_amount:
+        position_text = (
+            f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
+            "Посмотрите, кто ещё зарегистрирован вместе с вами: "
+            f"{event.public_table_public_url}"
+        )
+    else:
+        cancellations_needed = queue_position - event.player_amount
+        position_text = (
+            f"Вы записались на игру {event.name}! Прямо сейчас вы находитесь в запасе, "
+            "но сможете попасть в основную игровую сессию, если "
+            f"{cancellations_needed} человек до вас отменят своё участие.\n\n"
+            f"Подробнее можете посмотреть в таблице игроков: {event.public_table_public_url}"
+        )
+    return (
+        f"{position_text}\n\n"
+        "Когда придёт время окончательно подтвердить участие, выберите "
+        "«✅ Подтвердить участие». Тогда бот попросит пожелания по персонажу."
+    )
+
+
 class ConfirmationNotificationService:
     """Delivers ordered, admin-triggered notifications to event participants."""
 
@@ -658,6 +690,53 @@ class ConfirmationNotificationService:
         await self.users.claim_delivery(command.platform, command.platform_user_id, command.operation_id)
         return len(event.confirmed_notifications)
 
+    async def notify_reserve_promotion(self, command: OrderedRegistrationCommand) -> int:
+        """Notify the one reserve player promoted by this roster mutation."""
+
+        if command.operation not in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+            raise ValueError("command does not promote a reserve participant")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.last_reserve_promotion_operation_id != command.operation_id:
+            return 0
+        if event.last_reserve_promotion_delivered_operation_id == command.operation_id:
+            return 0
+        promoted_key = event.last_reserve_promotion_participant_key
+        if promoted_key is None:
+            return 0
+
+        recipient: NotificationRecipient | None = None
+        for user in await self.users.list_all():
+            platform, uid = self._identity(user)
+            if participant_key(self.participant_secret, platform, uid, event.event_id) == promoted_key:
+                recipient = NotificationRecipient(platform, uid, user)
+                break
+        if recipient is None:
+            LOGGER.warning(
+                "reserve_promotion_recipient_missing",
+                extra={"event_id": event.event_id, "operation_id": command.operation_id},
+            )
+            return 0
+
+        request_id = f"{command.operation_id}:reserve-promotion"
+        if recipient.user.last_delivery_operation_id == request_id:
+            return 0
+        await self.transport.send(
+            platform=recipient.platform,
+            user_id=recipient.user_id,
+            request_id=request_id,
+            text=(
+                f"Вы попали в основной состав игровой сессии игры {event.name}!\n\n"
+                "Посмотрите актуальный состав игроков: "
+                f"{event.public_table_public_url}"
+            ),
+            buttons=[main_menu_button()],
+        )
+        await self.events.mark_reserve_promotion_delivered(event.event_id, command.operation_id)
+        await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id)
+        return 1
+
 
 class OrderedMutationService:
     """Authoritative worker-time validation, YDB mutation, and showcase refresh."""
@@ -691,6 +770,32 @@ class OrderedMutationService:
             self.participant_secret,
         )
         await self.catalog.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+
+    async def _record_reserve_promotion(
+        self,
+        event: Event,
+        command: OrderedRegistrationCommand,
+        registration: Registration | None,
+    ) -> None:
+        if event.last_reserve_promotion_operation_id == command.operation_id:
+            return
+        promoted_key: str | None = None
+        if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
+            active = [
+                row
+                for row in await self.catalog.registrations.list_for_event(event.event_id)
+                if row.attendance_status is not AttendanceStatus.CANCELLED
+            ]
+            active.sort(key=lambda row: (row.created_at, row.participant_key))
+            target_index = next(
+                (index for index, row in enumerate(active) if row.participant_key == registration.participant_key),
+                None,
+            )
+            if target_index is not None and target_index < event.player_amount < len(active):
+                promoted_key = active[event.player_amount].participant_key
+        await self.events.set_reserve_promotion(event.event_id, command.operation_id, promoted_key)
+        event.last_reserve_promotion_operation_id = command.operation_id
+        event.last_reserve_promotion_participant_key = promoted_key
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         event = await self.events.get(command.event_id)
@@ -785,8 +890,17 @@ class OrderedMutationService:
                 vk_profile=vk_profile,
                 telegram_profile=telegram_profile,
             )
-            await self.catalog.refresh(event)
-            return "Заявка на игру записана"
+            event = await self.catalog.refresh(event)
+            active = [
+                row
+                for row in await self.catalog.registrations.list_for_event(event.event_id)
+                if row.attendance_status is not AttendanceStatus.CANCELLED
+            ]
+            active.sort(key=lambda row: (row.created_at, row.participant_key))
+            queue_position = next(
+                index for index, row in enumerate(active, start=1) if row.participant_key == command.participant_key
+            )
+            return enlistment_success_text(event, queue_position)
 
         if command.operation is Operation.CONFIRM and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
@@ -797,6 +911,7 @@ class OrderedMutationService:
         if command.operation is Operation.REMOVE_PARTICIPANT:
             if registration is not None and registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Запись этого игрока уже отменена")
+            await self._record_reserve_promotion(event, command, registration)
             if registration is not None:
                 await self.catalog.registrations.remove(
                     event.event_id,
@@ -835,6 +950,7 @@ class OrderedMutationService:
             await self.catalog.refresh(event)
             return "Пожелания по персонажу обновлены"
         if command.operation is Operation.CANCEL:
+            await self._record_reserve_promotion(event, command, registration)
             await self.catalog.registrations.cancel(
                 event.event_id,
                 operation_id=command.operation_id,

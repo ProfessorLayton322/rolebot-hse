@@ -12,6 +12,10 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+DEFAULT_PLAYER_AMOUNT = 30
+MAX_PLAYER_AMOUNT = 10_000
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -281,6 +285,9 @@ User = TelegramUser | VkUser
 class Event(StrictModel):
     event_id: str = Field(min_length=8, max_length=80, pattern=r"^[a-z0-9-]+$")
     name: str = Field(min_length=1, max_length=200)
+    # Existing events predate the capacity field. They retain a conservative
+    # default while every newly created game must collect an explicit value.
+    player_amount: int = Field(default=DEFAULT_PLAYER_AMOUNT, ge=1, le=MAX_PLAYER_AMOUNT)
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
     public_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
@@ -294,6 +301,9 @@ class Event(StrictModel):
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
     ] = Field(default_factory=list)
     last_confirmed_notification_operation_id: str | None = None
+    last_reserve_promotion_operation_id: str | None = None
+    last_reserve_promotion_participant_key: str | None = None
+    last_reserve_promotion_delivered_operation_id: str | None = None
     archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

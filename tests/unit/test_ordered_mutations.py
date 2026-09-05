@@ -226,7 +226,8 @@ async def test_fifo_sequence_has_required_final_state(disk_store: MemoryDiskStor
     assert registration.attendance_status is AttendanceStatus.CANCELLED
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
-        assert workbook.active.max_row == 1
+        assert workbook.active.max_row == event.player_amount + 2
+        assert workbook.active.cell(event.player_amount + 2, 1).value == "ЗАПАС"
     finally:
         workbook.close()
 
@@ -427,12 +428,18 @@ async def test_leader_removal_deletes_registration_and_refreshes_every_table(
 
     refreshed_event = await events.get(event.event_id)
     assert refreshed_event is not None and refreshed_event.public_table_resource_path is not None
-    for path in (event.disk_resource_path, refreshed_event.public_table_resource_path, pass_path):
+    for path in (event.disk_resource_path, refreshed_event.public_table_resource_path):
         workbook = load_workbook(BytesIO(disk_store.files[path]))
         try:
-            assert workbook.active.max_row == 1
+            assert workbook.active.max_row == event.player_amount + 2
+            assert workbook.active.cell(event.player_amount + 2, 1).value == "ЗАПАС"
         finally:
             workbook.close()
+    pass_workbook = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert pass_workbook.active.max_row == 1
+    finally:
+        pass_workbook.close()
 
 
 @pytest.mark.asyncio

@@ -149,7 +149,9 @@ async def test_cancelled_registrations_are_omitted_from_showcase(disk_store: Mem
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
-        assert rows == [(1, "Active player")]
+        assert rows[0] == (1, "Active player")
+        assert all(name is None for _, name in rows[1:])
+        assert workbook.active.cell(event.player_amount + 2, 1).value == "ЗАПАС"
     finally:
         workbook.close()
 
@@ -190,13 +192,73 @@ async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
-        assert rows == [
+        assert rows[:3] == [
             (1, "Oldest, recently updated"),
             (2, "Middle"),
             (3, "Newest"),
         ]
+        assert all(name is None for _, name in rows[3:])
     finally:
         workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_main_roster_slots_and_green_reserve_row_are_fixed_in_both_showcases(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    master_path = event.disk_resource_path
+    public_path = "disk:/larp-bot/events/event-a1/public_table_Лесной предел.xlsx"
+    event = event.model_copy(
+        update={
+            "player_amount": 2,
+            "public_table_resource_path": public_path,
+            "public_table_public_url": "https://disk.example/public/2",
+        }
+    )
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(master_path, player_amount=event.player_amount)
+    await showcase.create_public_event_workbook(public_path, player_amount=event.player_amount)
+    first_signup = datetime(2026, 9, 1, 10, tzinfo=UTC)
+    registrations = [
+        Registration(
+            event_id=event.event_id,
+            participant_key=character * 43,
+            display_name=name,
+            wish_play="Anyone",
+            created_at=first_signup + timedelta(minutes=index),
+        )
+        for index, (character, name) in enumerate((("a", "First"), ("b", "Second"), ("c", "Reserve")))
+    ]
+
+    await showcase.replace(event, registrations)
+
+    for path, column_count in ((master_path, len(VISIBLE_HEADERS)), (public_path, len(PUBLIC_HEADERS))):
+        workbook = load_workbook(BytesIO(disk_store.files[path]))
+        try:
+            sheet = workbook.active
+            assert [sheet.cell(row, 2).value for row in (2, 3, 5)] == ["First", "Second", "Reserve"]
+            assert sheet.cell(4, 1).value == "ЗАПАС"
+            assert [cell.value for cell in sheet[4] if cell.value is not None] == ["ЗАПАС"]
+            assert str(next(iter(sheet.merged_cells.ranges))) == f"A4:{chr(64 + column_count)}4"
+            assert sheet.cell(4, 1).fill.fill_type == "solid"
+            assert sheet.cell(4, 1).fill.fgColor.rgb.endswith("00B050")
+            assert sheet.cell(4, 1).alignment.horizontal == "center"
+        finally:
+            workbook.close()
+
+    registrations[0].attendance_status = AttendanceStatus.CANCELLED
+    await showcase.replace(event, registrations)
+
+    for path in (master_path, public_path):
+        workbook = load_workbook(BytesIO(disk_store.files[path]))
+        try:
+            sheet = workbook.active
+            assert [sheet.cell(row, 2).value for row in (2, 3)] == ["Second", "Reserve"]
+            assert sheet.cell(4, 1).value == "ЗАПАС"
+            assert sheet.max_row == 4
+        finally:
+            workbook.close()
 
 
 @pytest.mark.asyncio

@@ -92,6 +92,9 @@ def test_event_has_exactly_three_states_and_starts_before_confirmation() -> None
         public_registration_url="https://disk.example/game",
     )
     assert event.status is EventStatus.CREATED
+    assert event.player_amount > 0
+    with pytest.raises(ValidationError):
+        event.player_amount = 0
 
 
 def test_russian_pass_profile_keeps_latin_fields_blank_and_uses_dash_for_no_patronym() -> None:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
+from openpyxl import load_workbook
 
 from larp_bot.adapters.memory import (
     MemoryDeferredTransport,
@@ -37,6 +39,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    Registration,
     ReplyContext,
     TelegramUser,
     VkUser,
@@ -162,6 +165,163 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     assert consumer.deleted == []
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
+
+
+@pytest.mark.asyncio
+async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_state(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.player_amount = 1
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    await users.save(TelegramUser(tg_id=2))
+    commands = [
+        OrderedRegistrationCommand(
+            operation_id=str(uuid4()),
+            event_id=event.event_id,
+            operation=Operation.ENLIST,
+            platform=Platform.TELEGRAM,
+            platform_user_id=user_id,
+            participant_key=character * 43,
+            payload=EnlistPayload(display_name=f"Player {user_id}", wish_play="A"),
+            reply_context=ReplyContext(text_success="legacy signup response"),
+        )
+        for user_id, character in ((1, "a"), (2, "b"))
+    ]
+    consumer = FakeConsumer(
+        [QueueEnvelope(command=command, receipt_handle=f"receipt-{index}") for index, command in enumerate(commands)]
+    )
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, RegistrationCatalog(events, tables, showcase)),
+        users,
+        transport,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 2
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.public_table_public_url is not None
+    link = stored_event.public_table_public_url
+    assert transport.sent[0][3] == (
+        f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
+        f"Посмотрите, кто ещё зарегистрирован вместе с вами: {link}\n\n"
+        "Когда придёт время окончательно подтвердить участие, выберите «✅ Подтвердить участие». "
+        "Тогда бот попросит пожелания по персонажу."
+    )
+    assert transport.sent[1][3] == (
+        f"Вы записались на игру {event.name}! Прямо сейчас вы находитесь в запасе, но сможете попасть "
+        "в основную игровую сессию, если 1 человек до вас отменят своё участие.\n\n"
+        f"Подробнее можете посмотреть в таблице игроков: {link}\n\n"
+        "Когда придёт время окончательно подтвердить участие, выберите «✅ Подтвердить участие». "
+        "Тогда бот попросит пожелания по персонажу."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "actor_id"),
+    [(Operation.CANCEL, 1), (Operation.REMOVE_PARTICIPANT, 9)],
+)
+async def test_reserve_promotion_is_notified_exactly_once_after_cancel_or_removal(
+    operation: Operation,
+    actor_id: int,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.player_amount = 1
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    events = MemoryEventRepository([event])
+    if operation is Operation.REMOVE_PARTICIPANT:
+        await events.add_leader(
+            event.event_id,
+            BotIdentity(platform=Platform.TELEGRAM, platform_user_id=actor_id),
+        )
+    first_key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    reserve_key = participant_key(secret, Platform.TELEGRAM, 2, event.event_id)
+    signed_up_at = datetime(2026, 9, 1, tzinfo=UTC)
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=first_key,
+                display_name="First",
+                wish_play="A",
+                created_at=signed_up_at,
+            ),
+            Registration(
+                event_id=event.event_id,
+                participant_key=reserve_key,
+                display_name="Reserve",
+                wish_play="A",
+                created_at=signed_up_at + timedelta(minutes=1),
+            ),
+        ]
+    )
+    users = MemoryUserRepository()
+    for user_id in {1, 2, actor_id}:
+        await users.save(TelegramUser(tg_id=user_id))
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=operation,
+        platform=Platform.TELEGRAM,
+        platform_user_id=actor_id,
+        participant_key=first_key,
+        payload=EmptyPayload(),
+        reply_context=ReplyContext(text_success="Операция завершена"),
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    first_consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-first")])
+    first_worker = OrderedWorker(
+        first_consumer,
+        mutations,
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+    assert await first_worker.run() == 1
+    assert [(sent[1], sent[3]) for sent in transport.sent] == [
+        (
+            2,
+            f"Вы попали в основной состав игровой сессии игры {event.name}!\n\n"
+            "Посмотрите актуальный состав игроков: https://disk.example/public/2",
+        ),
+        (actor_id, "Операция завершена"),
+    ]
+
+    # Unrelated later deliveries must not erase the dedicated promotion marker.
+    await users.claim_delivery(Platform.TELEGRAM, 2, "unrelated-delivery")
+    retry_consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
+    retry_worker = OrderedWorker(
+        retry_consumer,
+        mutations,
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+    assert await retry_worker.run() == 1
+    assert len(transport.sent) == 2
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert workbook.active["B2"].value == "Reserve"
+        assert workbook.active["A3"].value == "ЗАПАС"
+    finally:
+        workbook.close()
 
 
 @pytest.mark.asyncio
