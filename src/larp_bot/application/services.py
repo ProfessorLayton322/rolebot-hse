@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -10,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
     AttendanceStatus,
+    Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
     EmptyPayload,
@@ -506,6 +508,43 @@ class ConfirmationNotificationService:
             delivered += 1
         return delivered
 
+    async def notify_confirming_participant(
+        self,
+        command: OrderedRegistrationCommand,
+        confirmation_text: str,
+        confirmation_buttons: Sequence[Button],
+    ) -> int:
+        """Deliver confirmation success and every earlier master notification as one retry unit."""
+
+        if command.operation is not Operation.CONFIRM:
+            raise ValueError("command does not confirm a participant")
+        user = await self.users.get(command.platform, command.platform_user_id)
+        if user is not None and user.last_delivery_operation_id == command.operation_id:
+            return 0
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+
+        await self.transport.send(
+            platform=command.platform,
+            user_id=command.platform_user_id,
+            request_id=f"{command.operation_id}:confirmation-result",
+            text=confirmation_text,
+            buttons=confirmation_buttons,
+        )
+        for index, stored_text in enumerate(event.confirmed_notifications):
+            await self.transport.send(
+                platform=command.platform,
+                user_id=command.platform_user_id,
+                request_id=f"{command.operation_id}:past-confirmed-notification:{index}",
+                text=confirmed_notification_text(event.name, stored_text),
+                buttons=[main_menu_button()],
+            )
+        # One command-level marker is written only after the complete bundle is
+        # accepted. No per-notification/per-recipient delivery state is stored.
+        await self.users.claim_delivery(command.platform, command.platform_user_id, command.operation_id)
+        return len(event.confirmed_notifications)
+
 
 class OrderedMutationService:
     """Authoritative worker-time validation, YDB mutation, and showcase refresh."""
@@ -558,6 +597,11 @@ class OrderedMutationService:
             return "Напоминание о подтверждении отправлено"
         if command.operation is Operation.SEND_CONFIRMED_NOTIFICATION:
             assert isinstance(command.payload, NotificationPayload)
+            await self.events.append_confirmed_notification(
+                event.event_id,
+                command.payload.text,
+                command.operation_id,
+            )
             return "Уведомление подтвердившим участие отправлено"
         if command.operation in status_operations:
             status, message = status_operations[command.operation]

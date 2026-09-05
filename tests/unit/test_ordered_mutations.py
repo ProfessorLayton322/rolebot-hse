@@ -22,6 +22,7 @@ from larp_bot.domain.models import (
     EnlistPayload,
     Event,
     EventStatus,
+    NotificationPayload,
     Operation,
     OrderedRegistrationCommand,
     Platform,
@@ -33,7 +34,7 @@ from tests.conftest import MemoryDiskStore
 def command(
     event: Event,
     operation: Operation,
-    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | EmptyPayload,
+    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | NotificationPayload | EmptyPayload,
     *,
     key: str = "a" * 43,
 ) -> OrderedRegistrationCommand:
@@ -50,6 +51,7 @@ def command(
                 Operation.OPEN_REGISTRATION,
                 Operation.OPEN_CONFIRMATION,
                 Operation.SEND_CONFIRMATION_REMINDER,
+                Operation.SEND_CONFIRMED_NOTIFICATION,
                 Operation.CLOSE_EVENT,
                 Operation.DELETE_EVENT,
             }
@@ -57,6 +59,29 @@ def command(
         ),
         payload=payload,
     )
+
+
+@pytest.mark.asyncio
+async def test_confirmed_notification_retry_appends_to_event_once(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    notification = command(
+        event,
+        Operation.SEND_CONFIRMED_NOTIFICATION,
+        NotificationPayload(text="https://t.me/+GameChat_123"),
+    )
+
+    await mutations.apply(notification)
+    await mutations.apply(notification)
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.confirmed_notifications == ["https://t.me/+GameChat_123"]
 
 
 @pytest.mark.asyncio

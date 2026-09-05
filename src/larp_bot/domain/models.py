@@ -288,6 +288,10 @@ class Event(StrictModel):
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
     pass_table_public_url: str | None = None
+    confirmed_notifications: list[
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    ] = Field(default_factory=list)
+    last_confirmed_notification_operation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

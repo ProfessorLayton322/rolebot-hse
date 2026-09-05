@@ -351,4 +351,97 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
     assert all(
         [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)] for sent in transport.sent
     )
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.confirmed_notifications == [message]
     assert consumer.deleted == ["receipt-1"]
+
+
+@pytest.mark.asyncio
+async def test_newly_confirmed_participant_receives_all_stored_notifications(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    catalog = RegistrationCatalog(events, tables, showcase)
+    users = MemoryUserRepository()
+    player = TelegramUser(tg_id=7)
+    await users.save(player)
+    key = participant_key(secret, Platform.TELEGRAM, player.tg_id, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="enlist-player-7",
+        participant_key=key,
+        display_name="Player 7",
+        wish_play="A",
+    )
+
+    confirm_operation_id = str(uuid4())
+    confirm = QueueEnvelope(
+        command=OrderedRegistrationCommand(
+            operation_id=confirm_operation_id,
+            event_id=event.event_id,
+            operation=Operation.CONFIRM,
+            platform=Platform.TELEGRAM,
+            platform_user_id=player.tg_id,
+            participant_key=key,
+            payload=CharacterWishPayload(character_wish="Doctor"),
+            reply_context=ReplyContext(
+                text_success="✅ Участие подтверждено.",
+                buttons=[Button(label=MAIN_MENU, value=MAIN_MENU)],
+            ),
+        ),
+        receipt_handle="receipt-3",
+    )
+    consumer = FakeConsumer(
+        [
+            queued(
+                event,
+                Operation.SEND_CONFIRMED_NOTIFICATION,
+                NotificationPayload(text="Сбор в 18:30"),
+                1,
+            ),
+            queued(
+                event,
+                Operation.SEND_CONFIRMED_NOTIFICATION,
+                NotificationPayload(text="https://t.me/+GameChat_123"),
+                2,
+            ),
+            confirm,
+        ]
+    )
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog),
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 3
+    assert [(sent[1], sent[3]) for sent in transport.sent] == [
+        (player.tg_id, "✅ Участие подтверждено."),
+        (player.tg_id, "Сбор в 18:30"),
+        (
+            player.tg_id,
+            "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
+            "мы вас очень ждём: https://t.me/+GameChat_123",
+        ),
+    ]
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.confirmed_notifications == [
+        "Сбор в 18:30",
+        "https://t.me/+GameChat_123",
+    ]
+    saved_player = await users.get(Platform.TELEGRAM, player.tg_id)
+    assert saved_player is not None
+    assert saved_player.last_delivery_operation_id == confirm_operation_id
+    assert consumer.deleted == ["receipt-1", "receipt-2", "receipt-3"]

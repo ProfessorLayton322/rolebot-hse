@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -46,6 +47,21 @@ def test_legacy_open_status_is_read_as_confirmation_open() -> None:
     assert event.status is EventStatus.CONFIRMATION_OPEN
 
 
+def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
+    row = event_row("CONFIRMATION_OPEN") | {
+        "confirmed_notifications_json": json.dumps(
+            ["Сбор в 18:30", "https://t.me/+GameChat_123"],
+            ensure_ascii=False,
+        ),
+        "last_confirmed_notification_operation_id": "notification-operation",
+    }
+
+    event = YdbEventRepository._from_row(row)
+
+    assert event.confirmed_notifications == ["Сбор в 18:30", "https://t.me/+GameChat_123"]
+    assert event.last_confirmed_notification_operation_id == "notification-operation"
+
+
 @pytest.mark.asyncio
 async def test_confirmation_open_filter_includes_legacy_open_rows() -> None:
     executor = RecordingExecutor([event_row("OPEN")])
@@ -88,6 +104,28 @@ async def test_pass_table_link_is_persisted_once_on_the_event() -> None:
     assert "pass_table_public_url IS NULL" in executor.query_text
     assert executor.params["$resource_path"] == "disk:/larp-bot/passes/event-a1.xlsx"
     assert executor.params["$public_url"] == "https://disk.example/pass"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_notification_is_appended_as_plain_text_once() -> None:
+    row = event_row("CONFIRMATION_OPEN") | {
+        "confirmed_notifications_json": json.dumps(["Сбор в 18:30"], ensure_ascii=False),
+    }
+    executor = RecordingExecutor([row])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.append_confirmed_notification(
+        "event-a1",
+        "https://t.me/+GameChat_123",
+        "notification-operation",
+    )
+
+    assert json.loads(executor.params["$notifications_json"]) == [
+        "Сбор в 18:30",
+        "https://t.me/+GameChat_123",
+    ]
+    assert executor.params["$operation_id"] == "notification-operation"
+    assert "last_confirmed_notification_operation_id != $operation_id" in executor.query_text
 
 
 @pytest.mark.asyncio
