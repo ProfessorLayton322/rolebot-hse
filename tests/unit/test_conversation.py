@@ -29,6 +29,7 @@ from larp_bot.application.conversation import (
     GAMEMASTER_NOTIFICATION,
     GRANT_GAMEMASTER,
     KEEP,
+    LIST_WAITING_PLAYERS,
     MAIN_MENU,
     MANAGE_GAMES,
     MASTER_TABLE_DISCLAIMER,
@@ -663,9 +664,115 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     assert "https://disk.example/pass-table" not in tables_denied.text
     notification_denied = await engine.handle(inbound(6, f"ag:notify:{event.event_id}", callback=True))
     assert notification_denied.text == "Только ведущие этой игры могут изменять её данные."
-    removal_denied = await engine.handle(inbound(7, f"ag:remove:{event.event_id}", callback=True))
+    waiting_denied = await engine.handle(inbound(7, f"ag:waiting:{event.event_id}", callback=True))
+    assert waiting_denied.text == "Только ведущие этой игры могут изменять её данные."
+    removal_denied = await engine.handle(inbound(8, f"ag:remove:{event.event_id}", callback=True))
     assert removal_denied.text == "Только ведущие этой игры могут изменять её данные."
     assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+async def test_event_leader_pages_waiting_players_and_shows_signup_profiles(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, tables = await engine_setup(disk_store, event, admin=True)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    registrations: list[Registration] = []
+    for index in range(10):
+        player = TelegramUser(
+            tg_id=100 + index,
+            full_name=f"Игрок Telegram {index}",
+            vk_url=f"https://vk.com/id{100 + index}",
+            telegram_handle=f"@telegram_player_{index}",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=False,
+        )
+        await users.save(player)
+        registrations.append(
+            Registration(
+                event_id=event.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, player.tg_id, event.event_id),
+                display_name=player.full_name or "",
+                vk_profile=player.vk_url or "",
+                telegram_profile=f"https://t.me/{player.telegram_handle.removeprefix('@')}",
+                wish_play="Без пожеланий",
+                created_at=base + timedelta(seconds=index),
+            )
+        )
+
+    vk_player = VkUser(
+        vk_id=250,
+        full_name="Игрок ВК",
+        telegram_handle="@vk_player_profile",
+        crossplay=False,
+        larp_experience=True,
+        needs_pass=False,
+    )
+    await users.save(vk_player)
+    registrations.append(
+        Registration(
+            event_id=event.event_id,
+            participant_key=engine.registrations.key(Platform.VK, vk_player.vk_id, event.event_id),
+            display_name=vk_player.full_name or "",
+            vk_profile="https://vk.com/id250",
+            telegram_profile="https://t.me/vk_player_profile",
+            wish_play="Без пожеланий",
+            created_at=base + timedelta(seconds=10),
+        )
+    )
+    await tables.import_missing(
+        [
+            *registrations,
+            Registration(
+                event_id=event.event_id,
+                participant_key="c" * 43,
+                display_name="Подтвердивший игрок",
+                wish_play="Без пожеланий",
+                attendance_status=AttendanceStatus.CONFIRMED,
+                created_at=base + timedelta(seconds=4, microseconds=1),
+            ),
+            Registration(
+                event_id=event.event_id,
+                participant_key="x" * 43,
+                display_name="Отменивший игрок",
+                wish_play="Без пожеланий",
+                attendance_status=AttendanceStatus.CANCELLED,
+                created_at=base + timedelta(seconds=5, microseconds=1),
+            ),
+        ]
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    assert LIST_WAITING_PLAYERS in [button.label for button in management.buttons]
+
+    first = await engine.handle(inbound(2, f"ag:waiting:{event.event_id}", callback=True))
+    first_players = [button for button in first.buttons if button.value.startswith("admin:waiting:pick:")]
+    assert len(first_players) == 10
+    assert [button.label for button in first_players] == [f"Игрок Telegram {index}" for index in range(10)]
+    assert "Подтвердивший игрок" not in [button.label for button in first_players]
+    assert "Отменивший игрок" not in [button.label for button in first_players]
+
+    telegram_profile = await engine.handle(inbound(3, first_players[0].value, callback=True))
+    assert telegram_profile.text == (
+        "Этот пользователь зарегистрировался через бота Telegram. "
+        "Вот его профиль вк: https://vk.com/id100\n"
+        "Вот его профиль Telegram: https://t.me/telegram_player_0"
+    )
+
+    returned = await engine.handle(inbound(4, f"ag:waiting:{event.event_id}", callback=True))
+    next_button = next(button for button in returned.buttons if button.label == "➡️ Следующая")
+    second = await engine.handle(inbound(5, next_button.value, callback=True))
+    second_players = [button for button in second.buttons if button.value.startswith("admin:waiting:pick:")]
+    assert [button.label for button in second_players] == ["Игрок ВК"]
+
+    vk_profile = await engine.handle(inbound(6, second_players[0].value, callback=True))
+    assert vk_profile.text == (
+        "Этот пользователь зарегистрировался через бота ВК. "
+        "Вот его профиль вк: https://vk.com/id250\n"
+        "Вот его профиль Telegram: https://t.me/vk_player_profile"
+    )
 
 
 @pytest.mark.asyncio

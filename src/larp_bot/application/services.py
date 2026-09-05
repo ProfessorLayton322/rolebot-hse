@@ -368,10 +368,11 @@ class EventAdministrationService:
         event = await self.catalog.ensure_migrated(event)
         return await self.catalog.ensure_public_table(event)
 
-    async def active_registration_page(
+    async def _registration_page(
         self,
         event_id: str,
         *,
+        statuses: frozenset[AttendanceStatus],
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         limit: int = 10,
@@ -380,11 +381,10 @@ class EventAdministrationService:
         if event is None:
             raise EventNotFound("Игра не найдена")
         await self.catalog.ensure_migrated(event)
-        active_statuses = frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED})
         rows = list(
             await self.catalog.registrations.list_page_for_event(
                 event_id,
-                statuses=active_statuses,
+                statuses=statuses,
                 after=after,
                 before=before,
                 limit=limit,
@@ -397,18 +397,62 @@ class EventAdministrationService:
         previous, following = await asyncio.gather(
             self.catalog.registrations.list_page_for_event(
                 event_id,
-                statuses=active_statuses,
+                statuses=statuses,
                 before=first,
                 limit=1,
             ),
             self.catalog.registrations.list_page_for_event(
                 event_id,
-                statuses=active_statuses,
+                statuses=statuses,
                 after=last,
                 limit=1,
             ),
         )
         return RegistrationPage(rows=rows, has_previous=bool(previous), has_next=bool(following))
+
+    async def active_registration_page(
+        self,
+        event_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> RegistrationPage:
+        return await self._registration_page(
+            event_id,
+            statuses=frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}),
+            after=after,
+            before=before,
+            limit=limit,
+        )
+
+    async def waiting_registration_page(
+        self,
+        event_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> RegistrationPage:
+        return await self._registration_page(
+            event_id,
+            statuses=frozenset({AttendanceStatus.WAITING}),
+            after=after,
+            before=before,
+            limit=limit,
+        )
+
+    async def registration_user(self, event_id: str, registration_key: str) -> User | None:
+        if await self.events.get(event_id) is None:
+            raise EventNotFound("Игра не найдена")
+        for user in await self.users.list_all():
+            if isinstance(user, TelegramUser):
+                platform, uid = Platform.TELEGRAM, user.tg_id
+            else:
+                platform, uid = Platform.VK, user.vk_id
+            if participant_key(self.participant_secret, platform, uid, event_id) == registration_key:
+                return user
+        return None
 
     async def get_registration(self, event_id: str, participant_key: str) -> Registration | None:
         event = await self.events.get(event_id)
