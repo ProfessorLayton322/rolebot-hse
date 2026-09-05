@@ -20,3 +20,4 @@ htmlcov/
 node_modules/
 cloudflare/*/.wrangler/
 function-package.zip
+*.xlsx
