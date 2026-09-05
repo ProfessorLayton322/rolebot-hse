@@ -16,6 +16,7 @@ from larp_bot.application.services import (
 )
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
     EmptyPayload,
@@ -61,12 +62,20 @@ def command(
     )
 
 
+async def add_command_author_as_leader(events: MemoryEventRepository, event: Event) -> None:
+    await events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+
+
 @pytest.mark.asyncio
 async def test_confirmed_notification_retry_appends_to_event_once(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
@@ -82,6 +91,31 @@ async def test_confirmed_notification_retry_appends_to_event_once(
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
     assert stored_event.confirmed_notifications == ["https://t.me/+GameChat_123"]
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_privileged_mutation_from_nonleader(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="Только ведущие"):
+        await mutations.apply(
+            command(
+                event,
+                Operation.SEND_CONFIRMED_NOTIFICATION,
+                NotificationPayload(text="Несанкционированное уведомление"),
+            )
+        )
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.confirmed_notifications == []
 
 
 @pytest.mark.asyncio
@@ -227,6 +261,7 @@ async def test_created_game_allows_enlist_but_rejects_confirmation_until_admin_o
         await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
 
     deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
+    await add_command_author_as_leader(events, event)
     await mutations.apply(command(event, Operation.OPEN_CONFIRMATION, ConfirmationDeadlinePayload(deadline=deadline)))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
     registration = await tables.get(event.event_id, "a" * 43)
@@ -240,6 +275,7 @@ async def test_close_orders_both_enlist_and_confirmation_rejection(disk_store: M
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
     await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
@@ -272,6 +308,7 @@ async def test_admin_status_commands_allow_any_transition(disk_store: MemoryDisk
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
 
     await mutations.apply(command(event, Operation.CLOSE_EVENT, EmptyPayload()))
@@ -301,6 +338,7 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
     await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))

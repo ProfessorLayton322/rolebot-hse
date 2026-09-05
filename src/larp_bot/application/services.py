@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
@@ -314,10 +315,12 @@ class EventAdministrationService:
         self.users = users
         self.participant_secret = participant_secret
 
-    async def create_event(self, name: str) -> Event:
+    async def create_event(self, name: str, leaders: Sequence[BotIdentity]) -> Event:
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Название игры не может быть пустым")
+        if not leaders:
+            raise ValueError("У игры должен быть хотя бы один ведущий")
         event_id = str(uuid4())
         master_path, public_path = event_table_paths(event_id, clean_name)
         created_paths: list[str] = []
@@ -334,7 +337,7 @@ class EventAdministrationService:
                 public_table_resource_path=public_path,
                 public_table_public_url=public_url,
             )
-            await self.events.create(event)
+            await self.events.create(event, leaders)
         except Exception:
             await asyncio.gather(
                 *(self.showcase.delete_event_workbook(path) for path in created_paths),
@@ -561,6 +564,11 @@ class OrderedMutationService:
         self.users = users
         self.participant_secret = participant_secret
 
+    async def _require_event_leader(self, command: OrderedRegistrationCommand) -> None:
+        identity = BotIdentity(platform=command.platform, platform_user_id=command.platform_user_id)
+        if identity not in await self.events.list_leaders(command.event_id):
+            raise OperationNotAllowed("Только ведущие этой игры могут изменять её данные")
+
     async def _refresh_pass_table(self, event: Event) -> None:
         if event.pass_table_resource_path is None:
             return
@@ -580,6 +588,17 @@ class OrderedMutationService:
             if command.operation is Operation.DELETE_EVENT:
                 return "Игра уже отсутствует в постоянном списке"
             raise EventNotFound("Игра уже удалена или не существует")
+
+        administrative_operations = {
+            Operation.OPEN_REGISTRATION,
+            Operation.OPEN_CONFIRMATION,
+            Operation.SEND_CONFIRMATION_REMINDER,
+            Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.CLOSE_EVENT,
+            Operation.DELETE_EVENT,
+        }
+        if command.operation in administrative_operations:
+            await self._require_event_leader(command)
 
         status_operations = {
             Operation.OPEN_REGISTRATION: (EventStatus.CREATED, "Установлен Статус «Регистрация»"),

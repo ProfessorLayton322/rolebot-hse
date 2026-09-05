@@ -16,6 +16,7 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
+    ADD_EVENT_LEADER,
     ADMIN,
     ADMIN_MENU,
     ARCHIVE_GAME,
@@ -29,7 +30,6 @@ from larp_bot.application.conversation import (
     GAMEMASTER_NOTIFICATION,
     GRANT_GAMEMASTER,
     KEEP,
-    LEGACY_DELETE_GAME,
     LIST_PASS_TABLES,
     MAIN_MENU,
     MASTER_TABLE_DISCLAIMER,
@@ -113,6 +113,8 @@ async def engine_setup(
     *additional_events: Event,
     admin: bool = False,
     gamemaster: bool = False,
+    tg_admin_ids: set[int] | None = None,
+    vk_admin_ids: set[int] | None = None,
     vk_profile_ids: dict[str, int] | None = None,
 ) -> tuple[
     ConversationEngine,
@@ -145,7 +147,8 @@ async def engine_setup(
         registrations,
         EventAdministrationService(events, showcase, catalog, users, "participant-secret"),
         StaticAdminProvider(
-            tg_ids={1} if admin else set(),
+            tg_ids=({1} if admin else set()) | (tg_admin_ids or set()),
+            vk_ids=vk_admin_ids,
             tg_gamemaster_ids={1} if gamemaster else set(),
         ),
         transport=transport,
@@ -622,8 +625,17 @@ async def test_admin_archive_requires_exact_case_but_trims_whitespace(
 
 
 @pytest.mark.asyncio
-async def test_gamemaster_has_admin_interface_except_archive(disk_store: MemoryDiskStore, event: Event) -> None:
-    engine, _, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_game(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    event = Event.model_validate(
+        event.model_dump()
+        | {
+            "pass_table_resource_path": f"disk:/larp-bot/passes/{event.event_id}.xlsx",
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    engine, _, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
 
     main = await engine.handle(inbound(1, "/start"))
     assert ADMIN in [button.value for button in main.buttons]
@@ -635,13 +647,28 @@ async def test_gamemaster_has_admin_interface_except_archive(disk_store: MemoryD
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_NOTIFICATION,
         CREATE_PASS_TABLE,
+        ADD_EVENT_LEADER,
         LIST_PASS_TABLES,
+        ARCHIVE_GAME,
         "📋 Список игр",
         "⬅️ Назад",
     ]
 
     status_games = await engine.handle(inbound(3, CHANGE_STATUS))
     assert any(button.value == f"select:admin-status:{event.event_id}" for button in status_games.buttons)
+    denied = await engine.handle(inbound(4, f"select:admin-status:{event.event_id}", callback=True))
+    assert denied.text == "Только ведущие этой игры могут изменять её данные."
+
+    listed = await engine.handle(inbound(5, "📋 Список игр"))
+    assert event.name in listed.text
+    pass_tables = await engine.handle(inbound(6, LIST_PASS_TABLES))
+    assert event.name in pass_tables.text
+    assert "https://disk.example/pass-table" in pass_tables.text
+
+    await engine.handle(inbound(7, SEND_CONFIRMED_NOTIFICATION))
+    notification_denied = await engine.handle(inbound(8, f"select:admin-notification:{event.event_id}", callback=True))
+    assert notification_denied.text == "Только ведущие этой игры могут изменять её данные."
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio
@@ -792,27 +819,158 @@ async def test_created_game_returns_separate_master_and_public_links_with_warnin
     assert response.text.count("https://disk.example/public/") == 2
     assert MASTER_TABLE_DISCLAIMER in response.text
     assert "Публичная таблица (без контактов Telegram и VK)" in response.text
+    assert await engine.events.list_leaders(created.event_id) == [
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gamemaster_created_game_seeds_creator_and_every_configured_admin(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(
+        disk_store,
+        event,
+        gamemaster=True,
+        tg_admin_ids={20},
+        vk_admin_ids={30},
+    )
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая игра"))
+
+    created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
+    leaders = await engine.events.list_leaders(created.event_id)
+    assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
+        (Platform.TELEGRAM, 1),
+        (Platform.TELEGRAM, 20),
+        (Platform.VK, 30),
+    }
+
+
+@pytest.mark.asyncio
+async def test_listing_existing_game_backfills_every_configured_admin_as_leader(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(
+        disk_store,
+        event,
+        admin=True,
+        tg_admin_ids={20},
+        vk_admin_ids={30},
+    )
+
+    listed = await engine.handle(inbound(1, "📋 Список игр"))
+
+    assert event.name in listed.text
+    leaders = await engine.events.list_leaders(event.event_id)
+    assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
+        (Platform.TELEGRAM, 1),
+        (Platform.TELEGRAM, 20),
+        (Platform.VK, 30),
+    }
+
+
+@pytest.mark.asyncio
+async def test_event_leader_can_add_another_gamemaster_who_can_then_notify_players(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@target_player",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+            is_gamemaster=True,
+        )
+    )
+
+    games = await engine.handle(inbound(1, ADD_EVENT_LEADER))
+    assert any(button.value == f"select:admin-leader-add:{event.event_id}" for button in games.buttons)
+    platforms = await engine.handle(inbound(2, f"select:admin-leader-add:{event.event_id}", callback=True))
+    assert [button.label for button in platforms.buttons[:2]] == ["Telegram", "VK"]
+    await engine.handle(inbound(3, "admin:event-leader:telegram", callback=True))
+    added = await engine.handle(inbound(4, "@target_player"))
+
+    assert added.text == f"✅ Гейммастер добавлен ведущим игры «{event.name}»."
+    assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) in await engine.events.list_leaders(
+        event.event_id
+    )
+
+    await engine.handle(inbound(1, SEND_CONFIRMED_NOTIFICATION, user_id=2))
+    await engine.handle(inbound(2, f"select:admin-notification:{event.event_id}", callback=True, user_id=2))
+    queued = await engine.handle(inbound(3, "Сбор в 18:30", user_id=2))
+
+    assert queued.deferred
+    assert publisher.commands[-1].operation is Operation.SEND_CONFIRMED_NOTIFICATION
+    assert publisher.commands[-1].platform_user_id == 2
+
+
+@pytest.mark.asyncio
+async def test_event_leader_cannot_add_a_non_gamemaster_as_leader(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@ordinary_user",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+
+    await engine.handle(inbound(1, ADD_EVENT_LEADER))
+    await engine.handle(inbound(2, f"select:admin-leader-add:{event.event_id}", callback=True))
+    await engine.handle(inbound(3, "admin:event-leader:telegram", callback=True))
+    denied = await engine.handle(inbound(4, "@ordinary_user"))
+
+    assert denied.text == "Добавить ведущим можно только гейммастера."
+    assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) not in await engine.events.list_leaders(
+        event.event_id
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("archive_state", ["ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"])
-async def test_gamemaster_cannot_archive_through_hidden_or_stale_actions(
+async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_actions(
     archive_state: str, disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, users, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
 
+    listing = await engine.handle(inbound(1, ARCHIVE_GAME))
+    assert any(button.value == f"select:admin-archive:{event.event_id}" for button in listing.buttons)
     for update, value in enumerate(
         (
-            ARCHIVE_GAME,
-            LEGACY_DELETE_GAME,
             f"select:admin-archive:{event.event_id}",
             f"select:admin-delete:{event.event_id}",
-            f"page:admin-archive:{int(event.created_at.timestamp() * 1_000_000)}:{event.event_id}",
         ),
-        start=1,
+        start=2,
     ):
-        response = await engine.handle(inbound(update, value, callback=value.startswith(("select:", "page:"))))
-        assert response.text == "Недостаточно прав."
+        response = await engine.handle(inbound(update, value, callback=True))
+        assert response.text == "Только ведущие этой игры могут изменять её данные."
+
+    page = await engine.handle(
+        inbound(
+            4,
+            f"page:admin-archive:{int(event.created_at.timestamp() * 1_000_000)}:{event.event_id}",
+            callback=True,
+        )
+    )
+    assert "ведущие" not in page.text
 
     user = await users.get(Platform.TELEGRAM, 1)
     assert user is not None
@@ -821,7 +979,7 @@ async def test_gamemaster_cannot_archive_through_hidden_or_stale_actions(
     await users.save(user)
     response = await engine.handle(inbound(10, event.name))
 
-    assert response.text == "Недостаточно прав."
+    assert response.text == "Только ведущие этой игры могут изменять её данные."
     saved_user = await users.get(Platform.TELEGRAM, 1)
     assert saved_user is not None and saved_user.dialog_state == "IDLE"
     assert publisher.commands == []

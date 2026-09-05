@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
-from larp_bot.domain.models import Platform
+from larp_bot.domain.models import BotIdentity, Platform
 
 
 class RuntimeConfigProvider:
@@ -96,7 +97,7 @@ class RuntimeConfigProvider:
         except KeyError as exc:
             raise RuntimeError(f"runtime config entry is missing: {key}") from exc
 
-    async def _id_is_configured(self, platform: Platform, user_id: int, *, role: str) -> bool:
+    async def _configured_ids(self, platform: Platform, *, role: str) -> set[int]:
         prefix = "TG" if platform is Platform.TELEGRAM else "VK"
         key = f"{prefix}_{role}_IDS"
         raw = await self.get_secret(key)
@@ -106,7 +107,20 @@ class RuntimeConfigProvider:
             raise RuntimeError(f"{key} must be a JSON numeric array") from exc
         if not isinstance(values, list) or any(type(item) is not int for item in values):
             raise RuntimeError(f"{key} must be a JSON numeric array")
-        return user_id in values
+        return set(values)
+
+    async def list_admins(self) -> Sequence[BotIdentity]:
+        telegram_ids, vk_ids = await asyncio.gather(
+            self._configured_ids(Platform.TELEGRAM, role="ADMIN"),
+            self._configured_ids(Platform.VK, role="ADMIN"),
+        )
+        return [
+            *(BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id) for user_id in sorted(telegram_ids)),
+            *(BotIdentity(platform=Platform.VK, platform_user_id=user_id) for user_id in sorted(vk_ids)),
+        ]
+
+    async def _id_is_configured(self, platform: Platform, user_id: int, *, role: str) -> bool:
+        return user_id in await self._configured_ids(platform, role=role)
 
     async def is_admin(self, platform: Platform, user_id: int) -> bool:
         return await self._id_is_configured(platform, user_id, role="ADMIN")

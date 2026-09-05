@@ -25,6 +25,7 @@ from larp_bot.application.services import (
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
@@ -86,6 +87,13 @@ def queued(
         reply_context=ReplyContext(buttons=list(buttons)),
     )
     return QueueEnvelope(command=command, receipt_handle=f"receipt-{index}")
+
+
+async def add_command_author_as_leader(events: MemoryEventRepository, event: Event) -> None:
+    await events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
 
 
 @pytest.mark.asyncio
@@ -181,6 +189,7 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
     event.status = EventStatus.CREATED if operation is Operation.OPEN_CONFIRMATION else EventStatus.CONFIRMATION_OPEN
     event.confirmation_deadline = None if operation is Operation.OPEN_CONFIRMATION else deadline
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
     catalog = RegistrationCatalog(events, tables, showcase)
@@ -295,6 +304,7 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
 ) -> None:
     secret = "participant-secret"
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
     catalog = RegistrationCatalog(events, tables, showcase)
@@ -364,6 +374,7 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
 ) -> None:
     secret = "participant-secret"
     events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)

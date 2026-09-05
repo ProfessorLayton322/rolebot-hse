@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
-from larp_bot.domain.models import Platform
+from larp_bot.domain.models import BotIdentity, Platform
 from larp_bot.functions.bootstrap import iam_token_from_context
 
 
@@ -120,3 +120,7 @@ async def test_runtime_config_reads_platform_admin_and_gamemaster_ids() -> None:
         assert await provider.is_gamemaster(Platform.TELEGRAM, 11)
         assert await provider.is_gamemaster(Platform.VK, 21)
         assert not await provider.is_gamemaster(Platform.TELEGRAM, 10)
+        assert await provider.list_admins() == [
+            BotIdentity(platform=Platform.TELEGRAM, platform_user_id=10),
+            BotIdentity(platform=Platform.VK, platform_user_id=20),
+        ]
