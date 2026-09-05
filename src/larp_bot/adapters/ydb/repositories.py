@@ -156,6 +156,15 @@ def _buttons(raw: object) -> list[Button]:
         return []
 
 
+def _confirmed_notifications(raw: object) -> list[str]:
+    if not raw:
+        return []
+    parsed = json.loads(str(raw))
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError("confirmed_notifications_json must be a list of strings")
+    return [str(item) for item in parsed]
+
+
 def _dt(value: object) -> datetime:
     if isinstance(value, datetime):
         return value.replace(tzinfo=value.tzinfo or UTC)
@@ -355,7 +364,9 @@ class YdbEventRepository:
         event_id, name, disk_resource_path, public_registration_url,
         public_table_resource_path, public_table_public_url,
         status, confirmation_deadline, registrations_migrated_at,
-        pass_table_resource_path, pass_table_public_url, created_at, updated_at
+        pass_table_resource_path, pass_table_public_url,
+        confirmed_notifications_json, last_confirmed_notification_operation_id,
+        created_at, updated_at
     """
 
     def __init__(self, executor: YdbExecutor) -> None:
@@ -383,6 +394,8 @@ class YdbEventRepository:
             ),
             pass_table_resource_path=row.get("pass_table_resource_path"),
             pass_table_public_url=row.get("pass_table_public_url"),
+            confirmed_notifications=_confirmed_notifications(row.get("confirmed_notifications_json")),
+            last_confirmed_notification_operation_id=row.get("last_confirmed_notification_operation_id"),
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
         )
@@ -411,17 +424,23 @@ class YdbEventRepository:
             DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $pass_table_resource_path AS Optional<Utf8>;
             DECLARE $pass_table_public_url AS Optional<Utf8>;
+            DECLARE $confirmed_notifications_json AS Utf8;
+            DECLARE $last_confirmed_notification_operation_id AS Optional<Utf8>;
             DECLARE $updated_at AS Timestamp;
             INSERT INTO `events` (
                 event_id, name, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
                 status, confirmation_deadline, registrations_migrated_at,
-                pass_table_resource_path, pass_table_public_url, created_at, updated_at
+                pass_table_resource_path, pass_table_public_url,
+                confirmed_notifications_json, last_confirmed_notification_operation_id,
+                created_at, updated_at
             ) VALUES (
                 $event_id, $name, $disk_resource_path, $public_url,
                 $public_table_resource_path, $public_table_public_url,
                 $status, $confirmation_deadline, $registrations_migrated_at,
-                $pass_table_resource_path, $pass_table_public_url, $created_at, $updated_at
+                $pass_table_resource_path, $pass_table_public_url,
+                $confirmed_notifications_json, $last_confirmed_notification_operation_id,
+                $created_at, $updated_at
             );
             """,
             {
@@ -436,6 +455,12 @@ class YdbEventRepository:
                 "$registrations_migrated_at": event.registrations_migrated_at,
                 "$pass_table_resource_path": event.pass_table_resource_path,
                 "$pass_table_public_url": event.pass_table_public_url,
+                "$confirmed_notifications_json": json.dumps(
+                    event.confirmed_notifications,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "$last_confirmed_notification_operation_id": event.last_confirmed_notification_operation_id,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
             },
@@ -537,6 +562,34 @@ class YdbEventRepository:
                 "$event_id": event_id,
                 "$resource_path": resource_path,
                 "$public_url": public_url,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def append_confirmed_notification(self, event_id: str, text: str, operation_id: str) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.last_confirmed_notification_operation_id == operation_id:
+            return False
+        notifications = [*event.confirmed_notifications, text]
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $notifications_json AS Utf8;
+            DECLARE $operation_id AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET confirmed_notifications_json = $notifications_json,
+                last_confirmed_notification_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND (
+                last_confirmed_notification_operation_id IS NULL
+                OR last_confirmed_notification_operation_id != $operation_id
+              );
+            """,
+            {
+                "$event_id": event_id,
+                "$notifications_json": json.dumps(notifications, ensure_ascii=False, separators=(",", ":")),
+                "$operation_id": operation_id,
                 "$updated_at": datetime.now(UTC),
             },
         )

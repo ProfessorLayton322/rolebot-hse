@@ -5,7 +5,7 @@ import time
 from collections.abc import Sequence
 
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.domain.models import Button, Platform
+from larp_bot.domain.models import Button, Operation, Platform
 
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
@@ -68,6 +68,13 @@ class OrderedWorker:
                         if self.notifications is None:
                             raise RuntimeError("confirmation notification service is not configured")
                         await self.notifications.notify(command)
+                        notification_delivered = True
+                    elif command.operation is Operation.CONFIRM and self.notifications is not None:
+                        await self.notifications.notify_confirming_participant(
+                            command,
+                            text,
+                            command.reply_context.buttons,
+                        )
                         notification_delivered = True
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"

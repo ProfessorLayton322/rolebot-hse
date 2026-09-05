@@ -22,6 +22,8 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "last_bot_buttons_json"' in ydb
     assert 'name = "is_gamemaster"' in ydb
     assert 'name = "gamemaster_grant_operation_id"' in ydb
+    assert 'name = "confirmed_notifications_json"' in ydb
+    assert 'name = "last_confirmed_notification_operation_id"' in ydb
     assert ydb.count('name = "telegram_handle"') == 2
 
 

@@ -156,6 +156,14 @@ resource "yandex_ydb_table" "events" {
     type = "Utf8"
   }
   column {
+    name = "confirmed_notifications_json"
+    type = "Utf8"
+  }
+  column {
+    name = "last_confirmed_notification_operation_id"
+    type = "Utf8"
+  }
+  column {
     name     = "created_at"
     type     = "Timestamp"
     not_null = true

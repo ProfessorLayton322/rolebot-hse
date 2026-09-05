@@ -127,6 +127,17 @@ class MemoryEventRepository:
         )
         return True
 
+    async def append_confirmed_notification(self, event_id: str, text: str, operation_id: str) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        if event.last_confirmed_notification_operation_id == operation_id:
+            return False
+        event.confirmed_notifications.append(text)
+        event.last_confirmed_notification_operation_id = operation_id
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
+
     async def delete(self, event_id: str) -> bool:
         return self.rows.pop(event_id, None) is not None
 
