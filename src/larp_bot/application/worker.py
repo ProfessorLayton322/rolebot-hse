@@ -69,13 +69,16 @@ class OrderedWorker:
                     raise TypeError("consumer returned an invalid queue envelope")
                 command = raw.command
                 notification_delivered = False
+                notifications_enabled = True
                 try:
                     if command.operation is Operation.STATISTICS:
                         if self.statistics is None:
                             raise RuntimeError("statistics service is not configured")
                         default_text = await self.statistics.apply(command)
                     else:
-                        default_text = await self.mutations.apply(command)
+                        result = await self.mutations.apply(command)
+                        default_text = result.text
+                        notifications_enabled = result.notifications_enabled
                     # ENLIST position is decided only after its ordered write;
                     # ignore text embedded by workers from an older rollout.
                     text = (
@@ -83,24 +86,34 @@ class OrderedWorker:
                         if command.operation is Operation.ENLIST
                         else command.reply_context.text_success or default_text
                     )
-                    if command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS:
+                    if (
+                        notifications_enabled
+                        and command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS
+                    ):
                         if self.notifications is None:
                             raise RuntimeError("confirmation notification service is not configured")
                         await self.notifications.notify(command)
                         notification_delivered = True
-                    elif command.operation is Operation.CONFIRM and self.notifications is not None:
+                    elif (
+                        notifications_enabled
+                        and command.operation is Operation.CONFIRM
+                        and self.notifications is not None
+                    ):
                         await self.notifications.notify_confirming_participant(
                             command,
                             text,
                             command.reply_context.buttons,
                         )
                         notification_delivered = True
-                    elif command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+                    elif notifications_enabled and command.operation in {
+                        Operation.CANCEL,
+                        Operation.REMOVE_PARTICIPANT,
+                    }:
                         if self.notifications is not None:
                             await self.notifications.notify_reserve_promotion(command)
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
-                if not notification_delivered:
+                if notifications_enabled and not notification_delivered:
                     await self._deliver_once(raw, text, command.reply_context.buttons)
                 await self.consumer.delete(raw.receipt_handle)
                 LOGGER.info(

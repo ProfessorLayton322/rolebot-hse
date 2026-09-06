@@ -62,6 +62,12 @@ class OperationNotAllowed(DomainError):
     pass
 
 
+@dataclass(frozen=True)
+class MutationResult:
+    text: str
+    notifications_enabled: bool = True
+
+
 def event_slug(name: str) -> str:
     transliterated = name.casefold().replace("ё", "е")
     slug = re.sub(r"[^a-z0-9]+", "-", transliterated).strip("-")
@@ -824,16 +830,16 @@ class OrderedMutationService:
         event.last_reserve_promotion_operation_id = command.operation_id
         event.last_reserve_promotion_participant_key = promoted_key
 
-    async def apply(self, command: OrderedRegistrationCommand) -> str:
+    async def apply(self, command: OrderedRegistrationCommand) -> MutationResult:
         event = await self.events.get(command.event_id)
         if event is None:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
-                return "Игра уже отсутствует в постоянном списке"
+                return MutationResult("Игра уже отсутствует в постоянном списке")
             raise EventNotFound("Игра уже удалена или не существует")
 
         if event.archived_at is not None:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
-                return "Игра уже архивирована"
+                return MutationResult("Игра уже архивирована")
             raise OperationNotAllowed("Игра уже архивирована")
 
         administrative_operations = {
@@ -855,14 +861,18 @@ class OrderedMutationService:
         }
         if command.operation is Operation.OPEN_CONFIRMATION:
             assert isinstance(command.payload, ConfirmationDeadlinePayload)
+            status_changed = event.status is not EventStatus.CONFIRMATION_OPEN
             await self.events.open_confirmation(event.event_id, command.payload.deadline)
-            return "Установлен Статус «Подтверждение»"
+            return MutationResult(
+                "Установлен Статус «Подтверждение»",
+                notifications_enabled=status_changed,
+            )
         if command.operation is Operation.SEND_CONFIRMATION_REMINDER:
             if event.status is not EventStatus.CONFIRMATION_OPEN:
                 raise OperationNotAllowed("Подтверждение участия для этой игры не открыто")
             if event.confirmation_deadline is None:
                 raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
-            return "Напоминание о подтверждении отправлено"
+            return MutationResult("Напоминание о подтверждении отправлено")
         if command.operation is Operation.SEND_CONFIRMED_NOTIFICATION:
             assert isinstance(command.payload, NotificationPayload)
             await self.events.append_confirmed_notification(
@@ -870,18 +880,18 @@ class OrderedMutationService:
                 command.payload.text,
                 command.operation_id,
             )
-            return "Уведомление подтвердившим участие отправлено"
+            return MutationResult("Уведомление подтвердившим участие отправлено")
         if command.operation in status_operations:
             status, message = status_operations[command.operation]
-            await self.events.set_status(event.event_id, status)
-            return message
+            status_changed = await self.events.set_status(event.event_id, status)
+            return MutationResult(message, notifications_enabled=status_changed)
         if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
             # DELETE_EVENT can still be present in FIFO or in a stale admin
             # keyboard from an older deployment. Treat it as archival so a
             # published workbook, its registrations, and its permanent game
             # entry can never be removed by an old command.
             await self.catalog.archive(event)
-            return "Игра архивирована; таблицы и записи сохранены"
+            return MutationResult("Игра архивирована; таблицы и записи сохранены")
 
         assert command.participant_key is not None
         event = await self.catalog.ensure_migrated(event)
@@ -927,7 +937,7 @@ class OrderedMutationService:
             queue_position = next(
                 index for index, row in enumerate(active, start=1) if row.participant_key == command.participant_key
             )
-            return enlistment_success_text(event, queue_position)
+            return MutationResult(enlistment_success_text(event, queue_position))
 
         if command.operation is Operation.CONFIRM and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
@@ -948,7 +958,7 @@ class OrderedMutationService:
             # have deleted it before a transient workbook or pass-table failure.
             await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
-            return "Игрок удалён" if registration is not None else "Игрок уже удалён"
+            return MutationResult("Игрок удалён" if registration is not None else "Игрок уже удалён")
         if registration is None:
             raise RegistrationNotFound("Сначала запишитесь на эту игру")
         if command.operation is Operation.CONFIRM:
@@ -961,7 +971,7 @@ class OrderedMutationService:
             )
             await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
-            return "Участие подтверждено"
+            return MutationResult("Участие подтверждено")
         if command.operation is Operation.UPDATE_CHARACTER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Сначала снова подтвердите участие")
@@ -975,7 +985,7 @@ class OrderedMutationService:
                 character_wish=command.payload.character_wish,
             )
             await self.catalog.refresh(event)
-            return "Пожелания по персонажу обновлены"
+            return MutationResult("Пожелания по персонажу обновлены")
         if command.operation is Operation.CANCEL:
             await self._record_reserve_promotion(event, command, registration)
             await self.catalog.registrations.cancel(
@@ -985,5 +995,5 @@ class OrderedMutationService:
             )
             await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
-            return "Участие отменено"
+            return MutationResult("Участие отменено")
         raise AssertionError(f"unhandled operation: {command.operation}")
