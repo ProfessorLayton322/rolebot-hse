@@ -90,6 +90,7 @@ STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
 GAMEMASTER_NOTIFICATION = "Вам было присуждено звание гейммастера! 🎉🎉🎉"
+UNSUPPORTED_CONTENT_RESPONSE = "Я не буду на это отвечать"
 
 REGISTRATION_OPEN_STATUSES = frozenset({EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN})
 EVENT_STATUS_LABELS = {
@@ -283,6 +284,12 @@ class ConversationEngine:
             return BotResponse(text="", silent=True, deferred=platform is Platform.TELEGRAM)
         if isinstance(user, TelegramUser):
             user.telegram_handle = normalize_telegram_handle(message.telegram_username)
+        if message.has_unsupported_content:
+            await self._save(user, message)
+            return BotResponse(
+                text=UNSUPPORTED_CONTENT_RESPONSE,
+                buttons=user.last_bot_buttons.copy(),
+            )
 
         value = (message.callback or message.text).strip()
         admin_branch = (
