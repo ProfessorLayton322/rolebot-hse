@@ -752,7 +752,7 @@ class ConversationEngine:
         actionable_matches = matches
         if flow == "confirm":
             actionable_matches = [item for item in matches if item[0].status is EventStatus.CONFIRMATION_OPEN]
-        elif flow == "cancel":
+        elif flow in {"cancel", "character"}:
             actionable_matches = [item for item in matches if item[0].archived_at is None]
         buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
         if cursor is not None:
@@ -824,8 +824,11 @@ class ConversationEngine:
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
             return BotResponse(text="Сначала запишитесь на эту игру.")
-        if flow == "cancel" and event.archived_at is not None:
-            return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
+        if event.archived_at is not None:
+            if flow == "cancel":
+                return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
+            if flow == "character":
+                return BotResponse(text="Эта игра архивирована. Изменение пожеланий недоступно.")
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
                 return BotResponse(
@@ -974,6 +977,13 @@ class ConversationEngine:
             if not wish:
                 return BotResponse(text="Введите текст или выберите «Без пожеланий».")
         await self._clear(user)
+        event = await self.events.get(str(context["event_id"]))
+        if event is None:
+            return BotResponse(text="Игра не найдена.")
+        if event.archived_at is not None:
+            if operation is Operation.CONFIRM:
+                return BotResponse(text="Эта игра архивирована. Подтверждение участия недоступно.")
+            return BotResponse(text="Эта игра архивирована. Изменение пожеланий недоступно.")
         await self.registrations.enqueue(
             operation=operation,
             event_id=str(context["event_id"]),

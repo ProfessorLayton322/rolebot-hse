@@ -462,6 +462,65 @@ async def test_game_archived_during_cancellation_is_not_enqueued(disk_store: Mem
 
 
 @pytest.mark.asyncio
+async def test_archived_game_does_not_offer_or_open_character_wish_editing(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+    await tables.confirm(
+        event.event_id,
+        operation_id="existing-confirm",
+        participant_key=key,
+        character_wish="Doctor",
+    )
+    await engine.events.archive(event.event_id, datetime.now(UTC))
+
+    games = await engine.handle(inbound(1, CHARACTER))
+    stale = await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
+
+    assert not any(button.value == f"select:character:{event.event_id}" for button in games.buttons)
+    assert "архивирована" in stale.text
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+async def test_game_archived_during_character_wish_edit_is_not_enqueued(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+    await tables.confirm(
+        event.event_id,
+        operation_id="existing-confirm",
+        participant_key=key,
+        character_wish="Doctor",
+    )
+
+    await engine.handle(inbound(1, CHARACTER))
+    await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
+    await engine.events.archive(event.event_id, datetime.now(UTC))
+
+    rejected = await engine.handle(inbound(3, "Medic"))
+
+    assert "архивирована" in rejected.text
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
 async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
