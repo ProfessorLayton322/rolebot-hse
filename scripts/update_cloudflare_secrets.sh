@@ -6,6 +6,7 @@ set -euo pipefail
 : "${CF_TO_YANDEX_HMAC_SECRET:?CF_TO_YANDEX_HMAC_SECRET is required}"
 : "${YANDEX_TO_CF_EGRESS_HMAC_SECRET:?YANDEX_TO_CF_EGRESS_HMAC_SECRET is required}"
 : "${YANDEX_DISK_TOKEN:?YANDEX_DISK_TOKEN is required}"
+: "${GOOGLE_SERVICE_ACCOUNT_JSON:?GOOGLE_SERVICE_ACCOUNT_JSON is required}"
 : "${VK_ACCESS_TOKEN:?VK_ACCESS_TOKEN is required}"
 : "${VK_CALLBACK_SECRET:?VK_CALLBACK_SECRET is required}"
 : "${VK_CONFIRMATION_STRING:?VK_CONFIRMATION_STRING is required}"
@@ -56,6 +57,7 @@ jq -n \
   --arg token "${TG_BOT_TOKEN}" \
   --arg hmac "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
   --arg disk "${YANDEX_DISK_TOKEN}" \
+  --arg google_service_account "${GOOGLE_SERVICE_ACCOUNT_JSON}" \
   --arg vk_token "${VK_ACCESS_TOKEN}" \
   --arg vk_secret "${VK_CALLBACK_SECRET}" \
   --arg vk_confirmation "${VK_CONFIRMATION_STRING}" \
@@ -74,6 +76,7 @@ jq -n \
     TG_BOT_TOKEN:$token,
     YANDEX_TO_CF_EGRESS_HMAC_SECRET:$hmac,
     YANDEX_DISK_TOKEN:$disk,
+    GOOGLE_SERVICE_ACCOUNT_JSON:$google_service_account,
     VK_ACCESS_TOKEN:$vk_token,
     VK_CALLBACK_SECRET:$vk_secret,
     VK_CONFIRMATION_STRING:$vk_confirmation,

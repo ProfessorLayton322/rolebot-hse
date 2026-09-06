@@ -14,9 +14,9 @@ locals {
     RUNTIME_CONFIG_URL      = local.runtime_config_url
     RUNTIME_CONFIG_AUDIENCE = local.runtime_config_url
     TELEGRAM_EGRESS_URL     = local.telegram_egress_url
+    GOOGLE_FOLDER_ID        = var.google_folder_id
     INLINE_SAFETY_MARGIN_MS = "100"
     APP_LOG_LEVEL           = "INFO"
-    TABLE_VERSIONING_NUMBER = tostring(var.table_versioning_number)
   }
 }
 

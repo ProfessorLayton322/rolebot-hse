@@ -69,12 +69,11 @@ variable "labels" {
   default = {}
 }
 
-variable "table_versioning_number" {
-  description = "Number of pre-edit statistics workbook backups retained on Yandex Disk."
-  type        = number
-  default     = 20
+variable "google_folder_id" {
+  description = "Google Drive folder containing the permanent statistics workbooks."
+  type        = string
   validation {
-    condition     = var.table_versioning_number >= 1 && var.table_versioning_number <= 1000 && floor(var.table_versioning_number) == var.table_versioning_number
-    error_message = "table_versioning_number must be an integer between 1 and 1000."
+    condition     = length(trimspace(var.google_folder_id)) > 0
+    error_message = "google_folder_id must not be empty."
   }
 }

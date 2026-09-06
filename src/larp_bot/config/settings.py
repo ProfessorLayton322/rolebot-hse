@@ -17,10 +17,10 @@ class Settings(BaseModel):
     runtime_config_audience: str
     runtime_service_account_id: str
     telegram_egress_url: str
+    google_folder_id: str
     inline_safety_margin_ms: int = Field(default=100, ge=50, le=500)
     worker_max_seconds: float = Field(default=40.0, ge=1, le=300)
     app_log_level: str = "INFO"
-    table_versioning_number: int = Field(default=20, ge=1, le=1000)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -33,6 +33,7 @@ class Settings(BaseModel):
             "runtime_config_audience": "RUNTIME_CONFIG_AUDIENCE",
             "runtime_service_account_id": "RUNTIME_SERVICE_ACCOUNT_ID",
             "telegram_egress_url": "TELEGRAM_EGRESS_URL",
+            "google_folder_id": "GOOGLE_FOLDER_ID",
         }
         missing = [environment for environment in required.values() if not os.getenv(environment)]
         if missing:
@@ -43,5 +44,4 @@ class Settings(BaseModel):
             inline_safety_margin_ms=int(os.getenv("INLINE_SAFETY_MARGIN_MS", "100")),
             worker_max_seconds=float(os.getenv("WORKER_MAX_SECONDS", "40")),
             app_log_level=os.getenv("APP_LOG_LEVEL", "INFO"),
-            table_versioning_number=int(os.getenv("TABLE_VERSIONING_NUMBER", "20")),
         )

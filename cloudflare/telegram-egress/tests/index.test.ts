@@ -5,6 +5,7 @@ const env: Env = {
   TG_BOT_TOKEN: "123:token",
   YANDEX_TO_CF_EGRESS_HMAC_SECRET: "egress-secret",
   YANDEX_DISK_TOKEN: "disk-token",
+  GOOGLE_SERVICE_ACCOUNT_JSON: '{"type":"service_account"}',
   VK_ACCESS_TOKEN: "vk-token",
   VK_CALLBACK_SECRET: "vk-secret",
   VK_CONFIRMATION_STRING: "confirmation",
@@ -109,6 +110,7 @@ describe("telegram egress", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const payload = (await response.json()) as { values: Record<string, string> };
     expect(payload.values.YANDEX_DISK_TOKEN).toBe("disk-token");
+    expect(payload.values.GOOGLE_SERVICE_ACCOUNT_JSON).toBe('{"type":"service_account"}');
     expect(payload.values.YMQ_SECRET_ACCESS_KEY).toBe("ymq-secret");
     expect(payload.values.TG_GAMEMASTER_IDS).toBe("[3]");
     expect(payload.values.VK_GAMEMASTER_IDS).toBe("[4]");
