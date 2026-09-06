@@ -617,7 +617,7 @@ class ConversationEngine:
         after: tuple[datetime, str] | None = None,
         empty_text: str = "Подходящих игр сейчас нет.",
     ) -> BotResponse:
-        events = list(await self.events.list_page(statuses=statuses, after=after, limit=10))
+        events = list(await self.events.list_page(statuses=statuses, after=after, archived=False, limit=10))
         if not events:
             return BotResponse(text=empty_text, buttons=[Button(label=BACK, value=BACK)])
         if flow.startswith("admin-"):
@@ -628,6 +628,7 @@ class ConversationEngine:
             more = await self.events.list_page(
                 statuses=statuses,
                 after=(last.created_at, last.event_id),
+                archived=False,
                 limit=1,
             )
             if more:
@@ -656,8 +657,8 @@ class ConversationEngine:
                 return BotResponse(text="Недостаточно прав.")
             cursor = (datetime.fromtimestamp(int(parts[3]) / 1_000_000, UTC), parts[4])
             if parts[2] == "p":
-                return await self._show_admin_games(before=cursor)
-            return await self._show_admin_games(after=cursor)
+                return await self._show_admin_games(user, before=cursor)
+            return await self._show_admin_games(user, after=cursor)
         parts = value.split(":", 3)
         if len(parts) != 4 or not parts[2].isdigit():
             return BotResponse(text="Некорректная страница.")
@@ -678,9 +679,9 @@ class ConversationEngine:
         if flow in event_flow_statuses:
             return await self._show_events(flow, event_flow_statuses[flow], after=after)
         if flow == "admin-list":
-            return await self._show_admin_games()
+            return await self._show_admin_games(user)
         if flow == "admin-pass-list":
-            return await self._show_admin_games()
+            return await self._show_admin_games(user)
         return await self._show_registered(user, flow, after=after)
 
     async def _show_registered(
@@ -700,6 +701,8 @@ class ConversationEngine:
         actionable_matches = matches
         if flow == "confirm":
             actionable_matches = [item for item in matches if item[0].status is EventStatus.CONFIRMATION_OPEN]
+        elif flow == "cancel":
+            actionable_matches = [item for item in matches if item[0].archived_at is None]
         buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
         if cursor is not None:
             micros = int(cursor[0].timestamp() * 1_000_000)
@@ -740,6 +743,8 @@ class ConversationEngine:
                     text="Сначала полностью заполните профиль.",
                     buttons=[Button(label=PROFILE, value=PROFILE)],
                 )
+            if event.archived_at is not None:
+                return BotResponse(text="Эта игра архивирована. Запись на неё недоступна.")
             if event.status is EventStatus.CLOSED:
                 return BotResponse(text="Регистрация на эту игру уже закрыта.")
             user.dialog_context = {"event_id": event_id, "event_name": event.name}
@@ -768,6 +773,8 @@ class ConversationEngine:
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
             return BotResponse(text="Сначала запишитесь на эту игру.")
+        if flow == "cancel" and event.archived_at is not None:
+            return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
                 return BotResponse(
@@ -862,6 +869,11 @@ class ConversationEngine:
     async def _enqueue_enlist(self, user: User, message: InboundMessage) -> BotResponse:
         context = user.dialog_context.copy()
         await self._clear(user)
+        event = await self.events.get(str(context["event_id"]))
+        if event is None:
+            return BotResponse(text="Игра не найдена.")
+        if event.archived_at is not None:
+            return BotResponse(text="Эта игра архивирована. Запись на неё недоступна.")
         if isinstance(user, TelegramUser):
             vk_profile = user.vk_url or ""
             telegram_handle = normalize_telegram_handle(message.telegram_username)
@@ -938,6 +950,11 @@ class ConversationEngine:
             return BotResponse(text="Подтвердите отмену кнопкой или выберите «Отмена».")
         context = user.dialog_context.copy()
         await self._clear(user)
+        event = await self.events.get(str(context["event_id"]))
+        if event is None:
+            return BotResponse(text="Игра не найдена.")
+        if event.archived_at is not None:
+            return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
         await self.registrations.enqueue(
             operation=Operation.CANCEL,
             event_id=str(context["event_id"]),
@@ -1028,7 +1045,17 @@ class ConversationEngine:
             "ADMIN_WAITING_PICK",
         }
         if user.dialog_state in event_bound_states:
-            denied = await self._event_leader_required(user, str(user.dialog_context["event_id"]))
+            event_id = str(user.dialog_context["event_id"])
+            event = await self.events.get(event_id)
+            if event is not None and event.archived_at is not None:
+                await self._clear(user)
+                if not await self._is_admin(user):
+                    return BotResponse(text="Игра не найдена.")
+                return BotResponse(
+                    text=f"Игра «{event.name}» уже архивирована.",
+                    buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                )
+            denied = await self._event_leader_required(user, event_id)
             if denied is not None:
                 return denied
         if user.dialog_state == "ADMIN_GAMEMASTER_PLATFORM":
@@ -1714,21 +1741,24 @@ class ConversationEngine:
 
     async def _show_admin_games(
         self,
+        user: User,
         *,
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
     ) -> BotResponse:
+        archive_filter = None if await self._is_admin(user) else False
         events = list(
             await self.events.list_page(
                 after=after,
                 before=before,
-                archived=False,
+                archived=archive_filter,
+                newest_first=True,
                 limit=10,
             )
         )
         if not events:
             return BotResponse(
-                text="Неархивированных игр нет.",
+                text="Игр для управления нет.",
                 buttons=[Button(label=BACK, value=ADMIN_MENU)],
             )
 
@@ -1736,12 +1766,14 @@ class ConversationEngine:
         previous, following = await asyncio.gather(
             self.events.list_page(
                 before=(first.created_at, first.event_id),
-                archived=False,
+                archived=archive_filter,
+                newest_first=True,
                 limit=1,
             ),
             self.events.list_page(
                 after=(last.created_at, last.event_id),
-                archived=False,
+                archived=archive_filter,
+                newest_first=True,
                 limit=1,
             ),
         )
@@ -1755,8 +1787,18 @@ class ConversationEngine:
 
     async def _game_management(self, user: User, event: Event) -> BotResponse:
         if event.archived_at is not None:
+            if not await self._is_admin(user):
+                return BotResponse(
+                    text="Игра не найдена.",
+                    buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                )
             return BotResponse(
-                text=f"Игра «{event.name}» уже архивирована.",
+                text=(
+                    f"Управление игрой «{event.name}»\n\n"
+                    f"Количество игроков: {event.player_amount}\n"
+                    "Статус: Архивирована\n\n"
+                    "Архивная игра доступна только для просмотра."
+                ),
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
         is_leader = await self._is_event_leader(user, event.event_id)
@@ -1803,6 +1845,8 @@ class ConversationEngine:
             return BotResponse(text="Недостаточно прав.")
         event = await self.events.get(event_id)
         if event is None:
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+        if event.archived_at is not None and not await self._is_admin(user):
             return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
         if action == "manage":
             return await self._game_management(user, event)
@@ -1963,7 +2007,7 @@ class ConversationEngine:
             "📋 Список игр",
             *LEGACY_STATUS_ACTIONS,
         }:
-            return await self._show_admin_games()
+            return await self._show_admin_games(user)
         if value == GRANT_GAMEMASTER:
             if not await self._is_admin(user):
                 return BotResponse(text="Недостаточно прав.")

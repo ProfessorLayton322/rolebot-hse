@@ -182,6 +182,21 @@ async def test_active_game_page_filters_archived_rows_and_supports_previous_curs
 
 
 @pytest.mark.asyncio
+async def test_newest_first_page_uses_reverse_keyset_order() -> None:
+    older = event_row("CLOSED") | {"event_id": "event-old", "created_at": datetime(2025, 1, 1, tzinfo=UTC)}
+    executor = RecordingExecutor([older])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    cursor = (datetime(2026, 1, 1, tzinfo=UTC), "event-a1")
+
+    events = await repository.list_page(after=cursor, newest_first=True, limit=10)
+
+    assert [event.event_id for event in events] == ["event-old"]
+    assert "created_at < $after_time" in executor.query_text
+    assert "event_id < $after_id" in executor.query_text
+    assert "created_at DESC, event_id DESC" in executor.query_text
+
+
+@pytest.mark.asyncio
 async def test_archive_sets_timestamp_and_closed_status() -> None:
     executor = RecordingExecutor([event_row("CONFIRMATION_OPEN")])
     repository = YdbEventRepository(executor)  # type: ignore[arg-type]

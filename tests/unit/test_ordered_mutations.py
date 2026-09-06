@@ -359,6 +359,33 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "payload"),
+    [
+        (Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")),
+        (Operation.CANCEL, EmptyPayload()),
+    ],
+)
+async def test_archived_game_rejects_signup_and_cancellation(
+    operation: Operation,
+    payload: EnlistPayload | EmptyPayload,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    if operation is Operation.CANCEL:
+        await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
+    await events.archive(event.event_id, datetime.now(UTC))
+
+    with pytest.raises(OperationNotAllowed, match="архивирована"):
+        await mutations.apply(command(event, operation, payload))
+
+
+@pytest.mark.asyncio
 async def test_leader_removal_deletes_registration_and_refreshes_every_table(
     disk_store: MemoryDiskStore,
     event: Event,
