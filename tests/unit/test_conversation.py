@@ -19,6 +19,7 @@ from larp_bot.adapters.memory import (
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADD_EVENT_LEADER,
+    ADD_SELF_EVENT_LEADER,
     ADMIN,
     ADMIN_MENU,
     ARCHIVE_GAME,
@@ -71,6 +72,7 @@ from larp_bot.domain.models import (
     InboundMessage,
     NotificationPayload,
     Operation,
+    PassDetails,
     Platform,
     Registration,
     TelegramUser,
@@ -1408,9 +1410,7 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
 
 
 @pytest.mark.asyncio
-async def test_gamemaster_created_game_seeds_creator_and_every_configured_admin(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, _, _, _ = await engine_setup(
         disk_store,
         event,
@@ -1427,13 +1427,11 @@ async def test_gamemaster_created_game_seeds_creator_and_every_configured_admin(
     leaders = await engine.events.list_leaders(created.event_id)
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
         (Platform.TELEGRAM, 1),
-        (Platform.TELEGRAM, 20),
-        (Platform.VK, 30),
     }
 
 
 @pytest.mark.asyncio
-async def test_selecting_existing_game_backfills_every_configured_admin_as_leader(
+async def test_admin_controls_existing_game_without_becoming_its_master(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, _, _, _ = await engine_setup(
@@ -1450,12 +1448,70 @@ async def test_selecting_existing_game_backfills_every_configured_admin_as_leade
     assert event.name in next(button.label for button in games.buttons if button.value.startswith("ag:manage:"))
     assert f"Управление игрой «{event.name}»" in selected.text
     assert f"Количество игроков: {event.player_amount}" in selected.text
-    leaders = await engine.events.list_leaders(event.event_id)
-    assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
-        (Platform.TELEGRAM, 1),
-        (Platform.TELEGRAM, 20),
-        (Platform.VK, 30),
-    }
+    assert CHANGE_STATUS in {button.label for button in selected.buttons}
+    assert await engine.events.list_leaders(event.event_id) == []
+
+
+@pytest.mark.asyncio
+async def test_admin_can_join_and_leave_game_masters_without_losing_control_or_pass_sync(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    admin = await users.get(Platform.TELEGRAM, 1)
+    assert isinstance(admin, TelegramUser)
+    admin.needs_pass = True
+    admin.pass_details = PassDetails(
+        surname_cyrillic="Иванов",
+        name_cyrillic="Иван",
+        patronym_cyrillic="-",
+        foreigner=False,
+        mobile_phone="+7 999 123-45-67",
+        email="admin@example.com",
+    )
+    await users.save(admin)
+
+    await engine.administration.create_pass_table(event.event_id)
+    stored_event = await engine.events.get(event.event_id)
+    assert stored_event is not None and stored_event.pass_table_resource_path is not None
+    pass_path = stored_event.pass_table_resource_path
+    initial = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert initial.active.max_row == 1
+    finally:
+        initial.close()
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    assert CHANGE_STATUS in {button.label for button in management.buttons}
+    masters = await engine.handle(inbound(2, f"ag:masters:{event.event_id}", callback=True))
+    self_add = next(button for button in masters.buttons if button.label == ADD_SELF_EVENT_LEADER)
+    added = await engine.handle(inbound(3, self_add.value, callback=True))
+
+    assert added.text == f"✅ Администратор добавлен мастером игры «{event.name}»."
+    identity = BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)
+    assert identity in await engine.events.list_leaders(event.event_id)
+    joined = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert joined.active.max_row == 2
+        assert joined.active["I2"].value == "admin@example.com"
+    finally:
+        joined.close()
+
+    await engine.handle(inbound(4, f"ag:masters:{event.event_id}", callback=True))
+    removal = await engine.handle(inbound(5, f"master:remove:{event.event_id}", callback=True))
+    remove_self = next(button for button in removal.buttons if button.value == "master:remove-pick:t:1")
+    await engine.handle(inbound(6, remove_self.value, callback=True))
+    removed = await engine.handle(inbound(7, "master:remove-confirm", callback=True))
+
+    assert removed.text == f"✅ Мастер удалён из игры «{event.name}»."
+    assert identity not in await engine.events.list_leaders(event.event_id)
+    left = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert left.active.max_row == 1
+    finally:
+        left.close()
+
+    still_admin = await engine.handle(inbound(8, f"ag:manage:{event.event_id}", callback=True))
+    assert CHANGE_STATUS in {button.label for button in still_admin.buttons}
 
 
 @pytest.mark.asyncio
@@ -1605,7 +1661,7 @@ async def test_event_leader_cannot_add_a_non_gamemaster_as_leader(disk_store: Me
     await engine.handle(inbound(2, "admin:event-leader:telegram", callback=True))
     denied = await engine.handle(inbound(3, "@ordinary_user"))
 
-    assert denied.text == "Добавить мастером можно только модератора."
+    assert denied.text == "Добавить мастером можно только модератора или администратора."
     assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) not in await engine.events.list_leaders(
         event.event_id
     )

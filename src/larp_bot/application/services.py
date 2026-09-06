@@ -35,6 +35,7 @@ from larp_bot.domain.security import participant_key
 from .deadlines import format_confirmation_deadline
 from .navigation import confirmation_button, main_menu_button
 from .ports import (
+    AdminConfigProvider,
     DeferredTransport,
     EventRepository,
     OrderedCommandPublisher,
@@ -172,30 +173,34 @@ class RegistrationCatalog:
         await self.archive(event)
 
 
-async def _confirmed_pass_profiles(
+async def _event_pass_profiles(
     event: Event,
+    events: EventRepository,
     registrations: RegistrationRepository,
     users: UserRepository,
     participant_secret: str,
 ) -> list[PassDetails]:
-    registration_rows, user_rows = await asyncio.gather(
+    registration_rows, user_rows, leader_rows = await asyncio.gather(
         registrations.list_for_event(event.event_id),
         users.list_all(),
+        events.list_leaders(event.event_id),
     )
-    pass_profiles: dict[str, PassDetails] = {}
+    confirmed_keys = {
+        registration.participant_key
+        for registration in registration_rows
+        if registration.attendance_status is AttendanceStatus.CONFIRMED
+    }
+    leader_keys = {(leader.platform, leader.platform_user_id) for leader in leader_rows}
+    profiles: list[PassDetails] = []
     for user in user_rows:
-        if not user.profile_complete or user.needs_pass is not True or user.pass_details is None:
+        if user.needs_pass is not True or user.pass_details is None:
             continue
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
         key = participant_key(participant_secret, platform, uid, event.event_id)
-        pass_profiles[key] = user.pass_details
-    return [
-        pass_profiles[registration.participant_key]
-        for registration in registration_rows
-        if registration.attendance_status is AttendanceStatus.CONFIRMED
-        and registration.participant_key in pass_profiles
-    ]
+        if key in confirmed_keys or (platform, uid) in leader_keys:
+            profiles.append(user.pass_details)
+    return profiles
 
 
 class RegistrationService:
@@ -506,11 +511,13 @@ class EventAdministrationService:
         if event is None:
             raise EventNotFound("Игра не найдена")
         if event.pass_table_public_url is not None:
+            await self.refresh_pass_table(event.event_id)
             return PassTableExport(event.pass_table_public_url, created=False, row_count=None)
 
         await self.catalog.ensure_migrated(event)
-        profiles = await _confirmed_pass_profiles(
+        profiles = await _event_pass_profiles(
             event,
+            self.events,
             self.catalog.registrations,
             self.users,
             self.participant_secret,
@@ -525,6 +532,22 @@ class EventAdministrationService:
             await self.showcase.delete_pass_table(disk_path)
             raise
         return PassTableExport(public_url, created=True, row_count=len(profiles))
+
+    async def refresh_pass_table(self, event_id: str) -> None:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.pass_table_resource_path is None:
+            return
+        await self.catalog.ensure_migrated(event)
+        profiles = await _event_pass_profiles(
+            event,
+            self.events,
+            self.catalog.registrations,
+            self.users,
+            self.participant_secret,
+        )
+        await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
 
 
 @dataclass(frozen=True)
@@ -854,24 +877,30 @@ class OrderedMutationService:
         catalog: RegistrationCatalog,
         users: UserRepository | None = None,
         participant_secret: str | None = None,
+        admins: AdminConfigProvider | None = None,
     ) -> None:
         self.events = events
         self.catalog = catalog
         self.users = users
         self.participant_secret = participant_secret
+        self.admins = admins
 
     async def _require_event_leader(self, command: OrderedRegistrationCommand) -> None:
         identity = BotIdentity(platform=command.platform, platform_user_id=command.platform_user_id)
-        if identity not in await self.events.list_leaders(command.event_id):
-            raise OperationNotAllowed("Только мастера этой игры могут изменять её данные")
+        if identity in await self.events.list_leaders(command.event_id):
+            return
+        if self.admins is not None and await self.admins.is_admin(command.platform, command.platform_user_id):
+            return
+        raise OperationNotAllowed("Только мастера этой игры и администраторы бота могут изменять её данные")
 
     async def _refresh_pass_table(self, event: Event) -> None:
         if event.pass_table_resource_path is None:
             return
         if self.users is None or self.participant_secret is None:
             raise RuntimeError("pass table refresh requires users and participant secret")
-        profiles = await _confirmed_pass_profiles(
+        profiles = await _event_pass_profiles(
             event,
+            self.events,
             self.catalog.registrations,
             self.users,
             self.participant_secret,
