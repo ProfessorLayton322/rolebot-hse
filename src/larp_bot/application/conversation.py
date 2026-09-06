@@ -31,6 +31,7 @@ from larp_bot.domain.models import (
     StatisticsPayload,
     TelegramUser,
     User,
+    VkUser,
     normalize_mobile_phone,
     normalize_telegram_handle,
     normalize_telegram_profile,
@@ -77,19 +78,26 @@ REMOVE_PLAYER = "🗑 Удалить игрока"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
+MANAGE_MODERATORS = "Управление модераторами"
 STATS_SOURCE = "📊 Выбрать таблицу статистики"
 STATS_SEASON = "🗓 Начать новый сезон"
 STATS_LINK = "🔗 Ссылка на статистику"
 STATS_GAME = "📊 Внести участие в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
-GRANT_GAMEMASTER = "🎖 Назначить гейммастера"
-ADD_EVENT_LEADER = "👑 Добавить ведущего игры"
+GRANT_GAMEMASTER = "➕ Назначить модератора"
+REVOKE_GAMEMASTER = "➖ Снять модератора"
+LIST_GAMEMASTERS = "📋 Список модераторов"
+MANAGE_MASTERS = "Мастера"
+ADD_EVENT_LEADER = "➕ Добавить мастера"
+REMOVE_EVENT_LEADER = "➖ Удалить мастера"
+LIST_EVENT_LEADERS = "📋 Список мастеров"
 ARCHIVE_GAME = "📦 Архивировать игру"
 LEGACY_DELETE_GAME = "🗑 Удалить игру"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
-GAMEMASTER_NOTIFICATION = "Вам было присуждено звание гейммастера! 🎉🎉🎉"
+GAMEMASTER_NOTIFICATION = "Вы назначены модератором! 🎉"
+GAMEMASTER_REVOKED_NOTIFICATION = "Вы больше не являетесь модератором."
 UNSUPPORTED_CONTENT_RESPONSE = "Я не буду на это отвечать"
 
 REGISTRATION_OPEN_STATUSES = frozenset({EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN})
@@ -103,7 +111,7 @@ ADMIN_STATUS_CHOICES = {
     "admin:status:confirmation": (STATUS_CONFIRMATION, Operation.OPEN_CONFIRMATION),
     "admin:status:closed": (STATUS_CLOSED, Operation.CLOSE_EVENT),
 }
-MASTER_TABLE_DISCLAIMER = "⚠️ Только для ведущих этой игры. Не пересылайте эту ссылку игрокам!"
+MASTER_TABLE_DISCLAIMER = "⚠️ Только для мастеров этой игры. Не пересылайте эту ссылку игрокам!"
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
@@ -122,8 +130,14 @@ ADMIN_ACTIONS = frozenset(
         REMOVE_PLAYER,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
+        MANAGE_MODERATORS,
         GRANT_GAMEMASTER,
+        REVOKE_GAMEMASTER,
+        LIST_GAMEMASTERS,
+        MANAGE_MASTERS,
         ADD_EVENT_LEADER,
+        REMOVE_EVENT_LEADER,
+        LIST_EVENT_LEADERS,
         ARCHIVE_GAME,
         LEGACY_DELETE_GAME,
         "📋 Список игр",
@@ -150,6 +164,13 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_NOTIFICATION_TEXT",
         "ADMIN_GAMEMASTER_PROFILE",
         "ADMIN_EVENT_LEADER_PROFILE",
+        "ADMIN_MODERATOR_LIST",
+        "ADMIN_MODERATOR_REMOVE",
+        "ADMIN_MODERATOR_REMOVE_CONFIRM",
+        "ADMIN_EVENT_LEADER_ADD_PICK",
+        "ADMIN_EVENT_LEADER_REMOVE",
+        "ADMIN_EVENT_LEADER_REMOVE_CONFIRM",
+        "ADMIN_EVENT_LEADER_LIST",
         "ADMIN_ARCHIVE_NAME",
         "ADMIN_DELETE_NAME",
         "ADMIN_REMOVE_PICK",
@@ -290,7 +311,7 @@ class ConversationEngine:
             or value in {ADMIN, ADMIN_MENU}
             or value in ADMIN_ACTIONS
             or value in LEGACY_STATUS_ACTIONS
-            or value.startswith(("ag:", "select:admin-", "page:admin-", "page:a:"))
+            or value.startswith(("ag:", "mod:", "master:", "select:admin-", "page:admin-", "page:a:"))
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
         if value == "/start":
@@ -322,10 +343,14 @@ class ConversationEngine:
         elif value == CANCEL_DIALOG:
             await self._clear(user)
             response = await self._main(user, "Действие отменено.")
-        elif value == ADMIN_MENU:
+        elif value in {ADMIN_MENU, MANAGE_MODERATORS}:
             await self._clear(user)
-            response = await self._admin_menu(user)
-        elif value.startswith("ag:manage:"):
+            response = (
+                await self._moderator_management_menu(user)
+                if value == MANAGE_MODERATORS
+                else await self._admin_menu(user)
+            )
+        elif value.startswith(("ag:manage:", "ag:masters:")):
             await self._clear(user)
             response = await self._admin_game_action(user, message, value)
         elif user.dialog_state != "IDLE":
@@ -382,6 +407,10 @@ class ConversationEngine:
             return await self._page(user, value)
         if value.startswith("ag:"):
             return await self._admin_game_action(user, message, value)
+        if value.startswith(("mod:", "master:")):
+            admin_response = await self._admin_callback(user, message, value)
+            if admin_response is not None:
+                return admin_response
         if value in {STATS_SOURCE, STATS_SEASON, STATS_LINK}:
             if not await self._is_admin(user):
                 return BotResponse(text="Недостаточно прав.")
@@ -980,7 +1009,7 @@ class ConversationEngine:
             BACK,
         ]
         if await self._is_admin(user):
-            labels.insert(-1, GRANT_GAMEMASTER)
+            labels.insert(-1, MANAGE_MODERATORS)
             labels[-1:-1] = [STATS_SOURCE, STATS_SEASON, STATS_LINK]
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
@@ -988,6 +1017,115 @@ class ConversationEngine:
     def _identity(user: User) -> BotIdentity:
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         return BotIdentity(platform=platform, platform_user_id=user_id(user))
+
+    @staticmethod
+    def _platform_code(platform: Platform) -> str:
+        return "t" if platform is Platform.TELEGRAM else "v"
+
+    @staticmethod
+    def _platform_from_code(value: str) -> Platform:
+        if value == "t":
+            return Platform.TELEGRAM
+        if value == "v":
+            return Platform.VK
+        raise ValueError("unknown platform")
+
+    @classmethod
+    def _person_label(cls, identity: BotIdentity, profile: User | None) -> str:
+        platform_name = "TG" if identity.platform is Platform.TELEGRAM else "VK"
+        name = profile.full_name if profile is not None and profile.full_name else f"ID {identity.platform_user_id}"
+        return f"{name} · {platform_name}"
+
+    @staticmethod
+    def _profile_text(title: str, identity: BotIdentity, profile: User | None) -> str:
+        name = profile.full_name if profile is not None and profile.full_name else "не указано"
+        lines = [title, "", f"Имя: {name}"]
+        if isinstance(profile, TelegramUser):
+            telegram = (
+                f"https://t.me/{profile.telegram_handle.removeprefix('@')}"
+                if profile.telegram_handle is not None
+                else "не указан"
+            )
+            lines.extend((f"Telegram: {telegram}", f"VK: {profile.vk_url or 'не указан'}"))
+        elif isinstance(profile, VkUser):
+            telegram = (
+                f"https://t.me/{profile.telegram_handle.removeprefix('@')}"
+                if profile.telegram_handle is not None
+                else "не указан"
+            )
+            lines.extend((f"Telegram: {telegram}", f"VK: https://vk.com/id{profile.vk_id}"))
+        elif identity.platform is Platform.VK:
+            lines.extend(("Telegram: не указан", f"VK: https://vk.com/id{identity.platform_user_id}"))
+        else:
+            lines.extend((f"Telegram ID: {identity.platform_user_id}", "VK: не указан"))
+        return "\n".join(lines)
+
+    async def _moderator_users(self, *, removable: bool = False) -> list[User]:
+        users, configured = await asyncio.gather(self.users.list_all(), self.admins.list_gamemasters())
+        configured_keys = {(identity.platform, identity.platform_user_id) for identity in configured}
+        matches = []
+        for profile in users:
+            identity = self._identity(profile)
+            configured_role = (identity.platform, identity.platform_user_id) in configured_keys
+            if removable:
+                if profile.is_gamemaster and not configured_role:
+                    matches.append(profile)
+            elif profile.is_gamemaster or configured_role:
+                matches.append(profile)
+        return sorted(
+            matches,
+            key=lambda profile: (
+                (profile.full_name or "").casefold(),
+                self._identity(profile).platform.value,
+                user_id(profile),
+            ),
+        )
+
+    async def _event_master_records(self, event_id: str) -> list[tuple[BotIdentity, User | None]]:
+        await self._sync_admin_leaders(event_id)
+        identities = list(await self.events.list_leaders(event_id))
+        profiles = await asyncio.gather(
+            *(self.users.get(identity.platform, identity.platform_user_id) for identity in identities)
+        )
+        records = list(zip(identities, profiles, strict=True))
+        return sorted(
+            records,
+            key=lambda record: (
+                ((record[1].full_name or "") if record[1] is not None else "").casefold(),
+                record[0].platform.value,
+                record[0].platform_user_id,
+            ),
+        )
+
+    async def _notify_status_change(
+        self,
+        actor: User,
+        target: User,
+        *,
+        request_id: str,
+        text: str,
+        buttons: list[Button] | None = None,
+    ) -> None:
+        if self.transport is None:
+            raise RuntimeError("deferred transport is not configured")
+        buttons = buttons or []
+        identity = self._identity(target)
+        await self.transport.send(
+            platform=identity.platform,
+            user_id=identity.platform_user_id,
+            request_id=request_id,
+            text=text,
+            buttons=buttons,
+        )
+        await self.users.claim_delivery(
+            identity.platform,
+            identity.platform_user_id,
+            request_id,
+            buttons,
+        )
+        if self._identity(actor) == identity:
+            actor.last_delivery_operation_id = request_id
+            actor.last_bot_buttons = buttons.copy()
 
     async def _sync_admin_leaders(self, event_id: str) -> None:
         admins = list(await self.admins.list_admins())
@@ -1012,7 +1150,7 @@ class ConversationEngine:
         if await self._is_event_leader(user, event_id):
             return None
         await self._clear(user)
-        return BotResponse(text="Только ведущие этой игры могут изменять её данные.")
+        return BotResponse(text="Только мастера этой игры могут изменять её данные.")
 
     async def _is_admin(self, user: User) -> bool:
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
@@ -1025,6 +1163,385 @@ class ConversationEngine:
             return True
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         return await self.admins.is_gamemaster(platform, user_id(user))
+
+    async def _moderator_management_menu(self, user: User) -> BotResponse:
+        if not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        await self._clear(user)
+        return BotResponse(
+            text="Управление модераторами",
+            buttons=[
+                Button(label=GRANT_GAMEMASTER, value=GRANT_GAMEMASTER),
+                Button(label=REVOKE_GAMEMASTER, value=REVOKE_GAMEMASTER),
+                Button(label=LIST_GAMEMASTERS, value=LIST_GAMEMASTERS),
+                Button(label=BACK, value=ADMIN_MENU),
+            ],
+        )
+
+    async def _show_moderators(self, user: User, mode: str, *, offset: int = 0) -> BotResponse:
+        if not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        if offset < 0:
+            return BotResponse(text="Некорректная страница.")
+        profiles = await self._moderator_users(removable=mode == "remove")
+        if offset >= len(profiles) and offset:
+            offset = max(0, ((len(profiles) - 1) // 10) * 10)
+        page = profiles[offset : offset + 10]
+        user.dialog_state = "ADMIN_MODERATOR_REMOVE" if mode == "remove" else "ADMIN_MODERATOR_LIST"
+        user.dialog_context = {"moderator_offset": offset}
+        if mode == "remove":
+            text = "Выберите модератора, с которого нужно снять полномочия:"
+            empty = "Нет назначенных в боте модераторов, которых можно снять."
+            action = "remove-pick"
+        else:
+            text = "Модераторы:"
+            empty = "Модераторов пока нет."
+            action = "view"
+        buttons = [
+            Button(
+                label=self._person_label(self._identity(profile), profile),
+                value=(f"mod:{action}:{self._platform_code(self._identity(profile).platform)}:{user_id(profile)}"),
+            )
+            for profile in page
+        ]
+        if offset:
+            buttons.append(Button(label="⬅️ Предыдущая", value=f"mod:{mode}-page:{max(0, offset - 10)}"))
+        if offset + 10 < len(profiles):
+            buttons.append(Button(label="➡️ Следующая", value=f"mod:{mode}-page:{offset + 10}"))
+        buttons.append(Button(label=BACK, value=MANAGE_MODERATORS))
+        return BotResponse(text=text if page else empty, buttons=buttons)
+
+    async def _event_masters_menu(self, user: User, event: Event) -> BotResponse:
+        denied = await self._event_leader_required(user, event.event_id)
+        if denied is not None:
+            return denied
+        await self._clear(user)
+        return BotResponse(
+            text=f"Мастера игры «{event.name}»",
+            buttons=[
+                Button(label=ADD_EVENT_LEADER, value=f"master:add:{event.event_id}"),
+                Button(label=REMOVE_EVENT_LEADER, value=f"master:remove:{event.event_id}"),
+                Button(label=LIST_EVENT_LEADERS, value=f"master:list:{event.event_id}"),
+                game_management_button(event.event_id),
+            ],
+        )
+
+    async def _show_event_master_candidates(
+        self,
+        user: User,
+        event: Event,
+        *,
+        offset: int = 0,
+    ) -> BotResponse:
+        if offset < 0:
+            return BotResponse(text="Некорректная страница.")
+        moderators, current = await asyncio.gather(
+            self._moderator_users(),
+            self.events.list_leaders(event.event_id),
+        )
+        current_keys = {(identity.platform, identity.platform_user_id) for identity in current}
+        candidates = [
+            profile
+            for profile in moderators
+            if (self._identity(profile).platform, user_id(profile)) not in current_keys
+        ]
+        if offset >= len(candidates) and offset:
+            offset = max(0, ((len(candidates) - 1) // 10) * 10)
+        page = candidates[offset : offset + 10]
+        user.dialog_state = "ADMIN_EVENT_LEADER_ADD_PICK"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "master_offset": offset,
+        }
+        buttons = [
+            Button(
+                label=self._person_label(self._identity(profile), profile),
+                value=(f"master:add-pick:{self._platform_code(self._identity(profile).platform)}:{user_id(profile)}"),
+            )
+            for profile in page
+        ]
+        if offset:
+            buttons.append(Button(label="⬅️ Предыдущая", value=f"master:add-page:{max(0, offset - 10)}"))
+        if offset + 10 < len(candidates):
+            buttons.append(Button(label="➡️ Следующая", value=f"master:add-page:{offset + 10}"))
+        buttons.extend(
+            [
+                Button(label="🔗 Ввести профиль Telegram или VK", value="master:add-direct"),
+                Button(label=BACK, value=f"ag:masters:{event.event_id}"),
+            ]
+        )
+        text = (
+            f"Выберите модератора, которого нужно добавить мастером игры «{event.name}»:"
+            if page
+            else ("Нет модераторов, которых можно выбрать. Можно ввести Telegram- или VK-профиль модератора напрямую.")
+        )
+        return BotResponse(text=text, buttons=buttons)
+
+    async def _show_event_masters(
+        self,
+        user: User,
+        event: Event,
+        mode: str,
+        *,
+        offset: int = 0,
+    ) -> BotResponse:
+        if offset < 0:
+            return BotResponse(text="Некорректная страница.")
+        records = await self._event_master_records(event.event_id)
+        if mode == "remove":
+            admin_keys = {
+                (identity.platform, identity.platform_user_id) for identity in await self.admins.list_admins()
+            }
+            records = [
+                record
+                for record in records
+                if (record[0].platform, record[0].platform_user_id) not in admin_keys and record[1] is not None
+            ]
+        if offset >= len(records) and offset:
+            offset = max(0, ((len(records) - 1) // 10) * 10)
+        page = records[offset : offset + 10]
+        user.dialog_state = "ADMIN_EVENT_LEADER_REMOVE" if mode == "remove" else "ADMIN_EVENT_LEADER_LIST"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "master_offset": offset,
+        }
+        action = "remove-pick" if mode == "remove" else "view"
+        buttons = [
+            Button(
+                label=self._person_label(identity, profile),
+                value=(f"master:{action}:{self._platform_code(identity.platform)}:{identity.platform_user_id}"),
+            )
+            for identity, profile in page
+        ]
+        if offset:
+            buttons.append(Button(label="⬅️ Предыдущая", value=f"master:{mode}-page:{max(0, offset - 10)}"))
+        if offset + 10 < len(records):
+            buttons.append(Button(label="➡️ Следующая", value=f"master:{mode}-page:{offset + 10}"))
+        buttons.append(Button(label=BACK, value=f"ag:masters:{event.event_id}"))
+        if mode == "remove":
+            text = f"Выберите мастера, которого нужно удалить из игры «{event.name}»:"
+            empty = "В этой игре нет назначенных мастеров, которых можно удалить."
+        else:
+            text = f"Мастера игры «{event.name}»:"
+            empty = "У этой игры пока нет мастеров."
+        return BotResponse(text=text if page else empty, buttons=buttons)
+
+    async def _admin_callback(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse | None:
+        parts = value.split(":")
+        try:
+            if value.startswith("mod:list-page:"):
+                return await self._show_moderators(user, "list", offset=int(parts[2]))
+            if value.startswith("mod:remove-page:"):
+                return await self._show_moderators(user, "remove", offset=int(parts[2]))
+            if value.startswith("mod:view:") and len(parts) == 4:
+                if not await self._is_admin(user) or user.dialog_state != "ADMIN_MODERATOR_LIST":
+                    return BotResponse(text="Недостаточно прав.")
+                platform = self._platform_from_code(parts[2])
+                target = await self.users.get(platform, int(parts[3]))
+                if target is None:
+                    return BotResponse(text="Пользователь не найден.")
+                offset = int(user.dialog_context.get("moderator_offset", 0))
+                return BotResponse(
+                    text=self._profile_text("Модератор", self._identity(target), target),
+                    buttons=[Button(label=BACK, value=f"mod:list-page:{offset}")],
+                )
+            if value.startswith("mod:remove-pick:") and len(parts) == 4:
+                if not await self._is_admin(user) or user.dialog_state != "ADMIN_MODERATOR_REMOVE":
+                    return BotResponse(text="Недостаточно прав.")
+                platform = self._platform_from_code(parts[2])
+                target = await self.users.get(platform, int(parts[3]))
+                configured = {
+                    (identity.platform, identity.platform_user_id) for identity in await self.admins.list_gamemasters()
+                }
+                if target is None or not target.is_gamemaster or (platform, int(parts[3])) in configured:
+                    return await self._show_moderators(user, "remove")
+                user.dialog_state = "ADMIN_MODERATOR_REMOVE_CONFIRM"
+                user.dialog_context["target_platform"] = platform.value
+                user.dialog_context["target_user_id"] = int(parts[3])
+                return BotResponse(
+                    text=(f"Снять полномочия модератора с пользователя «{target.full_name}»?"),
+                    buttons=[
+                        Button(label="Да, снять", value="mod:remove-confirm"),
+                        Button(label=BACK, value=f"mod:remove-page:{user.dialog_context['moderator_offset']}"),
+                    ],
+                )
+            if value == "mod:remove-confirm":
+                if not await self._is_admin(user) or user.dialog_state != "ADMIN_MODERATOR_REMOVE_CONFIRM":
+                    return BotResponse(text="Недостаточно прав.")
+                platform = Platform(str(user.dialog_context["target_platform"]))
+                target_id = int(user.dialog_context["target_user_id"])
+                target = await self.users.get(platform, target_id)
+                request_id = f"gamemaster-revoke:{platform.value}:{target_id}:{message.update_id}"
+                if target is None:
+                    await self._clear(user)
+                    return BotResponse(
+                        text="Этот пользователь уже не является модератором.",
+                        buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
+                    )
+                if target.is_gamemaster:
+                    await self.users.revoke_gamemaster(platform, target_id, request_id)
+                    refreshed = await self.users.get(platform, target_id)
+                    if refreshed is None or refreshed.is_gamemaster:
+                        raise RuntimeError("gamemaster revocation was not persisted")
+                    target = refreshed
+                elif target.gamemaster_grant_operation_id != request_id:
+                    await self._clear(user)
+                    return BotResponse(
+                        text="Этот пользователь уже не является модератором.",
+                        buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
+                    )
+                if target.last_delivery_operation_id != request_id:
+                    await self._notify_status_change(
+                        user,
+                        target,
+                        request_id=request_id,
+                        text=GAMEMASTER_REVOKED_NOTIFICATION,
+                    )
+                if self._identity(user) == self._identity(target):
+                    user.is_gamemaster = False
+                    user.gamemaster_grant_operation_id = request_id
+                await self._clear(user)
+                return BotResponse(
+                    text="✅ Полномочия модератора сняты.",
+                    buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
+                )
+            if value.startswith("master:add:") and len(parts) == 3:
+                event = await self.events.get(parts[2])
+                if event is None:
+                    return BotResponse(text="Игра не найдена.")
+                if event.archived_at is not None:
+                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                denied = await self._event_leader_required(user, event.event_id)
+                return denied or await self._show_event_master_candidates(user, event)
+            if value.startswith("master:remove:") and len(parts) == 3:
+                event = await self.events.get(parts[2])
+                if event is None:
+                    return BotResponse(text="Игра не найдена.")
+                if event.archived_at is not None:
+                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                denied = await self._event_leader_required(user, event.event_id)
+                return denied or await self._show_event_masters(user, event, "remove")
+            if value.startswith("master:list:") and len(parts) == 3:
+                event = await self.events.get(parts[2])
+                if event is None:
+                    return BotResponse(text="Игра не найдена.")
+                if event.archived_at is not None:
+                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                denied = await self._event_leader_required(user, event.event_id)
+                return denied or await self._show_event_masters(user, event, "list")
+            if value.startswith("master:add-page:"):
+                event = await self.events.get(str(user.dialog_context["event_id"]))
+                if event is None:
+                    return BotResponse(text="Игра не найдена.")
+                return await self._show_event_master_candidates(user, event, offset=int(parts[2]))
+            if value.startswith("master:add-pick:") and len(parts) == 4:
+                if user.dialog_state != "ADMIN_EVENT_LEADER_ADD_PICK":
+                    return BotResponse(text="Некорректное действие.")
+                event = await self.events.get(str(user.dialog_context["event_id"]))
+                platform = self._platform_from_code(parts[2])
+                target = await self.users.get(platform, int(parts[3]))
+                if event is None or target is None:
+                    return BotResponse(text="Пользователь или игра не найдены.")
+                return await self._assign_event_leader(user, message, event, target)
+            if value == "master:add-direct":
+                if user.dialog_state != "ADMIN_EVENT_LEADER_ADD_PICK":
+                    return BotResponse(text="Некорректное действие.")
+                user.dialog_state = "ADMIN_EVENT_LEADER_PLATFORM"
+                return self._event_leader_platform_prompt(str(user.dialog_context["event_id"]))
+            if value.startswith("master:remove-page:") or value.startswith("master:list-page:"):
+                mode = "remove" if parts[1] == "remove-page" else "list"
+                event = await self.events.get(str(user.dialog_context["event_id"]))
+                if event is None:
+                    return BotResponse(text="Игра не найдена.")
+                return await self._show_event_masters(user, event, mode, offset=int(parts[2]))
+            if value.startswith("master:view:") and len(parts) == 4:
+                if user.dialog_state != "ADMIN_EVENT_LEADER_LIST":
+                    return BotResponse(text="Некорректное действие.")
+                platform = self._platform_from_code(parts[2])
+                identity = BotIdentity(platform=platform, platform_user_id=int(parts[3]))
+                profile = await self.users.get(platform, identity.platform_user_id)
+                offset = int(user.dialog_context.get("master_offset", 0))
+                return BotResponse(
+                    text=self._profile_text("Мастер", identity, profile),
+                    buttons=[Button(label=BACK, value=f"master:list-page:{offset}")],
+                )
+            if value.startswith("master:remove-pick:") and len(parts) == 4:
+                if user.dialog_state != "ADMIN_EVENT_LEADER_REMOVE":
+                    return BotResponse(text="Некорректное действие.")
+                platform = self._platform_from_code(parts[2])
+                target_id = int(parts[3])
+                target = await self.users.get(platform, target_id)
+                event_id = str(user.dialog_context["event_id"])
+                identity = BotIdentity(platform=platform, platform_user_id=target_id)
+                if target is None or identity not in await self.events.list_leaders(event_id):
+                    event = await self.events.get(event_id)
+                    if event is None:
+                        return BotResponse(text="Игра не найдена.")
+                    return await self._show_event_masters(user, event, "remove")
+                user.dialog_state = "ADMIN_EVENT_LEADER_REMOVE_CONFIRM"
+                user.dialog_context["target_platform"] = platform.value
+                user.dialog_context["target_user_id"] = target_id
+                return BotResponse(
+                    text=f"Удалить мастера «{target.full_name}» из этой игры?",
+                    buttons=[
+                        Button(label="Да, удалить", value="master:remove-confirm"),
+                        Button(
+                            label=BACK,
+                            value=f"master:remove-page:{user.dialog_context['master_offset']}",
+                        ),
+                    ],
+                )
+            if value == "master:remove-confirm":
+                if user.dialog_state != "ADMIN_EVENT_LEADER_REMOVE_CONFIRM":
+                    return BotResponse(text="Некорректное действие.")
+                event_id = str(user.dialog_context["event_id"])
+                event_name = str(user.dialog_context["event_name"])
+                platform = Platform(str(user.dialog_context["target_platform"]))
+                target_id = int(user.dialog_context["target_user_id"])
+                identity = BotIdentity(platform=platform, platform_user_id=target_id)
+                target = await self.users.get(platform, target_id)
+                request_id = f"leader-revoke:{event_id}:{platform.value}:{target_id}:{message.update_id}"
+                pending = user.dialog_context.get("pending_leader_revoke") == request_id
+                if target is None:
+                    await self._clear(user)
+                    return BotResponse(
+                        text="Этот пользователь уже не является мастером этой игры.",
+                        buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
+                    )
+                if identity in await self.events.list_leaders(event_id):
+                    user.dialog_context["pending_leader_revoke"] = request_id
+                    await self.users.save(user)
+                    if not await self.events.remove_leader(event_id, identity):
+                        raise RuntimeError("event leader revocation was not persisted")
+                    pending = True
+                elif not pending:
+                    await self._clear(user)
+                    return BotResponse(
+                        text="Этот пользователь уже не является мастером этой игры.",
+                        buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
+                    )
+                if target.last_delivery_operation_id != request_id:
+                    await self._notify_status_change(
+                        user,
+                        target,
+                        request_id=request_id,
+                        text=f"Вы больше не являетесь мастером игры «{event_name}».",
+                    )
+                await self._clear(user)
+                return BotResponse(
+                    text=f"✅ Мастер удалён из игры «{event_name}».",
+                    buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
+                )
+        except (KeyError, TypeError, ValueError):
+            return BotResponse(text="Некорректное действие.")
+        return None
 
     async def _admin_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if not await self._has_admin_access(user):
@@ -1040,6 +1557,10 @@ class ConversationEngine:
             "ADMIN_DELETE_NAME",
             "ADMIN_EVENT_LEADER_PLATFORM",
             "ADMIN_EVENT_LEADER_PROFILE",
+            "ADMIN_EVENT_LEADER_ADD_PICK",
+            "ADMIN_EVENT_LEADER_REMOVE",
+            "ADMIN_EVENT_LEADER_REMOVE_CONFIRM",
+            "ADMIN_EVENT_LEADER_LIST",
             "ADMIN_REMOVE_PICK",
             "ADMIN_REMOVE_CONFIRM",
             "ADMIN_WAITING_PICK",
@@ -1055,9 +1576,20 @@ class ConversationEngine:
                     text=f"Игра «{event.name}» уже архивирована.",
                     buttons=[Button(label=BACK, value=MANAGE_GAMES)],
                 )
-            denied = await self._event_leader_required(user, event_id)
-            if denied is not None:
-                return denied
+            pending_self_removal = (
+                user.dialog_state == "ADMIN_EVENT_LEADER_REMOVE_CONFIRM"
+                and "pending_leader_revoke" in user.dialog_context
+                and user.dialog_context.get("target_platform") == self._identity(user).platform.value
+                and user.dialog_context.get("target_user_id") == self._identity(user).platform_user_id
+            )
+            if not pending_self_removal:
+                denied = await self._event_leader_required(user, event_id)
+                if denied is not None:
+                    return denied
+        if value.startswith(("mod:", "master:")):
+            admin_response = await self._admin_callback(user, message, value)
+            if admin_response is not None:
+                return admin_response
         if user.dialog_state == "ADMIN_GAMEMASTER_PLATFORM":
             if not await self._is_admin(user):
                 await self._clear(user)
@@ -1069,20 +1601,20 @@ class ConversationEngine:
             target_platform = platforms.get(value)
             if target_platform is None:
                 return BotResponse(
-                    text="Выберите бот, которым пользуется новый гейммастер:",
+                    text="Выберите бот, которым пользуется новый модератор:",
                     buttons=[
                         Button(label="Telegram", value="admin:gamemaster:telegram"),
                         Button(label="VK", value="admin:gamemaster:vk"),
-                        Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                        Button(label=BACK, value=MANAGE_MODERATORS),
                     ],
                 )
             user.dialog_state = "ADMIN_GAMEMASTER_PROFILE"
             user.dialog_context = {"gamemaster_platform": target_platform.value}
             if target_platform is Platform.TELEGRAM:
-                prompt = "Отправьте ссылку на профиль Telegram или @username будущего гейммастера:"
+                prompt = "Отправьте ссылку на профиль Telegram или @username будущего модератора:"
             else:
-                prompt = "Отправьте ссылку на профиль VK будущего гейммастера:"
-            return BotResponse(text=prompt, buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)])
+                prompt = "Отправьте ссылку на профиль VK будущего модератора:"
+            return BotResponse(text=prompt, buttons=[Button(label=BACK, value=MANAGE_MODERATORS)])
         if user.dialog_state == "ADMIN_GAMEMASTER_PROFILE":
             return await self._grant_gamemaster(user, message, value)
         if user.dialog_state == "ADMIN_EVENT_LEADER_PLATFORM":
@@ -1096,15 +1628,15 @@ class ConversationEngine:
             user.dialog_state = "ADMIN_EVENT_LEADER_PROFILE"
             user.dialog_context["gamemaster_platform"] = target_platform.value
             if target_platform is Platform.TELEGRAM:
-                prompt = "Отправьте ссылку на профиль Telegram или @username гейммастера:"
+                prompt = "Отправьте ссылку на профиль Telegram или @username модератора:"
             else:
-                prompt = "Отправьте ссылку на профиль VK гейммастера:"
+                prompt = "Отправьте ссылку на профиль VK модератора:"
             return BotResponse(
                 text=prompt,
-                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+                buttons=[Button(label=BACK, value=f"ag:masters:{user.dialog_context['event_id']}")],
             )
         if user.dialog_state == "ADMIN_EVENT_LEADER_PROFILE":
-            return await self._add_event_leader(user, value)
+            return await self._add_event_leader(user, message, value)
         if user.dialog_state == "ADMIN_REMOVE_PICK":
             return await self._admin_remove_pick(user, message, value)
         if user.dialog_state == "ADMIN_REMOVE_CONFIRM":
@@ -1291,7 +1823,7 @@ class ConversationEngine:
                 target = None if target_id is None else await self.users.get(Platform.VK, target_id)
         except ValueError as exc:
             return BotResponse(
-                text=f"❌ {exc}. Попробуйте ещё раз:", buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)]
+                text=f"❌ {exc}. Попробуйте ещё раз:", buttons=[Button(label=BACK, value=MANAGE_MODERATORS)]
             )
         if target is None:
             platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
@@ -1300,19 +1832,19 @@ class ConversationEngine:
                     f"Пользователь {platform_name} не найден. Убедитесь, что он уже написал этому боту "
                     "и полностью заполнил профиль, затем попробуйте ещё раз."
                 ),
-                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
             )
         if not target.profile_complete:
             return BotResponse(
                 text="Профиль этого пользователя заполнен не полностью. Попросите его завершить профиль и повторите.",
-                buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
             )
         target_id = user_id(target)
         request_id = f"gamemaster-grant:{target_platform.value}:{target_id}:{message.update_id}"
         configured_gamemaster = await self.admins.is_gamemaster(target_platform, target_id)
         if configured_gamemaster or (target.is_gamemaster and target.gamemaster_grant_operation_id != request_id):
             await self._clear(user)
-            return BotResponse(text="Этот пользователь уже является гейммастером.")
+            return BotResponse(text="Этот пользователь уже является модератором.")
 
         if not target.is_gamemaster:
             await self.users.grant_gamemaster(target_platform, target_id, request_id)
@@ -1322,17 +1854,14 @@ class ConversationEngine:
             target = refreshed
         if target.gamemaster_grant_operation_id != request_id:
             await self._clear(user)
-            return BotResponse(text="Этот пользователь уже является гейммастером.")
+            return BotResponse(text="Этот пользователь уже является модератором.")
         if target.last_delivery_operation_id != request_id:
-            if self.transport is None:
-                raise RuntimeError("deferred transport is not configured")
-            await self.transport.send(
-                platform=target_platform,
-                user_id=target_id,
+            await self._notify_status_change(
+                user,
+                target,
                 request_id=request_id,
                 text=GAMEMASTER_NOTIFICATION,
             )
-            await self.users.claim_delivery(target_platform, target_id, request_id)
 
         if message.identity.platform is target_platform and message.identity.platform_user_id == target_id:
             user.is_gamemaster = True
@@ -1340,7 +1869,7 @@ class ConversationEngine:
             user.last_delivery_operation_id = request_id
         await self._clear(user)
         platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
-        return BotResponse(text=f"✅ Пользователь назначен гейммастером в {platform_name}.")
+        return BotResponse(text=f"✅ Пользователь назначен модератором в {platform_name}.")
 
     async def _find_telegram_target(self, value: str) -> TelegramUser | None:
         handle = normalize_telegram_profile(value)
@@ -1356,15 +1885,15 @@ class ConversationEngine:
     @staticmethod
     def _event_leader_platform_prompt(event_id: str) -> BotResponse:
         return BotResponse(
-            text="Выберите бот, которым пользуется добавляемый гейммастер:",
+            text="Выберите бот, которым пользуется модератор, которого нужно добавить мастером:",
             buttons=[
                 Button(label="Telegram", value="admin:event-leader:telegram"),
                 Button(label="VK", value="admin:event-leader:vk"),
-                game_management_button(event_id),
+                Button(label=BACK, value=f"ag:masters:{event_id}"),
             ],
         )
 
-    async def _add_event_leader(self, user: User, value: str) -> BotResponse:
+    async def _add_event_leader(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         target_platform = Platform(str(user.dialog_context["gamemaster_platform"]))
         target: User | None
         try:
@@ -1379,7 +1908,7 @@ class ConversationEngine:
         except ValueError as exc:
             return BotResponse(
                 text=f"❌ {exc}. Попробуйте ещё раз:",
-                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+                buttons=[Button(label=BACK, value=f"ag:masters:{user.dialog_context['event_id']}")],
             )
         if target is None:
             platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
@@ -1388,36 +1917,80 @@ class ConversationEngine:
                     f"Пользователь {platform_name} не найден. Убедитесь, что он уже написал этому боту "
                     "и полностью заполнил профиль, затем попробуйте ещё раз."
                 ),
-                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+                buttons=[Button(label=BACK, value=f"ag:masters:{user.dialog_context['event_id']}")],
             )
         if not target.profile_complete:
             return BotResponse(
                 text="Профиль этого пользователя заполнен не полностью. Попросите его завершить профиль и повторите.",
-                buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+                buttons=[Button(label=BACK, value=f"ag:masters:{user.dialog_context['event_id']}")],
             )
 
         event_id = str(user.dialog_context["event_id"])
-        event_name = str(user.dialog_context["event_name"])
-        identity = BotIdentity(platform=target_platform, platform_user_id=user_id(target))
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.")
+        return await self._assign_event_leader(user, message, event, target)
+
+    async def _assign_event_leader(
+        self,
+        user: User,
+        message: InboundMessage,
+        event: Event,
+        target: User,
+    ) -> BotResponse:
+        identity = self._identity(target)
+        event_id = event.event_id
+        request_id = (
+            f"leader-grant:{event_id}:{identity.platform.value}:{identity.platform_user_id}:{message.update_id}"
+        )
+        if not target.is_gamemaster and not await self.admins.is_gamemaster(
+            identity.platform, identity.platform_user_id
+        ):
+            return BotResponse(
+                text="Добавить мастером можно только модератора.",
+                buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
+            )
+        notification_button = Button(label="Управление игрой", value=f"ag:manage:{event_id}")
         if identity in await self.events.list_leaders(event_id):
+            if (
+                user.dialog_context.get("pending_leader_grant") == request_id
+                and target.last_delivery_operation_id != request_id
+            ):
+                await self._notify_status_change(
+                    user,
+                    target,
+                    request_id=request_id,
+                    text=f"Вы добавлены мастером игры «{event.name}».",
+                    buttons=[notification_button],
+                )
+                await self._clear(user)
+                return BotResponse(
+                    text=f"✅ Модератор добавлен мастером игры «{event.name}».",
+                    buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
+                )
             await self._clear(user)
             return BotResponse(
-                text=f"Этот пользователь уже является ведущим игры «{event_name}».",
-                buttons=[game_management_button(event_id)],
-            )
-        if not target.is_gamemaster and not await self.admins.is_gamemaster(target_platform, identity.platform_user_id):
-            return BotResponse(
-                text="Добавить ведущим можно только гейммастера.",
-                buttons=[game_management_button(event_id)],
+                text=f"Этот пользователь уже является мастером игры «{event.name}».",
+                buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
             )
 
+        user.dialog_context["pending_leader_grant"] = request_id
+        await self.users.save(user)
         await self.events.add_leader(event_id, identity)
         if identity not in await self.events.list_leaders(event_id):
             raise RuntimeError("event leader grant was not persisted")
+        await self._notify_status_change(
+            user,
+            target,
+            request_id=request_id,
+            text=f"Вы добавлены мастером игры «{event.name}».",
+            buttons=[notification_button],
+        )
         await self._clear(user)
         return BotResponse(
-            text=f"✅ Гейммастер добавлен ведущим игры «{event_name}».",
-            buttons=[game_management_button(event_id)],
+            text=f"✅ Модератор добавлен мастером игры «{event.name}».",
+            buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
         )
 
     @staticmethod
@@ -1811,7 +2384,7 @@ class ConversationEngine:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
         if not is_leader:
             return BotResponse(
-                text=text + "\n\nАдминистративные действия доступны только ведущим этой игры.",
+                text=text + "\n\nАдминистративные действия доступны только мастерам этой игры.",
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
         actions = [
@@ -1821,7 +2394,7 @@ class ConversationEngine:
             (LIST_WAITING_PLAYERS, "waiting"),
             (EVENT_TABLES, "tables"),
             (REMOVE_PLAYER, "remove"),
-            (ADD_EVENT_LEADER, "leader"),
+            (MANAGE_MASTERS, "masters"),
             (ARCHIVE_GAME, "archive"),
         ]
         if await self._is_admin(user):
@@ -1924,6 +2497,8 @@ class ConversationEngine:
             )
         if action == "remove":
             return await self._show_removable_players(user, event)
+        if action == "masters":
+            return await self._event_masters_menu(user, event)
         if action == "leader":
             user.dialog_state = "ADMIN_EVENT_LEADER_PLATFORM"
             return self._event_leader_platform_prompt(event.event_id)
@@ -1988,6 +2563,8 @@ class ConversationEngine:
     async def _admin_start(self, user: User, value: str) -> BotResponse:
         if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
+        if value == MANAGE_MODERATORS:
+            return await self._moderator_management_menu(user)
         if value == "➕ Создать игру":
             user.dialog_state = "ADMIN_CREATE_NAME"
             user.dialog_context = {}
@@ -2014,13 +2591,17 @@ class ConversationEngine:
             user.dialog_state = "ADMIN_GAMEMASTER_PLATFORM"
             user.dialog_context = {}
             return BotResponse(
-                text="Выберите бот, которым пользуется новый гейммастер:",
+                text="Выберите бот, которым пользуется новый модератор:",
                 buttons=[
                     Button(label="Telegram", value="admin:gamemaster:telegram"),
                     Button(label="VK", value="admin:gamemaster:vk"),
-                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                    Button(label=BACK, value=MANAGE_MODERATORS),
                 ],
             )
+        if value == REVOKE_GAMEMASTER:
+            return await self._show_moderators(user, "remove")
+        if value == LIST_GAMEMASTERS:
+            return await self._show_moderators(user, "list")
         return await self._admin_menu(user)
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.

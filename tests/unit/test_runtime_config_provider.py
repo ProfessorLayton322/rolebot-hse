@@ -124,3 +124,7 @@ async def test_runtime_config_reads_platform_admin_and_gamemaster_ids() -> None:
             BotIdentity(platform=Platform.TELEGRAM, platform_user_id=10),
             BotIdentity(platform=Platform.VK, platform_user_id=20),
         ]
+        assert await provider.list_gamemasters() == [
+            BotIdentity(platform=Platform.TELEGRAM, platform_user_id=11),
+            BotIdentity(platform=Platform.VK, platform_user_id=21),
+        ]

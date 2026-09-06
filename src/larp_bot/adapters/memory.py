@@ -55,6 +55,12 @@ class MemoryUserRepository:
             user.is_gamemaster = True
             user.gamemaster_grant_operation_id = operation_id
 
+    async def revoke_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+        user = self.rows[(platform, user_id)]
+        if user.is_gamemaster:
+            user.is_gamemaster = False
+            user.gamemaster_grant_operation_id = operation_id
+
     async def list_all(self) -> Sequence[User]:
         return deepcopy(list(self.rows.values()))
 
@@ -98,6 +104,14 @@ class MemoryEventRepository:
         if identity in event_leaders:
             return False
         event_leaders.add(identity)
+        return True
+
+    async def remove_leader(self, event_id: str, leader: BotIdentity) -> bool:
+        identity = (leader.platform, leader.platform_user_id)
+        event_leaders = self.leaders.get(event_id)
+        if event_leaders is None or identity not in event_leaders:
+            return False
+        event_leaders.remove(identity)
         return True
 
     async def list_leaders(self, event_id: str) -> Sequence[BotIdentity]:
@@ -415,6 +429,18 @@ class StaticAdminProvider:
         return [
             *(BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id) for user_id in sorted(self.tg_ids)),
             *(BotIdentity(platform=Platform.VK, platform_user_id=user_id) for user_id in sorted(self.vk_ids)),
+        ]
+
+    async def list_gamemasters(self) -> Sequence[BotIdentity]:
+        return [
+            *(
+                BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id)
+                for user_id in sorted(self.tg_gamemaster_ids)
+            ),
+            *(
+                BotIdentity(platform=Platform.VK, platform_user_id=user_id)
+                for user_id in sorted(self.vk_gamemaster_ids)
+            ),
         ]
 
     async def is_admin(self, platform: Platform, user_id: int) -> bool:

@@ -6,8 +6,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from larp_bot.adapters.ydb.repositories import YdbExecutor, YdbUserRepository, _dt, _optional_pass
-from larp_bot.domain.models import Button, PassDetails, Platform, TelegramUser, VkUser
+from larp_bot.adapters.ydb.repositories import (
+    YdbEventRepository,
+    YdbExecutor,
+    YdbUserRepository,
+    _dt,
+    _optional_pass,
+)
+from larp_bot.domain.models import BotIdentity, Button, PassDetails, Platform, TelegramUser, VkUser
 
 
 def test_ydb_uses_function_context_token_instead_of_metadata() -> None:
@@ -256,6 +262,37 @@ async def test_user_repository_grants_gamemaster_in_selected_platform_table() ->
     assert "UPDATE `vk_users`" in query
     assert "SET is_gamemaster = TRUE" in query
     assert params == {"$user_id": 84, "$operation_id": "grant-1"}
+
+
+@pytest.mark.asyncio
+async def test_user_repository_revokes_gamemaster_in_selected_platform_table() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+
+    await YdbUserRepository(executor).revoke_gamemaster(Platform.TELEGRAM, 42, "revoke-1")
+
+    query, params = executor.query.await_args.args
+    assert "UPDATE `tg_users`" in query
+    assert "SET is_gamemaster = FALSE" in query
+    assert params == {"$user_id": 42, "$operation_id": "revoke-1"}
+
+
+@pytest.mark.asyncio
+async def test_event_repository_removes_leader_without_renaming_ydb_table() -> None:
+    executor = SimpleNamespace(query=AsyncMock(side_effect=[[{"event_id": "event-a1"}], []]))
+    repository = YdbEventRepository(executor)
+    identity = BotIdentity(platform=Platform.VK, platform_user_id=84)
+
+    with patch.object(repository, "get", AsyncMock(return_value=object())):
+        removed = await repository.remove_leader("event-a1", identity)
+
+    assert removed
+    delete_query, delete_params = executor.query.await_args.args
+    assert "DELETE FROM `event_leaders`" in delete_query
+    assert delete_params == {
+        "$event_id": "event-a1",
+        "$platform": "vk",
+        "$platform_user_id": 84,
+    }
 
 
 def test_legacy_pass_json_makes_profile_incomplete_until_refilled() -> None:

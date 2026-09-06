@@ -18,6 +18,7 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
+    ADD_EVENT_LEADER,
     ADMIN,
     ADMIN_MENU,
     ARCHIVE_GAME,
@@ -29,14 +30,21 @@ from larp_bot.application.conversation import (
     EVENT_TABLES,
     FREE_TEXT_DIALOG_STATES,
     GAMEMASTER_NOTIFICATION,
+    GAMEMASTER_REVOKED_NOTIFICATION,
     GRANT_GAMEMASTER,
     KEEP,
+    LIST_EVENT_LEADERS,
+    LIST_GAMEMASTERS,
     LIST_WAITING_PLAYERS,
     MAIN_MENU,
     MANAGE_GAMES,
+    MANAGE_MASTERS,
+    MANAGE_MODERATORS,
     MASTER_TABLE_DISCLAIMER,
     PROFILE,
+    REMOVE_EVENT_LEADER,
     REMOVE_PLAYER,
+    REVOKE_GAMEMASTER,
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_NOTIFICATION,
     STATUS_CLOSED,
@@ -759,19 +767,19 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     games = await engine.handle(inbound(3, MANAGE_GAMES))
     assert any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
     management = await engine.handle(inbound(4, f"ag:manage:{event.event_id}", callback=True))
-    assert "доступны только ведущим" in management.text
+    assert "доступны только мастерам" in management.text
     assert EVENT_TABLES not in [button.label for button in management.buttons]
     assert "https://disk.example/pass-table" not in management.text
 
     tables_denied = await engine.handle(inbound(5, f"ag:tables:{event.event_id}", callback=True))
-    assert tables_denied.text == "Только ведущие этой игры могут изменять её данные."
+    assert tables_denied.text == "Только мастера этой игры могут изменять её данные."
     assert "https://disk.example/pass-table" not in tables_denied.text
     notification_denied = await engine.handle(inbound(6, f"ag:notify:{event.event_id}", callback=True))
-    assert notification_denied.text == "Только ведущие этой игры могут изменять её данные."
+    assert notification_denied.text == "Только мастера этой игры могут изменять её данные."
     waiting_denied = await engine.handle(inbound(7, f"ag:waiting:{event.event_id}", callback=True))
-    assert waiting_denied.text == "Только ведущие этой игры могут изменять её данные."
+    assert waiting_denied.text == "Только мастера этой игры могут изменять её данные."
     removal_denied = await engine.handle(inbound(8, f"ag:remove:{event.event_id}", callback=True))
-    assert removal_denied.text == "Только ведущие этой игры могут изменять её данные."
+    assert removal_denied.text == "Только мастера этой игры могут изменять её данные."
     assert publisher.commands == []
 
 
@@ -967,23 +975,25 @@ async def test_admin_grants_telegram_gamemaster_by_profile_and_notifies_them(
     )
 
     menu = await engine.handle(inbound(1, ADMIN))
-    assert GRANT_GAMEMASTER in [button.value for button in menu.buttons]
-    choose_platform = await engine.handle(inbound(2, GRANT_GAMEMASTER, callback=True))
+    assert MANAGE_MODERATORS in [button.value for button in menu.buttons]
+    moderator_menu = await engine.handle(inbound(2, MANAGE_MODERATORS, callback=True))
+    assert GRANT_GAMEMASTER in [button.value for button in moderator_menu.buttons]
+    choose_platform = await engine.handle(inbound(3, GRANT_GAMEMASTER, callback=True))
     assert [button.label for button in choose_platform.buttons[:2]] == ["Telegram", "VK"]
-    prompt = await engine.handle(inbound(3, "admin:gamemaster:telegram", callback=True))
+    prompt = await engine.handle(inbound(4, "admin:gamemaster:telegram", callback=True))
     assert "ссылку на профиль Telegram или @username" in prompt.text
-    granted = await engine.handle(inbound(4, profile))
+    granted = await engine.handle(inbound(5, profile))
 
     target = await users.get(Platform.TELEGRAM, 2)
     assert target is not None and target.is_gamemaster
-    assert target.gamemaster_grant_operation_id == "gamemaster-grant:telegram:2:4"
+    assert target.gamemaster_grant_operation_id == "gamemaster-grant:telegram:2:5"
     assert isinstance(engine.transport, MemoryDeferredTransport)
     assert engine.transport.sent == [
-        (Platform.TELEGRAM, 2, "gamemaster-grant:telegram:2:4", GAMEMASTER_NOTIFICATION, ()),
+        (Platform.TELEGRAM, 2, "gamemaster-grant:telegram:2:5", GAMEMASTER_NOTIFICATION, ()),
     ]
-    assert granted.text == "✅ Пользователь назначен гейммастером в Telegram."
+    assert granted.text == "✅ Пользователь назначен модератором в Telegram."
 
-    target_main = await engine.handle(inbound(5, "/start", user_id=2, telegram_username="target_player"))
+    target_main = await engine.handle(inbound(6, "/start", user_id=2, telegram_username="target_player"))
     assert ADMIN in [button.value for button in target_main.buttons]
 
 
@@ -1019,7 +1029,7 @@ async def test_admin_grants_legacy_telegram_user_via_registration_history_and_ba
     target = await users.get(Platform.TELEGRAM, 2)
     assert target is not None and target.is_gamemaster
     assert target.telegram_handle == "@legacy_player"
-    assert granted.text == "✅ Пользователь назначен гейммастером в Telegram."
+    assert granted.text == "✅ Пользователь назначен модератором в Telegram."
 
 
 @pytest.mark.asyncio
@@ -1085,7 +1095,7 @@ async def test_admin_grants_vk_gamemaster_from_vanity_link(disk_store: MemoryDis
     assert engine.transport.sent == [
         (Platform.VK, 22, "gamemaster-grant:vk:22:3", GAMEMASTER_NOTIFICATION, ()),
     ]
-    assert granted.text == "✅ Пользователь назначен гейммастером в VK."
+    assert granted.text == "✅ Пользователь назначен модератором в VK."
 
 
 @pytest.mark.asyncio
@@ -1133,7 +1143,7 @@ async def test_gamemaster_notification_retries_after_role_was_persisted(
 
     response = await engine.handle(grant_message)
 
-    assert response.text == "✅ Пользователь назначен гейммастером в Telegram."
+    assert response.text == "✅ Пользователь назначен модератором в Telegram."
     assert isinstance(engine.transport, FailOnceTransport)
     assert len(engine.transport.sent) == 1
     assert engine.transport.sent[0][3] == GAMEMASTER_NOTIFICATION
@@ -1146,6 +1156,63 @@ async def test_gamemaster_cannot_grant_gamemaster_role(disk_store: MemoryDiskSto
     response = await engine.handle(inbound(1, GRANT_GAMEMASTER))
 
     assert response.text == "Недостаточно прав."
+
+
+@pytest.mark.asyncio
+async def test_admin_lists_and_removes_moderators_with_pagination_and_notification(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    for target_id in range(2, 14):
+        await users.save(
+            TelegramUser(
+                tg_id=target_id,
+                telegram_handle=f"@moderator_{target_id}",
+                full_name=f"Модератор {target_id:02d}",
+                vk_url=f"https://vk.com/id{target_id}",
+                crossplay=True,
+                larp_experience=False,
+                needs_pass=False,
+                is_gamemaster=True,
+            )
+        )
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert MANAGE_MODERATORS in {button.value for button in menu.buttons}
+    role_menu = await engine.handle(inbound(2, MANAGE_MODERATORS, callback=True))
+    assert {GRANT_GAMEMASTER, REVOKE_GAMEMASTER, LIST_GAMEMASTERS} <= {button.value for button in role_menu.buttons}
+
+    first_page = await engine.handle(inbound(3, LIST_GAMEMASTERS, callback=True))
+    profile_buttons = [button for button in first_page.buttons if button.value.startswith("mod:view:")]
+    assert len(profile_buttons) == 10
+    assert any(button.value == "mod:list-page:10" for button in first_page.buttons)
+    profile = await engine.handle(inbound(4, profile_buttons[0].value, callback=True))
+    assert "Модератор" in profile.text
+    assert "https://t.me/moderator_" in profile.text
+    assert "https://vk.com/id" in profile.text
+
+    returned = await engine.handle(inbound(5, profile.buttons[0].value, callback=True))
+    await engine.handle(
+        inbound(
+            6, next(button.value for button in returned.buttons if button.value == MANAGE_MODERATORS), callback=True
+        )
+    )
+    removal = await engine.handle(inbound(7, REVOKE_GAMEMASTER, callback=True))
+    target_button = next(button for button in removal.buttons if button.value == "mod:remove-pick:t:2")
+    warning = await engine.handle(inbound(8, target_button.value, callback=True))
+    assert "Снять полномочия модератора" in warning.text
+    removed = await engine.handle(inbound(9, "mod:remove-confirm", callback=True))
+
+    target = await users.get(Platform.TELEGRAM, 2)
+    assert target is not None and not target.is_gamemaster
+    assert removed.text == "✅ Полномочия модератора сняты."
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent[-1][1:] == (
+        2,
+        "gamemaster-revoke:telegram:2:9",
+        GAMEMASTER_REVOKED_NOTIFICATION,
+        (),
+    )
 
 
 @pytest.mark.asyncio
@@ -1270,7 +1337,7 @@ async def test_event_leader_can_add_another_gamemaster_who_can_then_notify_playe
     await engine.handle(inbound(4, "admin:event-leader:telegram", callback=True))
     added = await engine.handle(inbound(5, "@target_player"))
 
-    assert added.text == f"✅ Гейммастер добавлен ведущим игры «{event.name}»."
+    assert added.text == f"✅ Модератор добавлен мастером игры «{event.name}»."
     assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) in await engine.events.list_leaders(
         event.event_id
     )
@@ -1283,6 +1350,86 @@ async def test_event_leader_can_add_another_gamemaster_who_can_then_notify_playe
     assert queued.deferred
     assert publisher.commands[-1].operation is Operation.SEND_CONFIRMED_NOTIFICATION
     assert publisher.commands[-1].platform_user_id == 2
+
+
+@pytest.mark.asyncio
+async def test_master_management_adds_lists_and_removes_moderator_with_notifications(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+    for target_id in range(2, 14):
+        await users.save(
+            TelegramUser(
+                tg_id=target_id,
+                telegram_handle=f"@moderator_{target_id}",
+                full_name=f"Модератор {target_id:02d}",
+                vk_url=f"https://vk.com/id{target_id}",
+                crossplay=True,
+                larp_experience=False,
+                needs_pass=False,
+                is_gamemaster=True,
+            )
+        )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    masters_button = next(button for button in management.buttons if button.label == MANAGE_MASTERS)
+    masters = await engine.handle(inbound(2, masters_button.value, callback=True))
+    assert {ADD_EVENT_LEADER, REMOVE_EVENT_LEADER, LIST_EVENT_LEADERS} <= {button.label for button in masters.buttons}
+
+    candidates = await engine.handle(inbound(3, f"master:add:{event.event_id}", callback=True))
+    candidate_buttons = [button for button in candidates.buttons if button.value.startswith("master:add-pick:")]
+    assert len(candidate_buttons) == 10
+    assert any(button.value == "master:add-page:10" for button in candidates.buttons)
+    assert any(button.value == "master:add-direct" for button in candidates.buttons)
+    added = await engine.handle(inbound(4, "master:add-pick:t:2", callback=True))
+
+    assert added.text == f"✅ Модератор добавлен мастером игры «{event.name}»."
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent[-1] == (
+        Platform.TELEGRAM,
+        2,
+        f"leader-grant:{event.event_id}:telegram:2:4",
+        f"Вы добавлены мастером игры «{event.name}».",
+        (Button(label="Управление игрой", value=f"ag:manage:{event.event_id}"),),
+    )
+
+    await engine.handle(inbound(5, f"ag:masters:{event.event_id}", callback=True))
+    listing = await engine.handle(inbound(6, f"master:list:{event.event_id}", callback=True))
+    target_button = next(button for button in listing.buttons if button.value == "master:view:t:2")
+    profile = await engine.handle(inbound(7, target_button.value, callback=True))
+    assert profile.text.startswith("Мастер\n")
+    assert "https://t.me/moderator_2" in profile.text
+    assert "https://vk.com/id2" in profile.text
+
+    returned = await engine.handle(inbound(8, profile.buttons[0].value, callback=True))
+    await engine.handle(
+        inbound(
+            9,
+            next(button.value for button in returned.buttons if button.value == f"ag:masters:{event.event_id}"),
+            callback=True,
+        )
+    )
+    removal = await engine.handle(inbound(10, f"master:remove:{event.event_id}", callback=True))
+    remove_button = next(button for button in removal.buttons if button.value == "master:remove-pick:t:2")
+    warning = await engine.handle(inbound(11, remove_button.value, callback=True))
+    assert "Удалить мастера" in warning.text
+    removed = await engine.handle(inbound(12, "master:remove-confirm", callback=True))
+
+    assert removed.text == f"✅ Мастер удалён из игры «{event.name}»."
+    assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) not in await engine.events.list_leaders(
+        event.event_id
+    )
+    assert engine.transport.sent[-1] == (
+        Platform.TELEGRAM,
+        2,
+        f"leader-revoke:{event.event_id}:telegram:2:12",
+        f"Вы больше не являетесь мастером игры «{event.name}».",
+        (),
+    )
 
 
 @pytest.mark.asyncio
@@ -1308,7 +1455,7 @@ async def test_event_leader_cannot_add_a_non_gamemaster_as_leader(disk_store: Me
     await engine.handle(inbound(2, "admin:event-leader:telegram", callback=True))
     denied = await engine.handle(inbound(3, "@ordinary_user"))
 
-    assert denied.text == "Добавить ведущим можно только гейммастера."
+    assert denied.text == "Добавить мастером можно только модератора."
     assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) not in await engine.events.list_leaders(
         event.event_id
     )
@@ -1324,7 +1471,7 @@ async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_acti
     listing = await engine.handle(inbound(1, MANAGE_GAMES))
     assert any(button.value == f"ag:manage:{event.event_id}" for button in listing.buttons)
     current = await engine.handle(inbound(2, f"ag:archive:{event.event_id}", callback=True))
-    assert current.text == "Только ведущие этой игры могут изменять её данные."
+    assert current.text == "Только мастера этой игры могут изменять её данные."
     for update, value in enumerate(
         (
             f"select:admin-archive:{event.event_id}",
@@ -1333,7 +1480,7 @@ async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_acti
         start=3,
     ):
         response = await engine.handle(inbound(update, value, callback=True))
-        assert response.text == "Только ведущие этой игры могут изменять её данные."
+        assert response.text == "Только мастера этой игры могут изменять её данные."
 
     page = await engine.handle(
         inbound(
@@ -1342,7 +1489,7 @@ async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_acti
             callback=True,
         )
     )
-    assert "ведущие" not in page.text
+    assert "мастера" not in page.text
 
     user = await users.get(Platform.TELEGRAM, 1)
     assert user is not None
@@ -1351,7 +1498,7 @@ async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_acti
     await users.save(user)
     response = await engine.handle(inbound(10, event.name))
 
-    assert response.text == "Только ведущие этой игры могут изменять её данные."
+    assert response.text == "Только мастера этой игры могут изменять её данные."
     saved_user = await users.get(Platform.TELEGRAM, 1)
     assert saved_user is not None and saved_user.dialog_state == "IDLE"
     assert publisher.commands == []
