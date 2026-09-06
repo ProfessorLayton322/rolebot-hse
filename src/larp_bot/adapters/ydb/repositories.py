@@ -813,6 +813,7 @@ class YdbEventRepository:
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         archived: bool | None = None,
+        newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]:
         if limit < 1 or limit > 10:
@@ -834,17 +835,27 @@ class YdbEventRepository:
                 params[parameter] = value
             conditions.append(f"({' OR '.join(status_conditions)})" if status_conditions else "FALSE")
         if after is not None:
-            conditions.append("(created_at > $after_time OR (created_at = $after_time AND event_id > $after_id))")
+            operator = "<" if newest_first else ">"
+            conditions.append(
+                f"(created_at {operator} $after_time OR "
+                f"(created_at = $after_time AND event_id {operator} $after_id))"
+            )
             declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_id AS Utf8;"])
             params.update({"$after_time": after[0], "$after_id": after[1]})
         if before is not None:
-            conditions.append("(created_at < $before_time OR (created_at = $before_time AND event_id < $before_id))")
+            operator = ">" if newest_first else "<"
+            conditions.append(
+                f"(created_at {operator} $before_time OR "
+                f"(created_at = $before_time AND event_id {operator} $before_id))"
+            )
             declarations.extend(["DECLARE $before_time AS Timestamp;", "DECLARE $before_id AS Utf8;"])
             params.update({"$before_time": before[0], "$before_id": before[1]})
         if archived is not None:
             conditions.append("archived_at IS NOT NULL" if archived else "archived_at IS NULL")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        order = "DESC" if before is not None else "ASC"
+        order = "DESC" if newest_first else "ASC"
+        if before is not None:
+            order = "ASC" if newest_first else "DESC"
         query = f"""
             {" ".join(declarations)}
             SELECT {self.COLUMNS}

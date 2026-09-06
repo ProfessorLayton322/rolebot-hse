@@ -405,6 +405,57 @@ async def test_created_game_accepts_signup_but_does_not_offer_confirmation(
 
 
 @pytest.mark.asyncio
+async def test_game_archived_during_signup_is_not_enqueued(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    event.status = EventStatus.CREATED
+    engine, _, publisher, _ = await engine_setup(disk_store, event)
+
+    games = await engine.handle(inbound(1, ENLIST))
+    assert any(button.value == f"select:enlist:{event.event_id}" for button in games.buttons)
+    await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
+    await engine.events.archive(event.event_id, datetime.now(UTC))
+
+    rejected = await engine.handle(inbound(3, "enlist:wish-play:skip", callback=True))
+    hidden = await engine.handle(inbound(4, ENLIST))
+    stale = await engine.handle(inbound(5, f"select:enlist:{event.event_id}", callback=True))
+
+    assert "архивирована" in rejected.text
+    assert not any(button.value == f"select:enlist:{event.event_id}" for button in hidden.buttons)
+    assert "архивирована" in stale.text
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+async def test_game_archived_during_cancellation_is_not_enqueued(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+
+    games = await engine.handle(inbound(1, CANCEL))
+    assert any(button.value == f"select:cancel:{event.event_id}" for button in games.buttons)
+    await engine.handle(inbound(2, f"select:cancel:{event.event_id}", callback=True))
+    await engine.events.archive(event.event_id, datetime.now(UTC))
+
+    rejected = await engine.handle(inbound(3, "cancel:yes", callback=True))
+    hidden = await engine.handle(inbound(4, CANCEL))
+    stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
+
+    assert "архивирована" in rejected.text
+    assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
+    assert "архивирована" in stale.text
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
 async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
@@ -1311,7 +1362,7 @@ async def test_nonleader_gamemaster_cannot_archive_through_current_or_stale_acti
 
 
 @pytest.mark.asyncio
-async def test_admin_archive_game_buttons_are_paginated(disk_store: MemoryDiskStore) -> None:
+async def test_admin_game_buttons_are_newest_first_and_paginated(disk_store: MemoryDiskStore) -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     events = [
         Event(
@@ -1322,7 +1373,7 @@ async def test_admin_archive_game_buttons_are_paginated(disk_store: MemoryDiskSt
             created_at=base + timedelta(seconds=index),
             updated_at=base + timedelta(seconds=index),
         )
-        for index in range(11)
+        for index in range(21)
     ]
     engine, _, _, _ = await engine_setup(disk_store, *events, admin=True)
 
@@ -1330,18 +1381,30 @@ async def test_admin_archive_game_buttons_are_paginated(disk_store: MemoryDiskSt
     game_buttons = [button for button in first.buttons if button.value.startswith("ag:manage:")]
     next_button = next(button for button in first.buttons if button.label == "➡️ Следующая")
     assert len(game_buttons) == 10
+    assert [button.label for button in game_buttons] == [f"Game {index}" for index in range(20, 10, -1)]
 
     second = await engine.handle(inbound(2, next_button.value, callback=True))
-    assert [button.label for button in second.buttons if button.value.startswith("ag:manage:")] == ["Game 10"]
+    assert [button.label for button in second.buttons if button.value.startswith("ag:manage:")] == [
+        f"Game {index}" for index in range(10, 0, -1)
+    ]
     previous_button = next(button for button in second.buttons if button.label == "⬅️ Предыдущая")
     returned = await engine.handle(inbound(3, previous_button.value, callback=True))
     assert [button.label for button in returned.buttons if button.value.startswith("ag:manage:")] == [
-        f"Game {index}" for index in range(10)
+        f"Game {index}" for index in range(20, 10, -1)
+    ]
+    second_next = next(button for button in second.buttons if button.label == "➡️ Следующая")
+    third = await engine.handle(inbound(4, second_next.value, callback=True))
+    assert [button.label for button in third.buttons if button.value.startswith("ag:manage:")] == ["Game 0"]
+    second_again = await engine.handle(
+        inbound(5, next(button.value for button in third.buttons if button.label == "⬅️ Предыдущая"), callback=True)
+    )
+    assert [button.label for button in second_again.buttons if button.value.startswith("ag:manage:")] == [
+        f"Game {index}" for index in range(10, 0, -1)
     ]
 
 
 @pytest.mark.asyncio
-async def test_game_management_lists_closed_games_but_hides_archived_games(
+async def test_admin_sees_archived_games_as_read_only_management_entries(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -1359,6 +1422,8 @@ async def test_game_management_lists_closed_games_but_hides_archived_games(
         | {
             "event_id": "event-archived",
             "name": "Archived",
+            "status": EventStatus.CLOSED,
+            "created_at": now + timedelta(seconds=1),
             "archived_at": now,
         }
     )
@@ -1367,7 +1432,34 @@ async def test_game_management_lists_closed_games_but_hides_archived_games(
     games = await engine.handle(inbound(1, MANAGE_GAMES))
 
     labels = [button.label for button in games.buttons if button.value.startswith("ag:manage:")]
-    assert labels == ["Closed but managed"]
+    assert labels == ["Archived", "Closed but managed"]
+    archived_management = await engine.handle(inbound(2, "ag:manage:event-archived", callback=True))
+    assert "Статус: Архивирована" in archived_management.text
+    assert archived_management.buttons == [Button(label="⬅️ Назад", value=MANAGE_GAMES)]
+
+
+@pytest.mark.asyncio
+async def test_gamemaster_cannot_list_or_open_archived_games(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    archived = Event.model_validate(
+        event.model_dump()
+        | {
+            "status": EventStatus.CLOSED,
+            "archived_at": datetime.now(UTC),
+        }
+    )
+    engine, _, _, _ = await engine_setup(disk_store, archived, gamemaster=True)
+
+    games = await engine.handle(inbound(1, MANAGE_GAMES))
+    forged = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
+    forged_action = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
+
+    assert not any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
+    assert forged.text == "Игра не найдена."
+    assert event.name not in forged.text
+    assert forged_action.text == "Игра не найдена."
+    assert event.name not in forged_action.text
 
 
 @pytest.mark.asyncio
@@ -1558,6 +1650,9 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
     page = await engine.handle(inbound(1, MANAGE_GAMES))
     game_buttons = [button for button in page.buttons if button.value.startswith("ag:manage:")]
     assert len(game_buttons) == min(count, 10)
+    assert [button.label for button in game_buttons] == [
+        f"Game {index}" for index in range(count - 1, max(count - 11, -1), -1)
+    ]
     assert "https://disk.example/" not in page.text
     has_next = any(button.label == "➡️ Следующая" for button in page.buttons)
     assert has_next is (count > 10)

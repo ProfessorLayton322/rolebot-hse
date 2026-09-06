@@ -84,6 +84,7 @@ class EventRepository(Protocol):
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         archived: bool | None = None,
+        newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]: ...
 

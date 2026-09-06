@@ -212,20 +212,31 @@ class MemoryEventRepository:
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         archived: bool | None = None,
+        newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]:
         if after is not None and before is not None:
             raise ValueError("only one event-page cursor may be supplied")
-        values = sorted(self.rows.values(), key=lambda event: (event.created_at, event.event_id))
+        values = sorted(
+            self.rows.values(),
+            key=lambda event: (event.created_at, event.event_id),
+            reverse=newest_first,
+        )
         if statuses is not None:
             accepted = set(statuses)
             values = [event for event in values if event.status in accepted]
         if archived is not None:
             values = [event for event in values if (event.archived_at is not None) is archived]
         if after is not None:
-            values = [event for event in values if (event.created_at, event.event_id) > after]
+            if newest_first:
+                values = [event for event in values if (event.created_at, event.event_id) < after]
+            else:
+                values = [event for event in values if (event.created_at, event.event_id) > after]
         if before is not None:
-            values = [event for event in values if (event.created_at, event.event_id) < before]
+            if newest_first:
+                values = [event for event in values if (event.created_at, event.event_id) > before]
+            else:
+                values = [event for event in values if (event.created_at, event.event_id) < before]
             values = values[-limit:]
         return deepcopy(values[:limit])
 
