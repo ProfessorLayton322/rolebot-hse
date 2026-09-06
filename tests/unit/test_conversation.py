@@ -405,9 +405,7 @@ async def test_created_game_accepts_signup_but_does_not_offer_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_game_archived_during_signup_is_not_enqueued(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_game_archived_during_signup_is_not_enqueued(disk_store: MemoryDiskStore, event: Event) -> None:
     event.status = EventStatus.CREATED
     engine, _, publisher, _ = await engine_setup(disk_store, event)
 
@@ -427,9 +425,7 @@ async def test_game_archived_during_signup_is_not_enqueued(
 
 
 @pytest.mark.asyncio
-async def test_game_archived_during_cancellation_is_not_enqueued(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_game_archived_during_cancellation_is_not_enqueued(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, _, publisher, tables = await engine_setup(disk_store, event)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
     await tables.enlist(
@@ -1439,9 +1435,7 @@ async def test_admin_sees_archived_games_as_read_only_management_entries(
 
 
 @pytest.mark.asyncio
-async def test_gamemaster_cannot_list_or_open_archived_games(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_gamemaster_cannot_list_or_open_archived_games(disk_store: MemoryDiskStore, event: Event) -> None:
     archived = Event.model_validate(
         event.model_dump()
         | {
