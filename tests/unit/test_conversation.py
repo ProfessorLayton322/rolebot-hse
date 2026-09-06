@@ -564,6 +564,48 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     assert "Администрирование" in menu.text
 
 
+@pytest.mark.parametrize(
+    ("telegram_profile", "expected_handle"),
+    [
+        ("@moscowkudesnik", "@moscowkudesnik"),
+        ("moscowkudesnik", "@moscowkudesnik"),
+        ("t.me/moscowkudesnik", "@moscowkudesnik"),
+        ("https://t.me/moscowkudesnik", "@moscowkudesnik"),
+        ("not a telegram profile", None),
+        ("https://example.com/moscowkudesnik", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_vk_profile_parses_telegram_reference_or_treats_it_as_missing(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    telegram_profile: str,
+    expected_handle: str | None,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+
+    def vk(update: int, value: str) -> InboundMessage:
+        return InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id=str(update),
+            text=value,
+            peer_id=7,
+        )
+
+    responses = []
+    for update, value in enumerate(
+        (PROFILE, "Иванов", "Иван", telegram_profile, "Да", "Нет", "Нет"),
+        start=1,
+    ):
+        responses.append(await engine.handle(vk(update, value)))
+
+    profile = await users.get(Platform.VK, 7)
+    assert responses[3].text == "Готовы ли вы кроссполу?"
+    assert isinstance(profile, VkUser)
+    assert profile.profile_complete
+    assert profile.telegram_handle == expected_handle
+
+
 @pytest.mark.asyncio
 async def test_telegram_identity_handle_is_refreshed_from_each_update(
     disk_store: MemoryDiskStore, event: Event
