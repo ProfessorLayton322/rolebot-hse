@@ -462,6 +462,22 @@ class EventAdministrationService:
                 return user
         return None
 
+    async def find_telegram_user_by_profile(self, handle: str) -> TelegramUser | None:
+        registrations = await self.catalog.registrations.find_by_telegram_profile(
+            f"https://t.me/{handle.removeprefix('@')}"
+        )
+        if not registrations:
+            return None
+        telegram_users = [user for user in await self.users.list_all() if isinstance(user, TelegramUser)]
+        matches = {
+            user.tg_id: user
+            for registration in registrations
+            for user in telegram_users
+            if participant_key(self.participant_secret, Platform.TELEGRAM, user.tg_id, registration.event_id)
+            == registration.participant_key
+        }
+        return next(iter(matches.values())) if len(matches) == 1 else None
+
     async def get_registration(self, event_id: str, participant_key: str) -> Registration | None:
         event = await self.events.get(event_id)
         if event is None:

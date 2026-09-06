@@ -234,6 +234,19 @@ async def test_user_repository_finds_telegram_user_by_own_handle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_repository_backfills_telegram_handle_without_overwriting_profile() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+
+    await YdbUserRepository(executor).update_telegram_handle(42, "@player_name")
+
+    query, params = executor.query.await_args.args
+    assert "UPDATE `tg_users`" in query
+    assert "SET telegram_handle = $handle" in query
+    assert params["$user_id"] == 42
+    assert params["$handle"] == "@player_name"
+
+
+@pytest.mark.asyncio
 async def test_user_repository_grants_gamemaster_in_selected_platform_table() -> None:
     executor = SimpleNamespace(query=AsyncMock(return_value=[]))
 

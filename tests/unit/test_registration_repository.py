@@ -111,6 +111,21 @@ async def test_legacy_import_never_overwrites_newer_ydb_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_registration_history_can_be_found_by_telegram_profile() -> None:
+    matching = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Legacy player",
+        telegram_profile="https://t.me/legacy_player",
+        wish_play="Anyone",
+    )
+    other = matching.model_copy(update={"event_id": "event-b1", "participant_key": "b" * 43, "telegram_profile": None})
+    repository = MemoryRegistrationRepository([matching, other])
+
+    assert await repository.find_by_telegram_profile("https://t.me/legacy_player") == [matching]
+
+
+@pytest.mark.asyncio
 async def test_event_listing_is_stable_by_creation_time() -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     later = Registration(
@@ -210,6 +225,18 @@ class RecordingExecutor:
         del read_only
         self.queries.append((yql, params or {}))
         return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_ydb_registration_history_lookup_is_parameterized() -> None:
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.find_by_telegram_profile("https://t.me/legacy_player") == []
+
+    query, params = executor.queries[0]
+    assert "WHERE telegram_profile = $profile" in query
+    assert params == {"$profile": "https://t.me/legacy_player"}
 
 
 @pytest.mark.asyncio

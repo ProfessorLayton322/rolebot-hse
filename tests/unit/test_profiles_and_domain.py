@@ -54,6 +54,7 @@ def test_vk_handle_is_normalized() -> None:
         ("@Some_User", "@some_user"),
         ("https://t.me/Some_User", "@some_user"),
         ("telegram.me/Some_User", "@some_user"),
+        ("[id42|@Some_User]", "@some_user"),
     ],
 )
 def test_telegram_profile_reference_is_normalized(raw: str, normalized: str) -> None:
@@ -64,6 +65,11 @@ def test_telegram_profile_reference_is_normalized(raw: str, normalized: str) -> 
 def test_telegram_profile_reference_rejects_non_profile_values(value: str) -> None:
     with pytest.raises(ValueError):
         normalize_telegram_profile(value)
+
+
+def test_malformed_vk_mention_has_user_facing_validation_error() -> None:
+    with pytest.raises(ValueError, match=r"Нужна ссылка t\.me или @username"):
+        normalize_telegram_profile("[id42|some_user]")
 
 
 def test_character_wish_cannot_be_reintroduced_on_user_models() -> None:

@@ -180,6 +180,7 @@ def normalize_telegram_handle(value: str | None) -> str | None:
 
 
 _TELEGRAM_PROFILE_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
+_VK_TELEGRAM_MENTION_RE = re.compile(r"^\[id[1-9][0-9]*\|(?P<handle>@[A-Za-z0-9_]{5,32})\]$")
 
 
 def normalize_telegram_profile(value: str) -> str:
@@ -188,17 +189,25 @@ def normalize_telegram_profile(value: str) -> str:
     from urllib.parse import urlsplit
 
     candidate = value.strip()
+    vk_mention = _VK_TELEGRAM_MENTION_RE.fullmatch(candidate)
+    if vk_mention is not None:
+        candidate = vk_mention.group("handle")
     if candidate.startswith("@"):
         handle = normalize_telegram_handle(candidate)
         assert handle is not None
         return handle
     if "://" not in candidate:
         candidate = f"https://{candidate}"
-    parsed = urlsplit(candidate)
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Нужна ссылка t.me или @username") from None
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in _TELEGRAM_PROFILE_HOSTS
-        or parsed.port is not None
+        or hostname not in _TELEGRAM_PROFILE_HOSTS
+        or port is not None
         or parsed.query
         or parsed.fragment
     ):
