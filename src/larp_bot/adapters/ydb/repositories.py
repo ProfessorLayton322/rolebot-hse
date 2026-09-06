@@ -837,8 +837,7 @@ class YdbEventRepository:
         if after is not None:
             operator = "<" if newest_first else ">"
             conditions.append(
-                f"(created_at {operator} $after_time OR "
-                f"(created_at = $after_time AND event_id {operator} $after_id))"
+                f"(created_at {operator} $after_time OR (created_at = $after_time AND event_id {operator} $after_id))"
             )
             declarations.extend(["DECLARE $after_time AS Timestamp;", "DECLARE $after_id AS Utf8;"])
             params.update({"$after_time": after[0], "$after_id": after[1]})
