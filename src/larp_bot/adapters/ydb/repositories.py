@@ -383,6 +383,19 @@ class YdbUserRepository:
             {"$user_id": user_id, "$operation_id": operation_id},
         )
 
+    async def revoke_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+        table, id_column, _ = self._location(platform)
+        await self.db.query(
+            f"""
+            DECLARE $user_id AS Uint64;
+            DECLARE $operation_id AS Utf8;
+            UPDATE `{table}`
+            SET is_gamemaster = FALSE, gamemaster_grant_operation_id = $operation_id
+            WHERE {id_column} = $user_id AND is_gamemaster = TRUE;
+            """,
+            {"$user_id": user_id, "$operation_id": operation_id},
+        )
+
     async def claim_delivery(
         self,
         platform: Platform,
@@ -584,6 +597,39 @@ class YdbEventRepository:
             """,
             insert_params=params | {"$created_at": datetime.now(UTC)},
         )
+
+    async def remove_leader(self, event_id: str, leader: BotIdentity) -> bool:
+        if await self.get(event_id) is None:
+            return False
+        params = {
+            "$event_id": event_id,
+            "$platform": leader.platform.value,
+            "$platform_user_id": leader.platform_user_id,
+        }
+        rows = await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $platform AS Utf8;
+            DECLARE $platform_user_id AS Uint64;
+            SELECT event_id FROM `event_leaders`
+            WHERE event_id = $event_id AND platform = $platform
+              AND platform_user_id = $platform_user_id;
+            """,
+            params,
+            read_only=True,
+        )
+        if not rows:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $platform AS Utf8;
+            DECLARE $platform_user_id AS Uint64;
+            DELETE FROM `event_leaders`
+            WHERE event_id = $event_id AND platform = $platform
+              AND platform_user_id = $platform_user_id;
+            """,
+            params,
+        )
+        return True
 
     async def list_leaders(self, event_id: str) -> Sequence[BotIdentity]:
         rows = await self.db.query(

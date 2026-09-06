@@ -7,3 +7,4 @@
 - Deploy or mutate Yandex Cloud application infrastructure only through the GitHub Actions Terraform CI/CD workflow. Direct `yc` deployment or resource-mutation commands are forbidden; read-only `yc` inspection is allowed.
 - Always run the project's pinned `ruff format --check .` before delivery. If it fails, format the affected files with the pinned Ruff version and rerun the check until it passes.
 - Preserve unrelated working-tree changes and verify behavior in proportion to deployment risk before considering work complete.
+- In user requests and user-visible text, "gamemaster" and "master" mean the role stored internally as an event `leader`, while "moderator" means the role stored internally as `gamemaster`. Preserve the existing internal names in code, configuration, and YDB.

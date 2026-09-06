@@ -218,7 +218,7 @@ async def test_stats_actions_denied_to_gamemasters_even_with_forged_callbacks(di
     assert STATS_LINK not in {b.value for b in menu.buttons}
     for index, action in enumerate((STATS_SOURCE, STATS_SEASON, STATS_LINK, f"ag:stats:{event.event_id}"), start=2):
         response = await engine.handle(inbound(index, action))
-        assert "прав" in response.text or "ведущ" in response.text
+        assert "прав" in response.text or "мастер" in response.text
     assert not publisher.commands
 
 

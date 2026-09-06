@@ -109,7 +109,7 @@ async def test_worker_rejects_privileged_mutation_from_nonleader(
         RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
     )
 
-    with pytest.raises(OperationNotAllowed, match="Только ведущие"):
+    with pytest.raises(OperationNotAllowed, match="Только мастера"):
         await mutations.apply(
             command(
                 event,
@@ -488,7 +488,7 @@ async def test_nonleader_cannot_remove_event_participant(disk_store: MemoryDiskS
         RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
     )
 
-    with pytest.raises(OperationNotAllowed, match="Только ведущие"):
+    with pytest.raises(OperationNotAllowed, match="Только мастера"):
         await mutations.apply(command(event, Operation.REMOVE_PARTICIPANT, EmptyPayload(), key=registration_key))
 
     assert await tables.get(event.event_id, registration_key) is not None

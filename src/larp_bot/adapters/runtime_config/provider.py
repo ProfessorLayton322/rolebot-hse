@@ -119,6 +119,16 @@ class RuntimeConfigProvider:
             *(BotIdentity(platform=Platform.VK, platform_user_id=user_id) for user_id in sorted(vk_ids)),
         ]
 
+    async def list_gamemasters(self) -> Sequence[BotIdentity]:
+        telegram_ids, vk_ids = await asyncio.gather(
+            self._configured_ids(Platform.TELEGRAM, role="GAMEMASTER"),
+            self._configured_ids(Platform.VK, role="GAMEMASTER"),
+        )
+        return [
+            *(BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id) for user_id in sorted(telegram_ids)),
+            *(BotIdentity(platform=Platform.VK, platform_user_id=user_id) for user_id in sorted(vk_ids)),
+        ]
+
     async def _id_is_configured(self, platform: Platform, user_id: int, *, role: str) -> bool:
         return user_id in await self._configured_ids(platform, role=role)
 

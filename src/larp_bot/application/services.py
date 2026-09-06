@@ -345,7 +345,7 @@ class EventAdministrationService:
         if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
             raise ValueError(f"Количество игроков должно быть от 1 до {MAX_PLAYER_AMOUNT}")
         if not leaders:
-            raise ValueError("У игры должен быть хотя бы один ведущий")
+            raise ValueError("У игры должен быть хотя бы один мастер")
         event_id = str(uuid4())
         master_path, public_path = event_table_paths(event_id, clean_name)
         created_paths: list[str] = []
@@ -783,7 +783,7 @@ class OrderedMutationService:
     async def _require_event_leader(self, command: OrderedRegistrationCommand) -> None:
         identity = BotIdentity(platform=command.platform, platform_user_id=command.platform_user_id)
         if identity not in await self.events.list_leaders(command.event_id):
-            raise OperationNotAllowed("Только ведущие этой игры могут изменять её данные")
+            raise OperationNotAllowed("Только мастера этой игры могут изменять её данные")
 
     async def _refresh_pass_table(self, event: Event) -> None:
         if event.pass_table_resource_path is None:
