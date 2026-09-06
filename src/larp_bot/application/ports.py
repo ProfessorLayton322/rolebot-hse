@@ -79,6 +79,20 @@ class EventRepository(Protocol):
 
     async def mark_reserve_promotion_delivered(self, event_id: str, operation_id: str) -> None: ...
 
+    async def set_participant_removal(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> None: ...
+
+    async def mark_participant_removal_delivered(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str,
+    ) -> None: ...
+
     async def delete(self, event_id: str) -> bool: ...
 
     async def list_page(
@@ -147,6 +161,8 @@ class RegistrationRepository(Protocol):
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool: ...
 
     async def remove(self, event_id: str, *, participant_key: str) -> bool: ...
+
+    async def remove_many(self, event_id: str, *, participant_keys: Sequence[str]) -> None: ...
 
     async def delete_for_event(self, event_id: str) -> None: ...
 

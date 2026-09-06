@@ -273,6 +273,7 @@ class RegistrationService:
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.REMOVE_PARTICIPANT,
+            Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
@@ -454,6 +455,16 @@ class EventAdministrationService:
             after=after,
             before=before,
             limit=limit,
+        )
+
+    async def waiting_registration_count(self, event_id: str) -> int:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        return sum(
+            registration.attendance_status is AttendanceStatus.WAITING
+            for registration in await self.catalog.registrations.list_for_event(event_id)
         )
 
     async def registration_user(self, event_id: str, registration_key: str) -> User | None:
@@ -770,6 +781,69 @@ class ConfirmationNotificationService:
         )
         return 1
 
+    async def notify_removed_participants(self, command: OrderedRegistrationCommand) -> int:
+        if command.operation not in {
+            Operation.REMOVE_PARTICIPANT,
+            Operation.REMOVE_WAITING_PARTICIPANTS,
+        }:
+            raise ValueError("command does not remove participants")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.last_participant_removal_operation_id != command.operation_id:
+            return 0
+
+        recipients: dict[str, NotificationRecipient] = {}
+        participant_keys = set(event.participant_removal_keys)
+        for user in await self.users.list_all():
+            platform, uid = self._identity(user)
+            key = participant_key(self.participant_secret, platform, uid, event.event_id)
+            if key in participant_keys:
+                recipients[key] = NotificationRecipient(platform, uid, user)
+
+        if command.operation is Operation.REMOVE_PARTICIPANT:
+            text = f"Ваша заявка на игру {event.name} была удалена"
+        else:
+            text = (
+                f"Ваша завяка на игру {event.name} была аннулирована, поскольку вы не успели "
+                "подтвердить или отменить участие до дедлайна"
+            )
+
+        delivered = 0
+        notified_keys = set(event.participant_removal_notified_keys)
+        for key in event.participant_removal_keys:
+            if key in notified_keys:
+                continue
+            recipient = recipients.get(key)
+            if recipient is None:
+                LOGGER.warning(
+                    "participant_removal_recipient_missing",
+                    extra={"event_id": event.event_id, "operation_id": command.operation_id},
+                )
+                continue
+            request_id = f"{command.operation_id}:participant-removal:{recipient.platform.value}:{recipient.user_id}"
+            await self.transport.send(
+                platform=recipient.platform,
+                user_id=recipient.user_id,
+                request_id=request_id,
+                text=text,
+                buttons=[main_menu_button()],
+            )
+            await self.events.mark_participant_removal_delivered(
+                event.event_id,
+                command.operation_id,
+                key,
+            )
+            notified_keys.add(key)
+            await self.users.claim_delivery(
+                recipient.platform,
+                recipient.user_id,
+                request_id,
+                [main_menu_button()],
+            )
+            delivered += 1
+        return delivered
+
 
 class OrderedMutationService:
     """Authoritative worker-time validation, YDB mutation, and showcase refresh."""
@@ -848,6 +922,7 @@ class OrderedMutationService:
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.REMOVE_PARTICIPANT,
+            Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
@@ -893,8 +968,31 @@ class OrderedMutationService:
             await self.catalog.archive(event)
             return MutationResult("Игра архивирована; таблицы и записи сохранены")
 
-        assert command.participant_key is not None
         event = await self.catalog.ensure_migrated(event)
+        if command.operation is Operation.REMOVE_WAITING_PARTICIPANTS:
+            if event.last_participant_removal_operation_id == command.operation_id:
+                participant_keys = event.participant_removal_keys
+            else:
+                participant_keys = [
+                    registration.participant_key
+                    for registration in await self.catalog.registrations.list_for_event(event.event_id)
+                    if registration.attendance_status is AttendanceStatus.WAITING
+                ]
+                await self.events.set_participant_removal(
+                    event.event_id,
+                    command.operation_id,
+                    participant_keys,
+                )
+            await self.catalog.registrations.remove_many(
+                event.event_id,
+                participant_keys=participant_keys,
+            )
+            await self.catalog.refresh(event)
+            await self._refresh_pass_table(event)
+            count = len(participant_keys)
+            return MutationResult(f"Удалено не подтвердивших участие: {count}")
+
+        assert command.participant_key is not None
         if command.operation is Operation.ENLIST:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")
@@ -948,6 +1046,12 @@ class OrderedMutationService:
         if command.operation is Operation.REMOVE_PARTICIPANT:
             if registration is not None and registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Запись этого игрока уже отменена")
+            if event.last_participant_removal_operation_id != command.operation_id:
+                await self.events.set_participant_removal(
+                    event.event_id,
+                    command.operation_id,
+                    [command.participant_key] if registration is not None else [],
+                )
             await self._record_reserve_promotion(event, command, registration)
             if registration is not None:
                 await self.catalog.registrations.remove(

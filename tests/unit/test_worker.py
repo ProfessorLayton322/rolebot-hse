@@ -301,17 +301,25 @@ async def test_reserve_promotion_is_notified_exactly_once_after_cancel_or_remova
         max_seconds=2,
     )
     assert await first_worker.run() == 1
-    assert [(sent[1], sent[3]) for sent in transport.sent] == [
-        (
-            2,
-            f"Вы попали в основной состав игровой сессии игры {event.name}!\n\n"
-            "Посмотрите актуальный состав игроков: https://disk.example/public/2",
-        ),
-        (actor_id, "Операция завершена"),
-    ]
+    expected = []
+    if operation is Operation.REMOVE_PARTICIPANT:
+        expected.append((1, f"Ваша заявка на игру {event.name} была удалена"))
+    expected.extend(
+        [
+            (
+                2,
+                f"Вы попали в основной состав игровой сессии игры {event.name}!\n\n"
+                "Посмотрите актуальный состав игроков: https://disk.example/public/2",
+            ),
+            (actor_id, "Операция завершена"),
+        ]
+    )
+    assert [(sent[1], sent[3]) for sent in transport.sent] == expected
 
     # Unrelated later deliveries must not erase the dedicated promotion marker.
     await users.claim_delivery(Platform.TELEGRAM, 2, "unrelated-delivery")
+    if operation is Operation.REMOVE_PARTICIPANT:
+        await users.claim_delivery(Platform.TELEGRAM, 1, "unrelated-removed-player-delivery")
     retry_consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
     retry_worker = OrderedWorker(
         retry_consumer,
@@ -322,13 +330,90 @@ async def test_reserve_promotion_is_notified_exactly_once_after_cancel_or_remova
         max_seconds=2,
     )
     assert await retry_worker.run() == 1
-    assert len(transport.sent) == 2
+    assert len(transport.sent) == len(expected)
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         assert workbook.active["B2"].value == "Reserve"
         assert workbook.active["A3"].value == "ЗАПАС"
     finally:
         workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    users = MemoryUserRepository()
+    players = [TelegramUser(tg_id=2), VkUser(vk_id=3), TelegramUser(tg_id=4)]
+    await users.save(TelegramUser(tg_id=1))
+    for player in players:
+        await users.save(player)
+    waiting_keys = [
+        participant_key(secret, Platform.TELEGRAM, 2, event.event_id),
+        participant_key(secret, Platform.VK, 3, event.event_id),
+    ]
+    confirmed_key = participant_key(secret, Platform.TELEGRAM, 4, event.event_id)
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key,
+                display_name=f"Waiting {index}",
+                wish_play="A",
+            )
+            for index, key in enumerate(waiting_keys)
+        ]
+        + [
+            Registration(
+                event_id=event.event_id,
+                participant_key=confirmed_key,
+                display_name="Confirmed",
+                wish_play="A",
+                attendance_status=AttendanceStatus.CONFIRMED,
+            )
+        ]
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.REMOVE_WAITING_PARTICIPANTS,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=EmptyPayload(),
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-first")])
+    worker = OrderedWorker(consumer, mutations, users, transport, notifications, max_seconds=2)
+    assert await worker.run() == 1
+
+    notification = (
+        f"Ваша завяка на игру {event.name} была аннулирована, поскольку вы не успели "
+        "подтвердить или отменить участие до дедлайна"
+    )
+    assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
+        (Platform.TELEGRAM, 2, notification),
+        (Platform.VK, 3, notification),
+        (Platform.TELEGRAM, 1, "Удалено не подтвердивших участие: 2"),
+    ]
+    assert await tables.get(event.event_id, confirmed_key) is not None
+    assert [await tables.get(event.event_id, key) for key in waiting_keys] == [None, None]
+
+    await users.claim_delivery(Platform.TELEGRAM, 2, "unrelated-telegram-delivery")
+    await users.claim_delivery(Platform.VK, 3, "unrelated-vk-delivery")
+    retry = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
+    retry_worker = OrderedWorker(retry, mutations, users, transport, notifications, max_seconds=2)
+    assert await retry_worker.run() == 1
+    assert len(transport.sent) == 3
 
 
 @pytest.mark.asyncio

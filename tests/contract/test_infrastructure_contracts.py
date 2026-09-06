@@ -28,6 +28,9 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "last_reserve_promotion_operation_id"' in ydb
     assert 'name = "last_reserve_promotion_participant_key"' in ydb
     assert 'name = "last_reserve_promotion_delivered_operation_id"' in ydb
+    assert 'name = "last_participant_removal_operation_id"' in ydb
+    assert 'name = "participant_removal_keys_json"' in ydb
+    assert 'name = "participant_removal_notified_keys_json"' in ydb
     assert 'name = "archived_at"' in ydb
     assert 'primary_key = ["event_id", "platform", "platform_user_id"]' in ydb
     assert ydb.count('name = "telegram_handle"') == 2

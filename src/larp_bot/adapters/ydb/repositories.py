@@ -174,13 +174,17 @@ def _buttons(raw: object) -> list[Button]:
         return []
 
 
-def _confirmed_notifications(raw: object) -> list[str]:
+def _string_list(raw: object, column: str) -> list[str]:
     if not raw:
         return []
     parsed = json.loads(str(raw))
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise ValueError("confirmed_notifications_json must be a list of strings")
+        raise ValueError(f"{column} must be a list of strings")
     return [str(item) for item in parsed]
+
+
+def _confirmed_notifications(raw: object) -> list[str]:
+    return _string_list(raw, "confirmed_notifications_json")
 
 
 def _dt(value: object) -> datetime:
@@ -422,6 +426,8 @@ class YdbEventRepository:
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
         last_reserve_promotion_delivered_operation_id,
+        last_participant_removal_operation_id, participant_removal_keys_json,
+        participant_removal_notified_keys_json,
         archived_at,
         created_at, updated_at
     """
@@ -457,6 +463,15 @@ class YdbEventRepository:
             last_reserve_promotion_operation_id=row.get("last_reserve_promotion_operation_id"),
             last_reserve_promotion_participant_key=row.get("last_reserve_promotion_participant_key"),
             last_reserve_promotion_delivered_operation_id=row.get("last_reserve_promotion_delivered_operation_id"),
+            last_participant_removal_operation_id=row.get("last_participant_removal_operation_id"),
+            participant_removal_keys=_string_list(
+                row.get("participant_removal_keys_json"),
+                "participant_removal_keys_json",
+            ),
+            participant_removal_notified_keys=_string_list(
+                row.get("participant_removal_notified_keys_json"),
+                "participant_removal_notified_keys_json",
+            ),
             archived_at=_dt(row["archived_at"]) if row.get("archived_at") is not None else None,
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
@@ -517,6 +532,9 @@ class YdbEventRepository:
             DECLARE $last_reserve_promotion_operation_id AS Optional<Utf8>;
             DECLARE $last_reserve_promotion_participant_key AS Optional<Utf8>;
             DECLARE $last_reserve_promotion_delivered_operation_id AS Optional<Utf8>;
+            DECLARE $last_participant_removal_operation_id AS Optional<Utf8>;
+            DECLARE $participant_removal_keys_json AS Utf8;
+            DECLARE $participant_removal_notified_keys_json AS Utf8;
             DECLARE $archived_at AS Optional<Timestamp>;
             DECLARE $updated_at AS Timestamp;
             {" ".join(leader_declarations)}
@@ -528,6 +546,8 @@ class YdbEventRepository:
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
                 last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
                 last_reserve_promotion_delivered_operation_id,
+                last_participant_removal_operation_id, participant_removal_keys_json,
+                participant_removal_notified_keys_json,
                 archived_at,
                 created_at, updated_at
             ) VALUES (
@@ -538,6 +558,8 @@ class YdbEventRepository:
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
                 $last_reserve_promotion_delivered_operation_id,
+                $last_participant_removal_operation_id, $participant_removal_keys_json,
+                $participant_removal_notified_keys_json,
                 $archived_at,
                 $created_at, $updated_at
             );
@@ -565,6 +587,15 @@ class YdbEventRepository:
                 "$last_reserve_promotion_operation_id": event.last_reserve_promotion_operation_id,
                 "$last_reserve_promotion_participant_key": event.last_reserve_promotion_participant_key,
                 "$last_reserve_promotion_delivered_operation_id": (event.last_reserve_promotion_delivered_operation_id),
+                "$last_participant_removal_operation_id": event.last_participant_removal_operation_id,
+                "$participant_removal_keys_json": json.dumps(
+                    event.participant_removal_keys,
+                    separators=(",", ":"),
+                ),
+                "$participant_removal_notified_keys_json": json.dumps(
+                    event.participant_removal_notified_keys,
+                    separators=(",", ":"),
+                ),
                 "$archived_at": event.archived_at,
                 "$created_at": event.created_at,
                 "$updated_at": event.updated_at,
@@ -834,6 +865,72 @@ class YdbEventRepository:
             {
                 "$event_id": event_id,
                 "$operation_id": operation_id,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def set_participant_removal(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> None:
+        event = await self.get(event_id)
+        if event is None or event.last_participant_removal_operation_id == operation_id:
+            return
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $participant_keys_json AS Utf8; DECLARE $notified_keys_json AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET last_participant_removal_operation_id = $operation_id,
+                participant_removal_keys_json = $participant_keys_json,
+                participant_removal_notified_keys_json = $notified_keys_json,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND (
+                last_participant_removal_operation_id IS NULL
+                OR last_participant_removal_operation_id != $operation_id
+              );
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$participant_keys_json": json.dumps(list(participant_keys), separators=(",", ":")),
+                "$notified_keys_json": "[]",
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def mark_participant_removal_delivered(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str,
+    ) -> None:
+        event = await self.get(event_id)
+        if (
+            event is None
+            or event.last_participant_removal_operation_id != operation_id
+            or participant_key in event.participant_removal_notified_keys
+        ):
+            return
+        notified_keys = [*event.participant_removal_notified_keys, participant_key]
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $notified_keys_json AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET participant_removal_notified_keys_json = $notified_keys_json,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND last_participant_removal_operation_id = $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$notified_keys_json": json.dumps(notified_keys, separators=(",", ":")),
                 "$updated_at": datetime.now(UTC),
             },
         )
@@ -1266,6 +1363,18 @@ class YdbRegistrationRepository:
             {"$event_id": event_id, "$participant_key": participant_key},
         )
         return True
+
+    async def remove_many(self, event_id: str, *, participant_keys: Sequence[str]) -> None:
+        if not participant_keys:
+            return
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_keys AS List<Utf8>;
+            DELETE FROM `registrations`
+            WHERE event_id = $event_id AND participant_key IN $participant_keys;
+            """,
+            {"$event_id": event_id, "$participant_keys": list(participant_keys)},
+        )
 
     async def delete_for_event(self, event_id: str) -> None:
         await self.db.query(
