@@ -7,7 +7,12 @@ from uuid import uuid4
 import pytest
 from openpyxl import load_workbook
 
-from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
+from larp_bot.adapters.memory import (
+    MemoryEventRepository,
+    MemoryRegistrationRepository,
+    MemoryUserRepository,
+    StaticAdminProvider,
+)
 from larp_bot.adapters.yandex_disk.repository import PUBLIC_HEADERS, YandexDiskShowcaseRepository
 from larp_bot.application.services import (
     OperationNotAllowed,
@@ -121,6 +126,33 @@ async def test_worker_rejects_privileged_mutation_from_nonleader(
 
     stored_event = await events.get(event.event_id)
     assert stored_event is not None and stored_event.confirmed_notifications == []
+
+
+@pytest.mark.asyncio
+async def test_worker_allows_admin_privileged_mutation_without_event_master_membership(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
+        admins=StaticAdminProvider(tg_ids={1}),
+    )
+
+    await mutations.apply(
+        command(
+            event,
+            Operation.SEND_CONFIRMED_NOTIFICATION,
+            NotificationPayload(text="Администраторское уведомление"),
+        )
+    )
+
+    assert await events.list_leaders(event.event_id) == []
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.confirmed_notifications == ["Администраторское уведомление"]
 
 
 @pytest.mark.asyncio
@@ -468,7 +500,8 @@ async def test_leader_removal_deletes_registration_and_refreshes_every_table(
             workbook.close()
     pass_workbook = load_workbook(BytesIO(disk_store.files[pass_path]))
     try:
-        assert pass_workbook.active.max_row == 1
+        assert pass_workbook.active.max_row == 2
+        assert pass_workbook.active["I2"].value == "ivan@example.com"
     finally:
         pass_workbook.close()
 

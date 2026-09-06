@@ -11,6 +11,7 @@ from larp_bot.adapters.yandex_disk.repository import PASS_TABLE_HEADERS, YandexD
 from larp_bot.application.services import EventAdministrationService, OrderedMutationService, RegistrationCatalog
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     CharacterWishPayload,
     EmptyPayload,
     EnlistPayload,
@@ -183,6 +184,64 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
     assert repeated.created is False
     assert repeated.row_count is None
     assert len(disk_store.files) == 1
+
+
+@pytest.mark.asyncio
+async def test_pass_table_includes_pass_requiring_master_without_player_registration(
+    disk_store: MemoryDiskStore, event
+) -> None:
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=51,
+            full_name="Иванов Иван",
+            vk_url="https://vk.com/master",
+            crossplay=False,
+            larp_experience=True,
+            needs_pass=True,
+            pass_details=russian_pass().model_copy(update={"email": "master@example.com"}),
+        )
+    )
+    await users.save(
+        TelegramUser(
+            tg_id=52,
+            full_name="Петров Пётр",
+            vk_url="https://vk.com/admin",
+            crossplay=False,
+            larp_experience=True,
+            needs_pass=True,
+            pass_details=russian_pass().model_copy(
+                update={"surname_cyrillic": "Петров", "name_cyrillic": "Пётр", "email": "admin@example.com"}
+            ),
+        )
+    )
+    events = MemoryEventRepository([event])
+    await events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=51),
+    )
+    registrations = MemoryRegistrationRepository()
+    workbooks = YandexDiskShowcaseRepository(disk_store)
+    service = EventAdministrationService(
+        events,
+        workbooks,
+        RegistrationCatalog(events, registrations, workbooks),
+        users,
+        "participant-secret",
+    )
+
+    result = await service.create_pass_table(event.event_id)
+
+    assert result.row_count == 1
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.pass_table_resource_path is not None
+    workbook = load_workbook(BytesIO(disk_store.files[stored_event.pass_table_resource_path]))
+    try:
+        assert workbook.active.max_row == 2
+        assert workbook.active["I2"].value == "master@example.com"
+        assert "admin@example.com" not in {cell.value for row in workbook.active.iter_rows() for cell in row}
+    finally:
+        workbook.close()
 
 
 @pytest.mark.asyncio

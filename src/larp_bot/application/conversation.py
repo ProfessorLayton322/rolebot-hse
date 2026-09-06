@@ -91,6 +91,7 @@ REVOKE_GAMEMASTER = "➖ Снять модератора"
 LIST_GAMEMASTERS = "📋 Список модераторов"
 MANAGE_MASTERS = "Мастера"
 ADD_EVENT_LEADER = "➕ Добавить мастера"
+ADD_SELF_EVENT_LEADER = "➕ Добавить себя мастером"
 REMOVE_EVENT_LEADER = "➖ Удалить мастера"
 LIST_EVENT_LEADERS = "📋 Список мастеров"
 ARCHIVE_GAME = "📦 Архивировать игру"
@@ -671,8 +672,6 @@ class ConversationEngine:
         events = list(await self.events.list_page(statuses=statuses, after=after, archived=False, limit=10))
         if not events:
             return BotResponse(text=empty_text, buttons=[Button(label=BACK, value=BACK)])
-        if flow.startswith("admin-"):
-            await asyncio.gather(*(self._sync_admin_leaders(event.event_id) for event in events))
         buttons = _event_buttons(events, flow)
         if len(events) == 10:
             last = events[-1]
@@ -1114,7 +1113,6 @@ class ConversationEngine:
         )
 
     async def _event_master_records(self, event_id: str) -> list[tuple[BotIdentity, User | None]]:
-        await self._sync_admin_leaders(event_id)
         identities = list(await self.events.list_leaders(event_id))
         profiles = await asyncio.gather(
             *(self.users.get(identity.platform, identity.platform_user_id) for identity in identities)
@@ -1159,27 +1157,11 @@ class ConversationEngine:
             actor.last_delivery_operation_id = request_id
             actor.last_bot_buttons = buttons.copy()
 
-    async def _sync_admin_leaders(self, event_id: str) -> None:
-        admins = list(await self.admins.list_admins())
-        if not admins:
-            return
-        current = {
-            (identity.platform, identity.platform_user_id) for identity in await self.events.list_leaders(event_id)
-        }
-        await asyncio.gather(
-            *(
-                self.events.add_leader(event_id, identity)
-                for identity in admins
-                if (identity.platform, identity.platform_user_id) not in current
-            )
-        )
-
     async def _is_event_leader(self, user: User, event_id: str) -> bool:
-        await self._sync_admin_leaders(event_id)
         return self._identity(user) in await self.events.list_leaders(event_id)
 
     async def _event_leader_required(self, user: User, event_id: str) -> BotResponse | None:
-        if await self._is_event_leader(user, event_id):
+        if await self._is_admin(user) or await self._is_event_leader(user, event_id):
             return None
         await self._clear(user)
         return BotResponse(text="Только мастера этой игры могут изменять её данные.")
@@ -1248,14 +1230,17 @@ class ConversationEngine:
         if denied is not None:
             return denied
         await self._clear(user)
+        buttons = [
+            Button(label=ADD_EVENT_LEADER, value=f"master:add:{event.event_id}"),
+            Button(label=REMOVE_EVENT_LEADER, value=f"master:remove:{event.event_id}"),
+            Button(label=LIST_EVENT_LEADERS, value=f"master:list:{event.event_id}"),
+            game_management_button(event.event_id),
+        ]
+        if await self._is_admin(user) and not await self._is_event_leader(user, event.event_id):
+            buttons.insert(0, Button(label=ADD_SELF_EVENT_LEADER, value=f"master:self-add:{event.event_id}"))
         return BotResponse(
             text=f"Мастера игры «{event.name}»",
-            buttons=[
-                Button(label=ADD_EVENT_LEADER, value=f"master:add:{event.event_id}"),
-                Button(label=REMOVE_EVENT_LEADER, value=f"master:remove:{event.event_id}"),
-                Button(label=LIST_EVENT_LEADERS, value=f"master:list:{event.event_id}"),
-                game_management_button(event.event_id),
-            ],
+            buttons=buttons,
         )
 
     async def _show_event_master_candidates(
@@ -1267,16 +1252,31 @@ class ConversationEngine:
     ) -> BotResponse:
         if offset < 0:
             return BotResponse(text="Некорректная страница.")
-        moderators, current = await asyncio.gather(
+        moderators, admins, current = await asyncio.gather(
             self._moderator_users(),
+            self.admins.list_admins(),
             self.events.list_leaders(event.event_id),
         )
+        admin_profiles = await asyncio.gather(
+            *(self.users.get(identity.platform, identity.platform_user_id) for identity in admins)
+        )
+        eligible = {(self._identity(profile).platform, user_id(profile)): profile for profile in moderators}
+        eligible.update(
+            {
+                (identity.platform, identity.platform_user_id): profile
+                for identity, profile in zip(admins, admin_profiles, strict=True)
+                if profile is not None
+            }
+        )
         current_keys = {(identity.platform, identity.platform_user_id) for identity in current}
-        candidates = [
-            profile
-            for profile in moderators
-            if (self._identity(profile).platform, user_id(profile)) not in current_keys
-        ]
+        candidates = sorted(
+            (profile for key, profile in eligible.items() if key not in current_keys),
+            key=lambda profile: (
+                (profile.full_name or "").casefold(),
+                self._identity(profile).platform.value,
+                user_id(profile),
+            ),
+        )
         if offset >= len(candidates) and offset:
             offset = max(0, ((len(candidates) - 1) // 10) * 10)
         page = candidates[offset : offset + 10]
@@ -1304,9 +1304,12 @@ class ConversationEngine:
             ]
         )
         text = (
-            f"Выберите модератора, которого нужно добавить мастером игры «{event.name}»:"
+            f"Выберите модератора или администратора, которого нужно добавить мастером игры «{event.name}»:"
             if page
-            else ("Нет модераторов, которых можно выбрать. Можно ввести Telegram- или VK-профиль модератора напрямую.")
+            else (
+                "Нет модераторов или администраторов, которых можно выбрать. "
+                "Можно ввести Telegram- или VK-профиль напрямую."
+            )
         )
         return BotResponse(text=text, buttons=buttons)
 
@@ -1322,14 +1325,7 @@ class ConversationEngine:
             return BotResponse(text="Некорректная страница.")
         records = await self._event_master_records(event.event_id)
         if mode == "remove":
-            admin_keys = {
-                (identity.platform, identity.platform_user_id) for identity in await self.admins.list_admins()
-            }
-            records = [
-                record
-                for record in records
-                if (record[0].platform, record[0].platform_user_id) not in admin_keys and record[1] is not None
-            ]
+            records = [record for record in records if record[1] is not None]
         if offset >= len(records) and offset:
             offset = max(0, ((len(records) - 1) // 10) * 10)
         page = records[offset : offset + 10]
@@ -1368,6 +1364,15 @@ class ConversationEngine:
     ) -> BotResponse | None:
         parts = value.split(":")
         try:
+            if value.startswith("master:self-add:") and len(parts) == 3:
+                if not await self._is_admin(user):
+                    return BotResponse(text="Недостаточно прав.")
+                event = await self.events.get(parts[2])
+                if event is None:
+                    return BotResponse(text="Игра не найдена.")
+                if event.archived_at is not None:
+                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                return await self._assign_event_leader(user, message, event, user)
             if value.startswith("mod:list-page:"):
                 return await self._show_moderators(user, "list", offset=int(parts[2]))
             if value.startswith("mod:remove-page:"):
@@ -1559,6 +1564,7 @@ class ConversationEngine:
                         text="Этот пользователь уже не является мастером этой игры.",
                         buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
                     )
+                await self.administration.refresh_pass_table(event_id)
                 if target.last_delivery_operation_id != request_id:
                     await self._notify_status_change(
                         user,
@@ -1694,11 +1700,10 @@ class ConversationEngine:
             player_amount = int(raw_amount)
             if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
                 return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
-            leaders = [*(await self.admins.list_admins()), self._identity(user)]
             event = await self.administration.create_event(
                 str(user.dialog_context["event_name"]),
                 player_amount,
-                leaders,
+                [self._identity(user)],
             )
             await self._clear(user)
             return BotResponse(
@@ -1979,19 +1984,23 @@ class ConversationEngine:
         request_id = (
             f"leader-grant:{event_id}:{identity.platform.value}:{identity.platform_user_id}:{message.update_id}"
         )
-        if not target.is_gamemaster and not await self.admins.is_gamemaster(
-            identity.platform, identity.platform_user_id
-        ):
+        configured_moderator, configured_admin = await asyncio.gather(
+            self.admins.is_gamemaster(identity.platform, identity.platform_user_id),
+            self.admins.is_admin(identity.platform, identity.platform_user_id),
+        )
+        if not target.is_gamemaster and not configured_moderator and not configured_admin:
             return BotResponse(
-                text="Добавить мастером можно только модератора.",
+                text="Добавить мастером можно только модератора или администратора.",
                 buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
             )
+        role_name = "Администратор" if configured_admin else "Модератор"
         notification_button = Button(label="Управление игрой", value=f"ag:manage:{event_id}")
         if identity in await self.events.list_leaders(event_id):
             if (
                 user.dialog_context.get("pending_leader_grant") == request_id
                 and target.last_delivery_operation_id != request_id
             ):
+                await self.administration.refresh_pass_table(event_id)
                 await self._notify_status_change(
                     user,
                     target,
@@ -2001,7 +2010,7 @@ class ConversationEngine:
                 )
                 await self._clear(user)
                 return BotResponse(
-                    text=f"✅ Модератор добавлен мастером игры «{event.name}».",
+                    text=f"✅ {role_name} добавлен мастером игры «{event.name}».",
                     buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
                 )
             await self._clear(user)
@@ -2015,6 +2024,7 @@ class ConversationEngine:
         await self.events.add_leader(event_id, identity)
         if identity not in await self.events.list_leaders(event_id):
             raise RuntimeError("event leader grant was not persisted")
+        await self.administration.refresh_pass_table(event_id)
         await self._notify_status_change(
             user,
             target,
@@ -2024,7 +2034,7 @@ class ConversationEngine:
         )
         await self._clear(user)
         return BotResponse(
-            text=f"✅ Модератор добавлен мастером игры «{event.name}».",
+            text=f"✅ {role_name} добавлен мастером игры «{event.name}».",
             buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
         )
 
@@ -2476,7 +2486,10 @@ class ConversationEngine:
                 ),
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
-        is_leader = await self._is_event_leader(user, event.event_id)
+        is_leader, is_admin = await asyncio.gather(
+            self._is_event_leader(user, event.event_id),
+            self._is_admin(user),
+        )
         text = (
             f"Управление игрой «{event.name}»\n\n"
             f"Количество игроков: {event.player_amount}\n"
@@ -2484,7 +2497,7 @@ class ConversationEngine:
         )
         if event.confirmation_deadline is not None:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
-        if not is_leader:
+        if not is_leader and not is_admin:
             return BotResponse(
                 text=text + "\n\nАдминистративные действия доступны только мастерам этой игры.",
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
@@ -2499,7 +2512,7 @@ class ConversationEngine:
             (MANAGE_MASTERS, "masters"),
             (ARCHIVE_GAME, "archive"),
         ]
-        if await self._is_admin(user):
+        if is_admin:
             actions.insert(-1, (STATS_GAME, "stats"))
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))

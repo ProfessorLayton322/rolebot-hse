@@ -173,7 +173,7 @@ tables.
 
 Game registration data belongs in `registrations`, keyed by `(event_id, participant_key)`. YDB is authoritative. Each public XLSX is only a derived showcase of those rows.
 
-Per-event leadership belongs in `event_leaders`, keyed by `(event_id, platform, platform_user_id)`. Every configured bot admin and the creating privileged user must be attached when a game is created. Other game masters are attached only by an existing event leader.
+Per-event leadership belongs in `event_leaders`, keyed by `(event_id, platform, platform_user_id)`. The privileged user who creates a game must be attached to it. Configured bot admins retain global control without being attached to unrelated games, but may explicitly add themselves or be added by an existing event leader.
 
 ---
 

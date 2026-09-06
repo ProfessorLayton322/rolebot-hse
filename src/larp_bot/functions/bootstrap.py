@@ -108,7 +108,13 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         transport=transport,
         vk_user_ids=vk,
     )
-    mutations = OrderedMutationService(events, catalog, users, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
+    mutations = OrderedMutationService(
+        events,
+        catalog,
+        users,
+        secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+        admins=config,
+    )
     notifications = ConfirmationNotificationService(
         events,
         catalog,
