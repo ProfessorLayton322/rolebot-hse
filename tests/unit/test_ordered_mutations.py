@@ -365,11 +365,12 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
     [
         (Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")),
         (Operation.CANCEL, EmptyPayload()),
+        (Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="Medic")),
     ],
 )
-async def test_archived_game_rejects_signup_and_cancellation(
+async def test_archived_game_rejects_participant_mutations(
     operation: Operation,
-    payload: EnlistPayload | EmptyPayload,
+    payload: EnlistPayload | EmptyPayload | CharacterWishPayload,
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -378,8 +379,10 @@ async def test_archived_game_rejects_signup_and_cancellation(
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
-    if operation is Operation.CANCEL:
+    if operation is not Operation.ENLIST:
         await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
+    if operation is Operation.UPDATE_CHARACTER_WISH:
+        await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
     await events.archive(event.event_id, datetime.now(UTC))
 
     with pytest.raises(OperationNotAllowed, match="архивирована"):
