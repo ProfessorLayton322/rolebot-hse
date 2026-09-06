@@ -215,6 +215,34 @@ class MemoryEventRepository:
         event.last_reserve_promotion_delivered_operation_id = operation_id
         event.updated_at = datetime.now(event.updated_at.tzinfo)
 
+    async def set_participant_removal(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> None:
+        event = self.rows[event_id]
+        if event.last_participant_removal_operation_id == operation_id:
+            return
+        event.last_participant_removal_operation_id = operation_id
+        event.participant_removal_keys = list(participant_keys)
+        event.participant_removal_notified_keys = []
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+
+    async def mark_participant_removal_delivered(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str,
+    ) -> None:
+        event = self.rows[event_id]
+        if (
+            event.last_participant_removal_operation_id == operation_id
+            and participant_key not in event.participant_removal_notified_keys
+        ):
+            event.participant_removal_notified_keys.append(participant_key)
+            event.updated_at = datetime.now(event.updated_at.tzinfo)
+
     async def delete(self, event_id: str) -> bool:
         self.leaders.pop(event_id, None)
         return self.rows.pop(event_id, None) is not None
@@ -395,6 +423,10 @@ class MemoryRegistrationRepository:
 
     async def remove(self, event_id: str, *, participant_key: str) -> bool:
         return self.rows.pop((event_id, participant_key), None) is not None
+
+    async def remove_many(self, event_id: str, *, participant_keys: Sequence[str]) -> None:
+        for participant_key in participant_keys:
+            self.rows.pop((event_id, participant_key), None)
 
     async def delete_for_event(self, event_id: str) -> None:
         for key in [key for key in self.rows if key[0] == event_id]:

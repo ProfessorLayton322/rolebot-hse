@@ -182,6 +182,18 @@ resource "yandex_ydb_table" "events" {
     type = "Utf8"
   }
   column {
+    name = "last_participant_removal_operation_id"
+    type = "Utf8"
+  }
+  column {
+    name = "participant_removal_keys_json"
+    type = "Utf8"
+  }
+  column {
+    name = "participant_removal_notified_keys_json"
+    type = "Utf8"
+  }
+  column {
     name = "archived_at"
     type = "Timestamp"
   }

@@ -87,6 +87,20 @@ def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
     assert event.last_confirmed_notification_operation_id == "notification-operation"
 
 
+def test_participant_removal_delivery_state_is_loaded_from_event_json() -> None:
+    row = event_row("CREATED") | {
+        "last_participant_removal_operation_id": "removal-operation",
+        "participant_removal_keys_json": json.dumps(["a" * 43, "b" * 43]),
+        "participant_removal_notified_keys_json": json.dumps(["a" * 43]),
+    }
+
+    event = YdbEventRepository._from_row(row)
+
+    assert event.last_participant_removal_operation_id == "removal-operation"
+    assert event.participant_removal_keys == ["a" * 43, "b" * 43]
+    assert event.participant_removal_notified_keys == ["a" * 43]
+
+
 def test_archival_timestamp_is_loaded() -> None:
     archived_at = datetime(2026, 2, 1, tzinfo=UTC)
     event = YdbEventRepository._from_row(event_row("CLOSED") | {"archived_at": archived_at})
@@ -132,6 +146,34 @@ async def test_reserve_promotion_operation_and_participant_are_persisted_togethe
 
     assert "last_reserve_promotion_delivered_operation_id = $operation_id" in executor.query_text
     assert executor.params["$operation_id"] == "cancel-operation"
+
+
+@pytest.mark.asyncio
+async def test_participant_removal_snapshot_and_delivery_are_persisted() -> None:
+    snapshot_executor = RecordingExecutor([event_row("CREATED")])
+    repository = YdbEventRepository(snapshot_executor)  # type: ignore[arg-type]
+    keys = ["a" * 43, "b" * 43]
+
+    await repository.set_participant_removal("event-a1", "removal-operation", keys)
+
+    assert "participant_removal_keys_json = $participant_keys_json" in snapshot_executor.query_text
+    assert json.loads(snapshot_executor.params["$participant_keys_json"]) == keys
+
+    delivery_executor = RecordingExecutor(
+        [
+            event_row("CREATED")
+            | {
+                "last_participant_removal_operation_id": "removal-operation",
+                "participant_removal_keys_json": json.dumps(keys),
+                "participant_removal_notified_keys_json": json.dumps([keys[0]]),
+            }
+        ]
+    )
+    repository = YdbEventRepository(delivery_executor)  # type: ignore[arg-type]
+    await repository.mark_participant_removal_delivered("event-a1", "removal-operation", keys[1])
+
+    assert "participant_removal_notified_keys_json = $notified_keys_json" in delivery_executor.query_text
+    assert json.loads(delivery_executor.params["$notified_keys_json"]) == keys
 
 
 @pytest.mark.asyncio

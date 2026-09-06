@@ -87,6 +87,7 @@ class Operation(StrEnum):
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
     REMOVE_PARTICIPANT = "REMOVE_PARTICIPANT"
+    REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
     CLOSE_EVENT = "CLOSE_EVENT"
     ARCHIVE_EVENT = "ARCHIVE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
@@ -314,6 +315,9 @@ class Event(StrictModel):
     last_reserve_promotion_operation_id: str | None = None
     last_reserve_promotion_participant_key: str | None = None
     last_reserve_promotion_delivered_operation_id: str | None = None
+    last_participant_removal_operation_id: str | None = None
+    participant_removal_keys: list[str] = Field(default_factory=list)
+    participant_removal_notified_keys: list[str] = Field(default_factory=list)
     archived_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -482,6 +486,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.OPEN_REGISTRATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.CLOSE_EVENT,
+            Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.ARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }

@@ -56,6 +56,7 @@ def command(
                 Operation.OPEN_CONFIRMATION,
                 Operation.SEND_CONFIRMATION_REMINDER,
                 Operation.SEND_CONFIRMED_NOTIFICATION,
+                Operation.REMOVE_WAITING_PARTICIPANTS,
                 Operation.CLOSE_EVENT,
                 Operation.ARCHIVE_EVENT,
                 Operation.DELETE_EVENT,
@@ -492,6 +493,50 @@ async def test_nonleader_cannot_remove_event_participant(disk_store: MemoryDiskS
         await mutations.apply(command(event, Operation.REMOVE_PARTICIPANT, EmptyPayload(), key=registration_key))
 
     assert await tables.get(event.event_id, registration_key) is not None
+
+
+@pytest.mark.asyncio
+async def test_bulk_removal_deletes_only_waiting_players_and_keeps_retry_snapshot(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    waiting_keys = ["a" * 43, "b" * 43]
+    confirmed_key = "c" * 43
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key,
+                display_name=f"Waiting {index}",
+                wish_play="Anyone",
+            )
+            for index, key in enumerate(waiting_keys)
+        ]
+        + [
+            Registration(
+                event_id=event.event_id,
+                participant_key=confirmed_key,
+                display_name="Confirmed",
+                wish_play="Anyone",
+                attendance_status=AttendanceStatus.CONFIRMED,
+            )
+        ]
+    )
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    removal = command(event, Operation.REMOVE_WAITING_PARTICIPANTS, EmptyPayload())
+
+    assert (await mutations.apply(removal)).text == "Удалено не подтвердивших участие: 2"
+    assert (await mutations.apply(removal)).text == "Удалено не подтвердивших участие: 2"
+    assert [await tables.get(event.event_id, key) for key in waiting_keys] == [None, None]
+    assert await tables.get(event.event_id, confirmed_key) is not None
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.last_participant_removal_operation_id == removal.operation_id
+    assert stored_event.participant_removal_keys == waiting_keys
 
 
 @pytest.mark.asyncio

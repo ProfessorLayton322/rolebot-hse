@@ -210,6 +210,26 @@ async def test_registration_remove_is_scoped_to_one_event() -> None:
     assert await repository.get("event-b1", registration.participant_key) == other_event
 
 
+@pytest.mark.asyncio
+async def test_registration_remove_many_is_scoped_to_selected_keys() -> None:
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key=key * 43,
+            display_name=key,
+            wish_play="A",
+        )
+        for key in ("a", "b", "c")
+    ]
+    repository = MemoryRegistrationRepository(registrations)
+
+    await repository.remove_many("event-a1", participant_keys=["a" * 43, "c" * 43])
+
+    assert await repository.get("event-a1", "a" * 43) is None
+    assert await repository.get("event-a1", "b" * 43) is not None
+    assert await repository.get("event-a1", "c" * 43) is None
+
+
 class RecordingExecutor:
     def __init__(self, responses: list[list[dict[str, Any]]]) -> None:
         self.responses = responses
@@ -352,3 +372,17 @@ async def test_ydb_registration_remove_uses_the_composite_key() -> None:
     assert "DELETE FROM `registrations`" in query
     assert "event_id = $event_id AND participant_key = $participant_key" in query
     assert params == {"$event_id": "event-a1", "$participant_key": "a" * 43}
+
+
+@pytest.mark.asyncio
+async def test_ydb_registration_remove_many_uses_event_and_selected_keys() -> None:
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+    keys = ["a" * 43, "b" * 43]
+
+    await repository.remove_many("event-a1", participant_keys=keys)
+
+    query, params = executor.queries[0]
+    assert "participant_key IN $participant_keys" in query
+    assert "DELETE FROM `registrations`" in query
+    assert params == {"$event_id": "event-a1", "$participant_keys": keys}

@@ -75,6 +75,8 @@ SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтвержден�
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
 REMOVE_PLAYER = "🗑 Удалить игрока"
+MANAGE_PLAYERS = "Управление игроками"
+REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
@@ -128,6 +130,8 @@ ADMIN_ACTIONS = frozenset(
         SEND_CONFIRMED_NOTIFICATION,
         LIST_WAITING_PLAYERS,
         REMOVE_PLAYER,
+        MANAGE_PLAYERS,
+        REMOVE_WAITING_PLAYERS,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
         MANAGE_MODERATORS,
@@ -175,6 +179,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_DELETE_NAME",
         "ADMIN_REMOVE_PICK",
         "ADMIN_REMOVE_CONFIRM",
+        "ADMIN_REMOVE_WAITING_CONFIRM",
         "ADMIN_WAITING_PICK",
     }
 )
@@ -221,6 +226,10 @@ def _event_buttons(events: list[Event], flow: str) -> list[Button]:
 
 def game_management_button(event_id: str) -> Button:
     return Button(label=BACK, value=f"ag:manage:{event_id}")
+
+
+def player_management_button(event_id: str) -> Button:
+    return Button(label=BACK, value=f"ag:players:{event_id}")
 
 
 def _admin_status_response(event_name: str, current_status: EventStatus, event_id: str) -> BotResponse:
@@ -350,7 +359,7 @@ class ConversationEngine:
                 if value == MANAGE_MODERATORS
                 else await self._admin_menu(user)
             )
-        elif value.startswith(("ag:manage:", "ag:masters:")):
+        elif value.startswith(("ag:manage:", "ag:masters:", "ag:players:")):
             await self._clear(user)
             response = await self._admin_game_action(user, message, value)
         elif user.dialog_state != "IDLE":
@@ -1563,6 +1572,7 @@ class ConversationEngine:
             "ADMIN_EVENT_LEADER_LIST",
             "ADMIN_REMOVE_PICK",
             "ADMIN_REMOVE_CONFIRM",
+            "ADMIN_REMOVE_WAITING_CONFIRM",
             "ADMIN_WAITING_PICK",
         }
         if user.dialog_state in event_bound_states:
@@ -1641,6 +1651,8 @@ class ConversationEngine:
             return await self._admin_remove_pick(user, message, value)
         if user.dialog_state == "ADMIN_REMOVE_CONFIRM":
             return await self._admin_remove_confirm(user, message, value)
+        if user.dialog_state == "ADMIN_REMOVE_WAITING_CONFIRM":
+            return await self._admin_remove_waiting_confirm(user, message, value)
         if user.dialog_state == "ADMIN_WAITING_PICK":
             return await self._admin_waiting_pick(user, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
@@ -2027,7 +2039,7 @@ class ConversationEngine:
         if not page.rows:
             return BotResponse(
                 text=(f"В игре «{event.name}» нет записавшихся или подтвердивших участие игроков."),
-                buttons=[game_management_button(event.event_id)],
+                buttons=[player_management_button(event.event_id)],
             )
 
         choices: dict[str, str] = {}
@@ -2046,7 +2058,7 @@ class ConversationEngine:
             buttons.append(Button(label="⬅️ Предыдущая", value=f"admin:remove:page:p:{page_token}"))
         if page.has_next:
             buttons.append(Button(label="➡️ Следующая", value=f"admin:remove:page:n:{page_token}"))
-        buttons.append(game_management_button(event.event_id))
+        buttons.append(player_management_button(event.event_id))
         user.dialog_context.update(
             {
                 "remove_choices": choices,
@@ -2300,14 +2312,81 @@ class ConversationEngine:
             payload=EmptyPayload(),
             reply_context=ReplyContext(
                 text_success=(f"🗑 Игрок «{registration.display_name}» удалён из игры «{context['event_name']}»."),
-                buttons=[game_management_button(event_id)],
+                buttons=[player_management_button(event_id)],
             ),
             idempotency_key=f"{message.update_id}:{Operation.REMOVE_PARTICIPANT.value}",
             target_participant_key=participant_key,
         )
         return BotResponse(
             text="⏳ Удаление принято в обработку.",
-            buttons=[game_management_button(event_id)],
+            buttons=[player_management_button(event_id)],
+            deferred=True,
+            command_enqueued=True,
+        )
+
+    async def _remove_waiting_confirmation(self, user: User, event: Event, *, invalid: str = "") -> BotResponse:
+        count = await self.administration.waiting_registration_count(event.event_id)
+        if count == 0:
+            await self._clear(user)
+            return BotResponse(
+                text=f"В игре «{event.name}» нет игроков, не подтвердивших участие.",
+                buttons=[player_management_button(event.event_id)],
+            )
+        token = token_urlsafe(8)
+        user.dialog_state = "ADMIN_REMOVE_WAITING_CONFIRM"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "remove_waiting_count": count,
+            "remove_waiting_token": token,
+        }
+        prefix = f"{invalid}\n\n" if invalid else ""
+        return BotResponse(
+            text=(
+                f"{prefix}⚠️ Вы действительно хотите удалить всех игроков, которые не подтвердили участие "
+                f"в игре «{event.name}»?\n\nБудет удалено игроков: {count}."
+            ),
+            buttons=[
+                Button(label="Да, удалить", value=f"admin:remove-waiting:confirm:{token}"),
+                Button(label="Нет", value=f"ag:players:{event.event_id}"),
+            ],
+        )
+
+    async def _admin_remove_waiting_confirm(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+        token = str(user.dialog_context["remove_waiting_token"])
+        if value != f"admin:remove-waiting:confirm:{token}":
+            return await self._remove_waiting_confirmation(user, event, invalid="Удаление не подтверждено.")
+        current_count = await self.administration.waiting_registration_count(event_id)
+        expected_count = int(user.dialog_context["remove_waiting_count"])
+        if current_count != expected_count:
+            return await self._remove_waiting_confirmation(
+                user,
+                event,
+                invalid="Список не подтвердивших участие изменился. Проверьте новое количество.",
+            )
+        await self._clear(user)
+        await self.registrations.enqueue(
+            operation=Operation.REMOVE_WAITING_PARTICIPANTS,
+            event_id=event_id,
+            platform=message.identity.platform,
+            user_id=message.identity.platform_user_id,
+            payload=EmptyPayload(),
+            reply_context=ReplyContext(buttons=[player_management_button(event_id)]),
+            idempotency_key=f"{message.update_id}:{Operation.REMOVE_WAITING_PARTICIPANTS.value}",
+        )
+        return BotResponse(
+            text="⏳ Удаление не подтвердивших участие принято в обработку.",
+            buttons=[player_management_button(event_id)],
             deferred=True,
             command_enqueued=True,
         )
@@ -2393,7 +2472,7 @@ class ConversationEngine:
             (SEND_CONFIRMED_NOTIFICATION, "notify"),
             (LIST_WAITING_PLAYERS, "waiting"),
             (EVENT_TABLES, "tables"),
-            (REMOVE_PLAYER, "remove"),
+            (MANAGE_PLAYERS, "players"),
             (MANAGE_MASTERS, "masters"),
             (ARCHIVE_GAME, "archive"),
         ]
@@ -2402,6 +2481,17 @@ class ConversationEngine:
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))
         return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
+
+    @staticmethod
+    def _player_management(event: Event) -> BotResponse:
+        return BotResponse(
+            text=f"Управление игроками игры «{event.name}»\n\nВыберите действие:",
+            buttons=[
+                Button(label=REMOVE_PLAYER, value=f"ag:remove:{event.event_id}"),
+                Button(label=REMOVE_WAITING_PLAYERS, value=f"ag:remove-waiting:{event.event_id}"),
+                game_management_button(event.event_id),
+            ],
+        )
 
     async def _admin_game_action(
         self,
@@ -2484,6 +2574,8 @@ class ConversationEngine:
             return _confirmed_notification_prompt(event.name, event.event_id)
         if action == "waiting":
             return await self._show_waiting_players(user, event)
+        if action == "players":
+            return self._player_management(event)
         if action == "tables":
             await self._clear(user)
             event = await self.administration.ensure_event_tables(event)
@@ -2497,6 +2589,8 @@ class ConversationEngine:
             )
         if action == "remove":
             return await self._show_removable_players(user, event)
+        if action == "remove-waiting":
+            return await self._remove_waiting_confirmation(user, event)
         if action == "masters":
             return await self._event_masters_menu(user, event)
         if action == "leader":
@@ -2578,6 +2672,8 @@ class ConversationEngine:
             LIST_PASS_TABLES,
             EVENT_TABLES,
             REMOVE_PLAYER,
+            MANAGE_PLAYERS,
+            REMOVE_WAITING_PLAYERS,
             ADD_EVENT_LEADER,
             ARCHIVE_GAME,
             LEGACY_DELETE_GAME,

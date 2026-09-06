@@ -108,9 +108,16 @@ class OrderedWorker:
                     elif notifications_enabled and command.operation in {
                         Operation.CANCEL,
                         Operation.REMOVE_PARTICIPANT,
+                        Operation.REMOVE_WAITING_PARTICIPANTS,
                     }:
                         if self.notifications is not None:
-                            await self.notifications.notify_reserve_promotion(command)
+                            if command.operation in {
+                                Operation.REMOVE_PARTICIPANT,
+                                Operation.REMOVE_WAITING_PARTICIPANTS,
+                            }:
+                                await self.notifications.notify_removed_participants(command)
+                            if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+                                await self.notifications.notify_reserve_promotion(command)
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
                 if notifications_enabled and not notification_delivered:
