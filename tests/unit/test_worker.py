@@ -425,6 +425,61 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
     assert consumer.deleted == ["receipt-1"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "operation", "payload"),
+    [
+        (EventStatus.CREATED, Operation.OPEN_REGISTRATION, EmptyPayload()),
+        (
+            EventStatus.CONFIRMATION_OPEN,
+            Operation.OPEN_CONFIRMATION,
+            ConfirmationDeadlinePayload(deadline=datetime(2026, 9, 10, 16, tzinfo=UTC)),
+        ),
+        (EventStatus.CLOSED, Operation.CLOSE_EVENT, EmptyPayload()),
+    ],
+)
+async def test_unchanged_game_status_sends_no_notifications(
+    status: EventStatus,
+    operation: Operation,
+    payload: ConfirmationDeadlinePayload | EmptyPayload,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.status = status
+    event.registrations_migrated_at = datetime.now(UTC)
+    if isinstance(payload, ConfirmationDeadlinePayload):
+        event.confirmation_deadline = payload.deadline
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    tables = MemoryRegistrationRepository()
+    catalog = RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store))
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    await users.save(TelegramUser(tg_id=2))
+    await tables.enlist(
+        event.event_id,
+        operation_id="enlist-player",
+        participant_key=participant_key(secret, Platform.TELEGRAM, 2, event.event_id),
+        display_name="Player",
+        wish_play="A",
+    )
+    consumer = FakeConsumer([queued(event, operation, payload, 1)])
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog),
+        users,
+        transport,
+        ConfirmationNotificationService(events, catalog, users, transport, secret),
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 1
+    assert transport.sent == []
+    assert consumer.deleted == ["receipt-1"]
+
+
 @pytest.mark.parametrize(
     "value",
     [

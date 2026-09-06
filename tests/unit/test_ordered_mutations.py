@@ -351,7 +351,7 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
 
     stored_event = await events.get(event.event_id)
     stored_registration = await tables.get(event.event_id, "a" * 43)
-    assert result == "Игра архивирована; таблицы и записи сохранены"
+    assert result.text == "Игра архивирована; таблицы и записи сохранены"
     assert stored_event is not None and stored_event.status is EventStatus.CLOSED
     assert stored_event.archived_at is not None
     assert stored_registration is not None and stored_registration.character_wish == "Doctor"
@@ -449,8 +449,8 @@ async def test_leader_removal_deletes_registration_and_refreshes_every_table(
     )
     removal = command(event, Operation.REMOVE_PARTICIPANT, EmptyPayload(), key=key)
 
-    assert await mutations.apply(removal) == "Игрок удалён"
-    assert await mutations.apply(removal) == "Игрок уже удалён"
+    assert (await mutations.apply(removal)).text == "Игрок удалён"
+    assert (await mutations.apply(removal)).text == "Игрок уже удалён"
     assert await tables.get(event.event_id, key) is None
 
     refreshed_event = await events.get(event.event_id)
@@ -509,7 +509,7 @@ async def test_archive_operation_is_distinct_from_closing_registration(
 
     result = await mutations.apply(command(event, Operation.ARCHIVE_EVENT, EmptyPayload()))
     archived = await events.get(event.event_id)
-    assert result == "Игра архивирована; таблицы и записи сохранены"
+    assert result.text == "Игра архивирована; таблицы и записи сохранены"
     assert archived is not None and archived.archived_at is not None
     with pytest.raises(OperationNotAllowed, match="архивирована"):
         await mutations.apply(command(event, Operation.OPEN_REGISTRATION, EmptyPayload()))
