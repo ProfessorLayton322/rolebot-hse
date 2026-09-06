@@ -503,6 +503,7 @@ class InboundMessage(StrictModel):
     update_id: str
     text: str = ""
     callback: str | None = None
+    has_unsupported_content: bool = False
     chat_id: int | None = None
     peer_id: int | None = None
     telegram_username: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_]{5,32}$")

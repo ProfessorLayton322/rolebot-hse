@@ -10,6 +10,7 @@ import pytest
 
 from larp_bot.adapters.memory import MemoryDeferredTransport
 from larp_bot.adapters.telegram import parse_telegram_update
+from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.domain.models import BotResponse, Button
 from larp_bot.domain.security import sign_request
 from larp_bot.functions.gateway.handler import (
@@ -66,6 +67,76 @@ def test_telegram_username_is_collected_when_available() -> None:
     )
 
     assert inbound.telegram_username == "ivan_player"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"sticker": {"file_id": "sticker-id"}},
+        {"photo": [{"file_id": "photo-id"}]},
+        {"location": {"latitude": 55.75, "longitude": 37.62}},
+        {"audio": {"file_id": "audio-id"}},
+        {"document": {"file_id": "document-id"}},
+    ],
+)
+def test_telegram_media_is_marked_as_unsupported(content: dict[str, Any]) -> None:
+    inbound = parse_telegram_update(
+        {
+            "update_id": 10,
+            "message": {
+                "from": {"id": 1, "username": "ivan_player"},
+                "chat": {"id": 1},
+                **content,
+            },
+        }
+    )
+
+    assert inbound.has_unsupported_content
+    assert inbound.text == ""
+
+
+def test_telegram_photo_caption_is_not_treated_as_plain_text() -> None:
+    inbound = parse_telegram_update(
+        {
+            "update_id": 10,
+            "message": {
+                "from": {"id": 1},
+                "chat": {"id": 1},
+                "photo": [{"file_id": "photo-id"}],
+                "caption": "Это не ответ на вопрос бота",
+            },
+        }
+    )
+
+    assert inbound.has_unsupported_content
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"attachments": [{"type": "photo", "photo": {"id": 1}}]},
+        {"attachments": [{"type": "sticker", "sticker": {"sticker_id": 1}}]},
+        {"attachments": [{"type": "audio", "audio": {"id": 1}}]},
+        {"attachments": [{"type": "doc", "doc": {"id": 1}}]},
+        {"geo": {"coordinates": {"latitude": 55.75, "longitude": 37.62}}},
+    ],
+)
+def test_vk_media_is_marked_as_unsupported(content: dict[str, Any]) -> None:
+    inbound = parse_vk_event(
+        {
+            "event_id": "event-1",
+            "object": {
+                "message": {
+                    "from_id": 1,
+                    "peer_id": 1,
+                    "text": "Подпись к вложению",
+                    **content,
+                }
+            },
+        }
+    )
+
+    assert inbound.has_unsupported_content
 
 
 def signed_event(body: bytes, *, deadline_ms: int, timestamp: int | None = None) -> dict[str, Any]:

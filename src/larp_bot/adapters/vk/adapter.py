@@ -30,11 +30,19 @@ def parse_vk_event(event: dict[str, Any]) -> InboundMessage:
                 callback = decoded["value"]
         except json.JSONDecodeError:
             callback = None
+    has_unsupported_content = (
+        bool(message.get("attachments"))
+        or message.get("geo") is not None
+        or bool(message.get("fwd_messages"))
+        or message.get("action") is not None
+        or (callback is None and not message_text.strip())
+    )
     return InboundMessage(
         identity=BotIdentity(platform=Platform.VK, platform_user_id=from_id),
         update_id=event_id,
         text=message_text,
         callback=callback,
+        has_unsupported_content=has_unsupported_content,
         peer_id=peer_id,
     )
 

@@ -42,6 +42,7 @@ from larp_bot.application.conversation import (
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
     STATUS_REGISTRATION,
+    UNSUPPORTED_CONTENT_RESPONSE,
     ConversationEngine,
 )
 from larp_bot.application.services import (
@@ -160,6 +161,34 @@ async def engine_setup(
         vk_user_ids=MemoryVkUserIdResolver(vk_profile_ids),
     )
     return conversation, users, publisher, tables
+
+
+@pytest.mark.asyncio
+async def test_unsupported_content_is_rejected_without_advancing_dialog(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    await engine.handle(inbound(1, PROFILE))
+    await engine.handle(inbound(2, "profile:edit", callback=True))
+    before = await users.get(Platform.TELEGRAM, 1)
+    assert before is not None
+    assert before.dialog_state == "PROFILE_SURNAME_CYRILLIC"
+
+    response = await engine.handle(
+        InboundMessage(
+            identity=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+            update_id="3",
+            has_unsupported_content=True,
+            chat_id=1,
+        )
+    )
+    after = await users.get(Platform.TELEGRAM, 1)
+
+    assert response.text == UNSUPPORTED_CONTENT_RESPONSE
+    assert after is not None
+    assert after.dialog_state == before.dialog_state
+    assert after.dialog_context == before.dialog_context
+    assert after.last_bot_buttons == before.last_bot_buttons
 
 
 @pytest.mark.asyncio

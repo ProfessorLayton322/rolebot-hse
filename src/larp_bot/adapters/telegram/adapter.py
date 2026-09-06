@@ -38,12 +38,15 @@ def parse_telegram_update(update: dict[str, Any]) -> InboundMessage:
     user_id = sender.get("id")
     chat_id = chat.get("id")
     message_text = message.get("text")
-    if type(user_id) is not int or type(chat_id) is not int or not isinstance(message_text, str):
+    if type(user_id) is not int or type(chat_id) is not int:
         raise InvalidTelegramUpdate("invalid message")
+    if message_text is not None and not isinstance(message_text, str):
+        raise InvalidTelegramUpdate("invalid message text")
     return InboundMessage(
         identity=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id),
         update_id=str(update_id),
-        text=message_text,
+        text=message_text or "",
+        has_unsupported_content=message_text is None,
         chat_id=chat_id,
         telegram_username=sender.get("username"),
     )
