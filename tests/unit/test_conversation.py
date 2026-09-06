@@ -886,6 +886,76 @@ async def test_admin_grants_telegram_gamemaster_by_profile_and_notifies_them(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["@legacy_player", "[id42|@legacy_player]"])
+async def test_admin_grants_legacy_telegram_user_via_registration_history_and_backfills_handle(
+    profile: str, disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, registrations = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/old_alias",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+    await registrations.enlist(
+        event.event_id,
+        operation_id="legacy-enlist",
+        participant_key=engine.registrations.key(Platform.TELEGRAM, 2, event.event_id),
+        display_name="Петрова Анна",
+        telegram_profile="https://t.me/legacy_player",
+        wish_play="Anyone",
+    )
+
+    await engine.handle(inbound(1, GRANT_GAMEMASTER))
+    await engine.handle(inbound(2, "admin:gamemaster:telegram", callback=True))
+    granted = await engine.handle(inbound(3, profile))
+
+    target = await users.get(Platform.TELEGRAM, 2)
+    assert target is not None and target.is_gamemaster
+    assert target.telegram_handle == "@legacy_player"
+    assert granted.text == "✅ Пользователь назначен гейммастером в Telegram."
+
+
+@pytest.mark.asyncio
+async def test_admin_does_not_grant_when_registration_history_matches_multiple_telegram_users(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, registrations = await engine_setup(disk_store, event, admin=True)
+    for target_id in (2, 3):
+        await users.save(
+            TelegramUser(
+                tg_id=target_id,
+                full_name=f"Игрок {target_id}",
+                vk_url=f"https://vk.com/id{target_id}",
+                crossplay=True,
+                larp_experience=False,
+                needs_pass=False,
+            )
+        )
+        await registrations.enlist(
+            event.event_id,
+            operation_id=f"legacy-enlist-{target_id}",
+            participant_key=engine.registrations.key(Platform.TELEGRAM, target_id, event.event_id),
+            display_name=f"Игрок {target_id}",
+            telegram_profile="https://t.me/reused_handle",
+            wish_play="Anyone",
+        )
+
+    await engine.handle(inbound(1, GRANT_GAMEMASTER))
+    await engine.handle(inbound(2, "admin:gamemaster:telegram", callback=True))
+    rejected = await engine.handle(inbound(3, "@reused_handle"))
+
+    assert rejected.text.startswith("Пользователь Telegram не найден.")
+    for target_id in (2, 3):
+        target = await users.get(Platform.TELEGRAM, target_id)
+        assert target is not None and not target.is_gamemaster and target.telegram_handle is None
+
+
+@pytest.mark.asyncio
 async def test_admin_grants_vk_gamemaster_from_vanity_link(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, users, _, _ = await engine_setup(
         disk_store,

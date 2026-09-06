@@ -38,6 +38,12 @@ class MemoryUserRepository:
         assert isinstance(match, TelegramUser)
         return deepcopy(match)
 
+    async def update_telegram_handle(self, user_id: int, handle: str) -> None:
+        user = self.rows.get((Platform.TELEGRAM, user_id))
+        if isinstance(user, TelegramUser):
+            user.telegram_handle = handle
+            user.updated_at = datetime.now(UTC)
+
     async def save(self, user: User) -> None:
         platform = Platform.TELEGRAM if hasattr(user, "tg_id") else Platform.VK
         user_id = user.tg_id if hasattr(user, "tg_id") else user.vk_id
@@ -234,6 +240,10 @@ class MemoryRegistrationRepository:
     async def get(self, event_id: str, participant_key: str) -> Registration | None:
         value = self.rows.get((event_id, participant_key))
         return None if value is None else deepcopy(value)
+
+    async def find_by_telegram_profile(self, profile: str) -> Sequence[Registration]:
+        values = [registration for registration in self.rows.values() if registration.telegram_profile == profile]
+        return deepcopy(sorted(values, key=lambda item: (item.event_id, item.participant_key)))
 
     async def list_for_event(self, event_id: str) -> Sequence[Registration]:
         values = [value for (stored_event_id, _), value in self.rows.items() if stored_event_id == event_id]

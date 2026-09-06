@@ -1245,8 +1245,7 @@ class ConversationEngine:
         target: User | None
         try:
             if target_platform is Platform.TELEGRAM:
-                handle = normalize_telegram_profile(value)
-                target = await self.users.find_telegram_by_handle(handle)
+                target = await self._find_telegram_target(value)
             else:
                 normalized = normalize_vk_url(value)
                 if self.vk_user_ids is None:
@@ -1306,6 +1305,17 @@ class ConversationEngine:
         platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
         return BotResponse(text=f"✅ Пользователь назначен гейммастером в {platform_name}.")
 
+    async def _find_telegram_target(self, value: str) -> TelegramUser | None:
+        handle = normalize_telegram_profile(value)
+        target = await self.users.find_telegram_by_handle(handle)
+        if target is not None:
+            return target
+        target = await self.administration.find_telegram_user_by_profile(handle)
+        if target is not None:
+            await self.users.update_telegram_handle(target.tg_id, handle)
+            target.telegram_handle = handle
+        return target
+
     @staticmethod
     def _event_leader_platform_prompt(event_id: str) -> BotResponse:
         return BotResponse(
@@ -1322,8 +1332,7 @@ class ConversationEngine:
         target: User | None
         try:
             if target_platform is Platform.TELEGRAM:
-                handle = normalize_telegram_profile(value)
-                target = await self.users.find_telegram_by_handle(handle)
+                target = await self._find_telegram_target(value)
             else:
                 normalized = normalize_vk_url(value)
                 if self.vk_user_ids is None:

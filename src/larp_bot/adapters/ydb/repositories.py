@@ -272,6 +272,19 @@ class YdbUserRepository:
         assert isinstance(user, TelegramUser)
         return user
 
+    async def update_telegram_handle(self, user_id: int, handle: str) -> None:
+        await self.db.query(
+            """
+            DECLARE $user_id AS Uint64;
+            DECLARE $handle AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `tg_users`
+            SET telegram_handle = $handle, updated_at = $updated_at
+            WHERE tg_id = $user_id;
+            """,
+            {"$user_id": user_id, "$handle": handle, "$updated_at": datetime.now(UTC)},
+        )
+
     async def list_all(self) -> Sequence[User]:
         telegram_rows, vk_rows = await asyncio.gather(
             self.db.query(
@@ -905,6 +918,19 @@ class YdbRegistrationRepository:
             read_only=True,
         )
         return None if not rows else self._from_row(rows[0])
+
+    async def find_by_telegram_profile(self, profile: str) -> Sequence[Registration]:
+        rows = await self.db.query(
+            f"""
+            DECLARE $profile AS Utf8;
+            SELECT {self.COLUMNS} FROM `registrations`
+            WHERE telegram_profile = $profile
+            ORDER BY event_id, participant_key;
+            """,
+            {"$profile": profile},
+            read_only=True,
+        )
+        return [self._from_row(row) for row in rows]
 
     async def list_for_event(self, event_id: str) -> Sequence[Registration]:
         rows = await self.db.query(
