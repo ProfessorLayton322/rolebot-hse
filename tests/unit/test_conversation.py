@@ -285,6 +285,7 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
 
     stale = await engine.handle(inbound(3, f"select:enlist:{event.event_id}", callback=True))
     assert "текущую клавиатуру" in stale.text
+    assert "Если вы увидели это сообщение, попробуйте написать боту /start" in stale.text
     assert not publisher.commands
 
     response = await engine.handle(inbound(4, "enlist:wish-play:skip", callback=True))
@@ -326,6 +327,31 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     assert not publisher.commands
     await engine.handle(inbound(4, "Doctor"))
     assert publisher.commands[-1].operation is Operation.CONFIRM
+
+
+@pytest.mark.asyncio
+async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+    stale_button = Button(label="Устаревшая кнопка", value="stale:button")
+
+    for update, state in enumerate(sorted(FREE_TEXT_DIALOG_STATES), start=1):
+        user = await users.get(Platform.TELEGRAM, 1)
+        assert user is not None
+        user.dialog_state = state
+        user.dialog_context = {"sentinel": state}
+        user.last_bot_buttons = [stale_button]
+        await users.save(user)
+
+        message = inbound(update, "/start").model_copy(update={"has_unsupported_content": True})
+        response = await engine.handle(message)
+        saved = await users.get(Platform.TELEGRAM, 1)
+
+        assert response.text == "Привет! Этот бот поможет зарегистрироваться на LARP-игры."
+        assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
+        assert saved is not None and saved.dialog_state == "IDLE"
+        assert saved.dialog_context == {}
+
+    assert not publisher.commands
 
 
 @pytest.mark.asyncio
