@@ -284,13 +284,6 @@ class ConversationEngine:
             return BotResponse(text="", silent=True, deferred=platform is Platform.TELEGRAM)
         if isinstance(user, TelegramUser):
             user.telegram_handle = normalize_telegram_handle(message.telegram_username)
-        if message.has_unsupported_content:
-            await self._save(user, message)
-            return BotResponse(
-                text=UNSUPPORTED_CONTENT_RESPONSE,
-                buttons=user.last_bot_buttons.copy(),
-            )
-
         value = (message.callback or message.text).strip()
         admin_branch = (
             user.dialog_state.startswith("ADMIN_")
@@ -300,7 +293,16 @@ class ConversationEngine:
             or value.startswith(("ag:", "select:admin-", "page:admin-", "page:a:"))
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
-        if (
+        if value == "/start":
+            await self._clear(user)
+            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на LARP-игры.")
+        elif message.has_unsupported_content:
+            await self._save(user, message)
+            return BotResponse(
+                text=UNSUPPORTED_CONTENT_RESPONSE,
+                buttons=user.last_bot_buttons.copy(),
+            )
+        elif (
             user.dialog_state in FREE_TEXT_DIALOG_STATES
             and message.callback is not None
             and value not in current_button_values
@@ -309,11 +311,12 @@ class ConversationEngine:
             response = BotResponse(
                 text=(
                     "Эта кнопка устарела. Используйте текущую клавиатуру из последнего сообщения бота "
-                    "или отправьте ответ текстом."
+                    "или отправьте ответ текстом. Если вы увидели это сообщение, "
+                    "попробуйте написать боту /start"
                 ),
                 buttons=user.last_bot_buttons,
             )
-        elif value in {"/start", "/menu", MAIN_MENU, BACK}:
+        elif value in {"/menu", MAIN_MENU, BACK}:
             await self._clear(user)
             response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на LARP-игры.")
         elif value == CANCEL_DIALOG:
