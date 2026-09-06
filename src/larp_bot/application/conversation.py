@@ -272,6 +272,18 @@ def _confirmed_notification_prompt(event_name: str, event_id: str, *, invalid: s
     )
 
 
+def _normalize_vk_telegram_contact(value: str) -> str | None:
+    """Parse an optional Telegram profile supplied through the VK questionnaire."""
+
+    try:
+        return normalize_telegram_profile(value)
+    except ValueError:
+        try:
+            return normalize_telegram_handle(value)
+        except ValueError:
+            return None
+
+
 class ConversationEngine:
     """One platform-neutral state machine rendered by Telegram and VK adapters."""
 
@@ -495,16 +507,17 @@ class ConversationEngine:
             if isinstance(user, TelegramUser):
                 return BotResponse(text="Введите обязательную ссылку на вашу страницу VK:")
             return BotResponse(
-                text="Ваш Telegram username, если он есть:",
+                text="Ваш Telegram username или ссылка на профиль, если есть:",
                 buttons=[Button(label="Пропустить", value="Пропустить")],
             )
         if state == "PROFILE_CONTACT":
-            try:
-                context["contact"] = (
-                    normalize_vk_url(value) if isinstance(user, TelegramUser) else normalize_telegram_handle(value)
-                )
-            except ValueError as exc:
-                return BotResponse(text=f"❌ {exc}. Попробуйте ещё раз:")
+            if isinstance(user, TelegramUser):
+                try:
+                    context["contact"] = normalize_vk_url(value)
+                except ValueError as exc:
+                    return BotResponse(text=f"❌ {exc}. Попробуйте ещё раз:")
+            else:
+                context["contact"] = _normalize_vk_telegram_contact(value)
             user.dialog_state = "PROFILE_CROSSPLAY"
             return BotResponse(text="Готовы ли вы кроссполу?", buttons=yes_no_buttons())
         boolean_states = {
