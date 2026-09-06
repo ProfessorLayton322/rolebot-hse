@@ -3,25 +3,43 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 from zipfile import ZipFile
 
-import httpx
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import PatternFill
 
+from larp_bot.adapters.google_drive.statistics import (
+    ATTENDANCE_FILE_NAME,
+    XLSX_MIME_TYPE,
+    DriveFile,
+    GoogleDriveRestClient,
+    GoogleDriveStatisticsRepository,
+)
+from larp_bot.adapters.google_drive.statistics_workbook import StatisticsWorkbook
 from larp_bot.adapters.memory import MemoryDeferredTransport
-from larp_bot.adapters.yandex_disk.repository import YandexDiskRestClient
-from larp_bot.adapters.yandex_disk.statistics import BACKUP_RE, YandexDiskStatisticsRepository, table_filename
-from larp_bot.adapters.yandex_disk.statistics_workbook import StatisticsWorkbook
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.application.conversation import ADMIN, STATS_GAME, STATS_LINK, STATS_SEASON, STATS_SOURCE
+from larp_bot.application.conversation import (
+    ADMIN,
+    MANAGE_STATISTICS,
+    STATS_ADD_GAME,
+    STATS_LINKS,
+)
 from larp_bot.application.services import DomainError, OrderedMutationService
-from larp_bot.application.statistics import StatisticsService
+from larp_bot.application.statistics import StatisticsService, current_season_year
 from larp_bot.application.worker import OrderedWorker
-from larp_bot.domain.models import AttendanceStatus, Operation, OrderedRegistrationCommand, Registration
+from larp_bot.domain.models import (
+    AttendanceStatus,
+    Event,
+    Operation,
+    OrderedRegistrationCommand,
+    Platform,
+    Registration,
+    StatisticsPayload,
+)
 from tests.conftest import MemoryDiskStore
 from tests.unit.test_conversation import engine_setup, inbound
 from tests.unit.test_worker import FakeConsumer
@@ -95,91 +113,204 @@ def test_game_matches_names_appends_before_summary_and_expands_formulas_and_colo
     assert current["D4"].value is False
     assert current["A5"].value == "Всего"
     assert current["N5"].value == 2
-    assert current["B6"].value == 2  # season participants
-    assert current["B7"].value == 1  # newcomers
+    assert current["B6"].value == 2
+    assert current["B7"].value == 1
     assert any(str(cf.sqref) == "N2:N4" for cf in current.conditional_formatting)
     assert any(str(cf.sqref) == "A2:A4" for cf in current.conditional_formatting)
     assert StatisticsWorkbook(result).mark_game("=Безопасное название", ["Другой Игрок"]) is None
     for index in range(32):
         result = StatisticsWorkbook(result).mark_game(f"Игра {index}", ["Новый Игрок"])
         assert result is not None
-    assert sheet(result)["B4"].value == 33  # beyond the original hardcoded AP range
+    assert sheet(result)["B4"].value == 33
 
 
-@pytest.mark.parametrize("name", ["../initial", "disk:/x", "x/y", "showcase", "current", "pending", "bad\nfile"])
-def test_source_name_cannot_escape_stats_or_select_internal_files(name: str) -> None:
-    with pytest.raises(DomainError):
-        table_filename(name)
+def test_add_game_automatically_rolls_over_and_is_idempotent_within_current_season() -> None:
+    result = StatisticsWorkbook(template()).add_game(2026, "Осенняя игра", ["Новый Игрок"])
+    assert result is not None
+    current = sheet(result)
+    assert current.title == "2026-2027"
+    assert current["N1"].value == "Осенняя игра"
+    assert current["N4"].value == 1
+    assert StatisticsWorkbook(result).add_game(2026, "Осенняя игра", ["Другой Игрок"]) is None
 
 
-async def test_backups_retention_source_selection_and_constant_url(disk_store: MemoryDiskStore) -> None:
-    repo = YandexDiskStatisticsRepository(disk_store, retention=2)
-    initial = template()
-    disk_store.files[repo.path("initial.xlsx")] = initial
-    url = await repo.link()
-    await repo.select("initial", str(uuid4()))
-    for index in range(4):
-        before = disk_store.files[repo.path("current.xlsx")]
-        op = str(uuid4())
-        stamp = f"2026090500000000000{index}"
-        assert await repo.edit(op, stamp, lambda book, i=index: book.mark_game(f"Игра {i}", ["Новый Игрок"]))
-        assert disk_store.files[repo.path(f"backup-{stamp}-{op}.xlsx")] == before
-        assert not await repo.edit(op, stamp, lambda book, i=index: book.mark_game(f"Игра {i}", ["Новый Игрок"]))
-        assert await repo.link() == url
-    backups = sorted(p for p in disk_store.files if BACKUP_RE.fullmatch(p.rsplit("/", 1)[1]))
-    assert len(backups) == 2
-    assert disk_store.files[repo.path("initial.xlsx")] == initial
-    restore = disk_store.files[backups[0]]
-    await repo.select(backups[0].rsplit("/", 1)[1], str(uuid4()))
-    assert disk_store.files[repo.path("current.xlsx")] == restore
-    assert disk_store.files[repo.path("showcase.xlsx")] == restore
-    assert await repo.link() == url
+@pytest.mark.parametrize(
+    ("instant", "expected"),
+    [
+        (datetime(2026, 8, 31, 20, 59, tzinfo=UTC), 2025),
+        (datetime(2026, 8, 31, 21, 0, tzinfo=UTC), 2026),
+        (datetime(2027, 8, 31, 20, 59, tzinfo=UTC), 2026),
+    ],
+)
+def test_current_season_uses_moscow_september_boundary(instant: datetime, expected: int) -> None:
+    assert current_season_year(instant) == expected
 
 
-class FailingStore(MemoryDiskStore):
-    fail_name: str | None = None
+class MemoryGoogleDrive:
+    def __init__(self, content: bytes) -> None:
+        self.file = DriveFile(
+            id="permanent-file-id",
+            name=ATTENDANCE_FILE_NAME,
+            mimeType=XLSX_MIME_TYPE,
+            webViewLink="https://drive.google.com/file/d/permanent-file-id/view",
+        )
+        self.content = content
+        self.lookups: list[tuple[str, str]] = []
+        self.replacements: list[tuple[str, bytes]] = []
 
-    async def replace(self, path: str, content: bytes) -> None:
-        if path.endswith("/" + str(self.fail_name)):
-            self.fail_name = None
-            raise RuntimeError("Disk temporarily unavailable")
-        await super().replace(path, content)
+    async def find_file(self, folder_id: str, name: str) -> DriveFile:
+        self.lookups.append((folder_id, name))
+        return self.file
 
+    async def download(self, file_id: str) -> bytes:
+        assert file_id == self.file.file_id
+        return self.content
 
-@pytest.mark.parametrize("failure", ["current.xlsx", "showcase.xlsx", "state.json"])
-async def test_interrupted_commit_recovers_without_double_counting(failure: str) -> None:
-    store = FailingStore()
-    repo = YandexDiskStatisticsRepository(store)
-    store.files[repo.path("initial.xlsx")] = template()
-    await repo.select("initial", str(uuid4()))
-    url = await repo.link()
-    store.fail_name = failure
-    op, stamp = str(uuid4()), "20260905000000000000"
-    with pytest.raises(RuntimeError):
-        await repo.edit(op, stamp, lambda book: book.mark_game("Новая игра", ["Новый Игрок"]))
-    # Simulate a fresh worker instance after a timeout/crash.
-    repo = YandexDiskStatisticsRepository(store)
-    await repo.edit(op, stamp, lambda book: book.mark_game("Новая игра", ["Новый Игрок"]))
-    assert sheet(store.files[repo.path("current.xlsx")])["B4"].value == 1
-    assert store.files[repo.path("current.xlsx")] == store.files[repo.path("showcase.xlsx")]
-    assert len([p for p in store.files if "/backup-" in p]) == 1
-    assert await repo.link() == url
+    async def replace(self, file_id: str, content: bytes) -> None:
+        assert file_id == self.file.file_id
+        self.content = content
+        self.replacements.append((file_id, content))
 
 
-async def test_admin_actions_use_global_fifo_and_confirmed_cyrillic_registration_names(disk_store, event) -> None:
-    engine, _users, publisher, registrations = await engine_setup(disk_store, event, admin=True)
+class FakeResponse:
+    def __init__(self, *, payload: object = None, content: bytes = b"") -> None:
+        self.payload = payload
+        self.content = content
+
+    def json(self) -> object:
+        return self.payload
+
+    def raise_for_status(self) -> None:
+        pass
+
+
+class FakeDriveSession:
+    def __init__(self, files: list[dict[str, str]]) -> None:
+        self.files = files
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+        self.calls.append((method, url, kwargs))
+        if url.endswith("/files"):
+            return FakeResponse(payload={"files": self.files})
+        if method == "GET":
+            return FakeResponse(content=b"workbook")
+        return FakeResponse(payload={})
+
+
+async def test_drive_client_finds_downloads_and_updates_the_same_permanent_file() -> None:
+    session = FakeDriveSession(
+        [
+            {
+                "id": "stable/id",
+                "name": ATTENDANCE_FILE_NAME,
+                "mimeType": XLSX_MIME_TYPE,
+                "webViewLink": "https://drive.example/stable",
+            }
+        ]
+    )
+    client = GoogleDriveRestClient("unused for injected session", session)
+    file = await client.find_file("folder'id", ATTENDANCE_FILE_NAME)
+    assert file.file_id == "stable/id"
+    assert "'folder\\'id' in parents" in session.calls[0][2]["params"]["q"]
+    assert await client.download(file.file_id) == b"workbook"
+    await client.replace(file.file_id, b"revised")
+    assert session.calls[1][0:2] == ("GET", "https://www.googleapis.com/drive/v3/files/stable%2Fid")
+    assert session.calls[2][0:2] == ("PATCH", "https://www.googleapis.com/upload/drive/v3/files/stable%2Fid")
+    assert session.calls[2][2]["params"]["uploadType"] == "media"
+    assert session.calls[2][2]["data"] == b"revised"
+    assert not any(call[0] in {"POST", "DELETE"} for call in session.calls)
+
+
+async def test_drive_client_requires_exactly_one_xlsx_with_the_fixed_name() -> None:
+    missing = GoogleDriveRestClient("unused", FakeDriveSession([]))
+    with pytest.raises(DomainError, match="не найден"):
+        await missing.find_file("folder", ATTENDANCE_FILE_NAME)
+    duplicate = {
+        "id": "one",
+        "name": ATTENDANCE_FILE_NAME,
+        "mimeType": XLSX_MIME_TYPE,
+        "webViewLink": "https://drive.example/one",
+    }
+    repeated = GoogleDriveRestClient("unused", FakeDriveSession([duplicate, duplicate | {"id": "two"}]))
+    with pytest.raises(DomainError, match="несколько"):
+        await repeated.find_file("folder", ATTENDANCE_FILE_NAME)
+    wrong_type = GoogleDriveRestClient(
+        "unused", FakeDriveSession([duplicate | {"mimeType": "application/vnd.google-apps.spreadsheet"}])
+    )
+    with pytest.raises(DomainError, match="XLSX"):
+        await wrong_type.find_file("folder", ATTENDANCE_FILE_NAME)
+
+
+def test_invalid_service_account_json_is_rejected_without_exposing_its_contents() -> None:
+    with pytest.raises(RuntimeError, match="GOOGLE_SERVICE_ACCOUNT_JSON"):
+        GoogleDriveRestClient("not-json")
+
+
+async def test_repository_keeps_the_file_id_name_and_link_while_updating_content() -> None:
+    drive = MemoryGoogleDrive(template())
+    repository = GoogleDriveStatisticsRepository(drive, "stats-folder")
+    original_link = await repository.link()
+    assert await repository.edit(lambda book: book.add_game(2026, "Новая игра", ["Новый Игрок"]))
+    assert await repository.link() == original_link
+    assert drive.file.name == ATTENDANCE_FILE_NAME
+    assert [file_id for file_id, _ in drive.replacements] == ["permanent-file-id"]
+    assert drive.lookups == [
+        ("stats-folder", ATTENDANCE_FILE_NAME),
+        ("stats-folder", ATTENDANCE_FILE_NAME),
+        ("stats-folder", ATTENDANCE_FILE_NAME),
+    ]
+    assert not await repository.edit(lambda book: book.add_game(2026, "Новая игра", ["Другой Игрок"]))
+    assert len(drive.replacements) == 1
+
+
+async def test_statistics_admin_menu_picker_and_global_fifo_only_show_active_games(event: Event) -> None:
+    archived = event.model_copy(
+        update={
+            "event_id": "archived-event",
+            "name": "Архивная игра",
+            "archived_at": datetime(2026, 8, 1, tzinfo=UTC),
+        }
+    )
+    engine, _users, publisher, _registrations = await engine_setup(MemoryDiskStore(), event, archived, admin=True)
     menu = await engine.handle(inbound(1, ADMIN))
-    assert {STATS_SOURCE, STATS_SEASON, STATS_LINK} <= {b.value for b in menu.buttons}
-    game = await engine.handle(inbound(2, f"ag:manage:{event.event_id}"))
-    assert STATS_GAME in {b.label for b in game.buttons}
-    await engine.handle(inbound(3, STATS_SOURCE))
-    await engine.handle(inbound(4, "initial"))
-    await engine.handle(inbound(5, STATS_SEASON))
-    await engine.handle(inbound(6, STATS_LINK))
-    await engine.handle(inbound(7, f"ag:stats:{event.event_id}"))
-    commands = publisher.commands
-    assert len(commands) == 4
-    assert all(c.event_id == "statistics" and c.operation is Operation.STATISTICS for c in commands)
+    assert MANAGE_STATISTICS in {button.value for button in menu.buttons}
+    assert not {
+        "📊 Выбрать таблицу статистики",
+        "🗓 Начать новый сезон",
+        "🔗 Ссылка на статистику",
+    } & {button.value for button in menu.buttons}
+
+    statistics_menu = await engine.handle(inbound(2, MANAGE_STATISTICS))
+    assert [button.value for button in statistics_menu.buttons[:2]] == [STATS_LINKS, STATS_ADD_GAME]
+    picker = await engine.handle(inbound(3, STATS_ADD_GAME))
+    assert f"stats:game:{event.event_id}" in {button.value for button in picker.buttons}
+    assert "stats:game:archived-event" not in {button.value for button in picker.buttons}
+    await engine.handle(inbound(4, f"stats:game:{event.event_id}"))
+    await engine.handle(inbound(5, STATS_LINKS))
+    assert [command.payload.action for command in publisher.commands] == ["game", "link"]
+    assert all(
+        command.event_id == "statistics" and command.operation is Operation.STATISTICS for command in publisher.commands
+    )
+
+    game_menu = await engine.handle(inbound(6, f"ag:manage:{event.event_id}"))
+    assert STATS_ADD_GAME not in {button.label for button in game_menu.buttons}
+
+
+async def test_statistics_actions_are_denied_to_moderators_even_with_forged_callbacks(event: Event) -> None:
+    engine, _users, publisher, _registrations = await engine_setup(MemoryDiskStore(), event, gamemaster=True)
+    menu = await engine.handle(inbound(1, ADMIN))
+    assert MANAGE_STATISTICS not in {button.value for button in menu.buttons}
+    for index, action in enumerate(
+        (MANAGE_STATISTICS, STATS_LINKS, STATS_ADD_GAME, f"stats:game:{event.event_id}"), start=2
+    ):
+        response = await engine.handle(inbound(index, action))
+        assert "прав" in response.text
+    assert not publisher.commands
+
+
+async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(event: Event) -> None:
+    engine, _users, _publisher, registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
     for status, name in (
         (AttendanceStatus.CONFIRMED, "Новый Игрок"),
         (AttendanceStatus.WAITING, "Ждущий Игрок"),
@@ -196,30 +327,59 @@ async def test_admin_actions_use_global_fifo_and_confirmed_cyrillic_registration
                 )
             ]
         )
-    repo = YandexDiskStatisticsRepository(disk_store)
-    disk_store.files[repo.path("initial.xlsx")] = template()
-    service = StatisticsService(repo, engine.admins, engine.administration)
-    command = OrderedRegistrationCommand.model_validate_json(commands[-1].model_dump_json())
-    await service.apply(command)
-    current = sheet(disk_store.files[repo.path("current.xlsx")])
+    drive = MemoryGoogleDrive(template())
+    service = StatisticsService(
+        GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        engine.admins,
+        engine.administration,
+        season_year=lambda: 2026,
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id="statistics",
+        operation=Operation.STATISTICS,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=StatisticsPayload(action="game", game_id=event.event_id),
+    )
+    assert "2026-2027" in await service.apply(command)
+    current = sheet(drive.content)
     assert current["A4"].value == "Новый Игрок"
     assert current["A5"].value == "Всего"
-    assert current["O4"].value == 1
-    assert not await repo.edit(
-        str(uuid4()),
-        datetime.now(UTC).strftime("%Y%m%d%H%M%S%f"),
-        lambda book: book.mark_game(event.name, ["Другой Игрок"]),
+    assert current["N4"].value == 1
+    retry = command.model_copy(update={"operation_id": str(uuid4())})
+    assert "уже есть" in await service.apply(retry)
+    assert len(drive.replacements) == 1
+    await engine.events.archive(event.event_id, datetime(2026, 9, 2, tzinfo=UTC))
+    with pytest.raises(DomainError, match="архивирована"):
+        await service.apply(retry.model_copy(update={"operation_id": str(uuid4())}))
+
+
+async def test_statistics_worker_delivers_permanent_link_and_rechecks_admin(event: Event) -> None:
+    engine, users, publisher, _registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    await engine.handle(inbound(1, STATS_LINKS))
+    drive = MemoryGoogleDrive(template())
+    service = StatisticsService(
+        GoogleDriveStatisticsRepository(drive, "stats-folder"), engine.admins, engine.administration
     )
-
-
-async def test_stats_actions_denied_to_gamemasters_even_with_forged_callbacks(disk_store, event) -> None:
-    engine, _users, publisher, _registrations = await engine_setup(disk_store, event, gamemaster=True)
-    menu = await engine.handle(inbound(1, ADMIN))
-    assert STATS_LINK not in {b.value for b in menu.buttons}
-    for index, action in enumerate((STATS_SOURCE, STATS_SEASON, STATS_LINK, f"ag:stats:{event.event_id}"), start=2):
-        response = await engine.handle(inbound(index, action))
-        assert "прав" in response.text or "мастер" in response.text
-    assert not publisher.commands
+    command = publisher.commands[0]
+    transport = MemoryDeferredTransport()
+    consumer = FakeConsumer([QueueEnvelope(command, "receipt")])
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(engine.events, engine.administration.catalog),
+        users,
+        transport,
+        statistics=service,
+    )
+    assert await worker.run() == 1
+    assert consumer.deleted == ["receipt"]
+    assert drive.file.web_view_link in transport.sent[0][3]
+    assert "Посещаемость игроков" in transport.sent[0][3]
+    unauthorized = command.model_copy(update={"platform_user_id": 999})
+    with pytest.raises(DomainError, match="прав"):
+        await service.apply(unauthorized)
+    assert not drive.replacements
 
 
 def test_supplied_workbook_when_available() -> None:
@@ -227,11 +387,7 @@ def test_supplied_workbook_when_available() -> None:
     if not path.exists():
         pytest.skip("Private sample workbook is not committed to the repository")
     original = path.read_bytes()
-    result = StatisticsWorkbook(original).new_season(2026)
-    assert result is not None
-    assert sheet(result)["C4"].value == 4
-    assert sheet(result)["A748"].value == "Дорогавцев Александр"
-    result = StatisticsWorkbook(result).mark_game("Проверка", ["Новый Игрок", "Абдулазизова Софья"])
+    result = StatisticsWorkbook(original).add_game(2026, "Проверка", ["Новый Игрок", "Абдулазизова Софья"])
     assert result is not None
     assert sheet(result)["B4"].value == 5
     with ZipFile(BytesIO(original)) as before, ZipFile(BytesIO(result)) as after:
@@ -249,70 +405,3 @@ def test_invalid_workbook_and_unrecognized_footer_are_rejected() -> None:
     book.save(output)
     with pytest.raises(DomainError):
         StatisticsWorkbook(output.getvalue())
-
-
-async def test_missing_source_and_failed_backup_leave_existing_files_untouched() -> None:
-    class BackupFailure(MemoryDiskStore):
-        async def upload_new(self, path: str, content: bytes) -> None:
-            if "/backup-" in path:
-                raise RuntimeError("backup upload failed")
-            await super().upload_new(path, content)
-
-    store = BackupFailure()
-    repo = YandexDiskStatisticsRepository(store)
-    with pytest.raises(DomainError, match="не найден"):
-        await repo.link()
-    assert not store.files
-    store.files[repo.path("initial.xlsx")] = template()
-    await repo.select("initial", str(uuid4()))
-    before = dict(store.files)
-    with pytest.raises(RuntimeError, match="backup upload failed"):
-        await repo.edit(str(uuid4()), "20260905000000000000", lambda book: book.new_season(2026))
-    assert store.files == before
-
-
-async def test_statistics_worker_delivers_link_without_event_lookup_and_rechecks_admin(disk_store, event) -> None:
-    engine, users, publisher, _registrations = await engine_setup(disk_store, event, admin=True)
-    await engine.handle(inbound(1, STATS_LINK))
-    repo = YandexDiskStatisticsRepository(disk_store)
-    disk_store.files[repo.path("initial.xlsx")] = template()
-    service = StatisticsService(repo, engine.admins, engine.administration)
-    command = publisher.commands[0]
-    transport = MemoryDeferredTransport()
-    consumer = FakeConsumer([QueueEnvelope(command, "receipt")])
-    worker = OrderedWorker(
-        consumer,
-        OrderedMutationService(engine.events, engine.administration.catalog),
-        users,
-        transport,
-        statistics=service,
-    )
-    assert await worker.run() == 1
-    assert consumer.deleted == ["receipt"]
-    assert "https://disk.example/" in transport.sent[0][3]
-    before = dict(disk_store.files)
-    unauthorized = command.model_copy(update={"platform_user_id": 999})
-    with pytest.raises(DomainError, match="прав"):
-        await service.apply(unauthorized)
-    assert disk_store.files == before
-
-
-async def test_disk_listing_paginates_and_exists_does_not_hide_api_errors() -> None:
-    offsets = []
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("fields"):
-            status = 404 if request.url.params["path"].endswith("missing") else 403
-            return httpx.Response(status, request=request)
-        offset = int(request.url.params["offset"])
-        offsets.append(offset)
-        items = [{"path": f"disk:/larp-bot/stats/backup-{offset}.xlsx", "type": "file"}]
-        return httpx.Response(200, json={"_embedded": {"items": items, "total": 2}}, request=request)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        disk = YandexDiskRestClient("test-token", client)
-        assert len(await disk.list_files("disk:/larp-bot/stats")) == 2
-        assert offsets == [0, 1]
-        assert not await disk.exists("disk:/larp-bot/stats/missing")
-        with pytest.raises(httpx.HTTPStatusError):
-            await disk.exists("disk:/larp-bot/stats/forbidden")

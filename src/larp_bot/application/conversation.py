@@ -4,7 +4,6 @@ import asyncio
 from datetime import UTC, datetime
 from secrets import token_urlsafe
 from uuid import NAMESPACE_URL, uuid5
-from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
@@ -81,10 +80,9 @@ CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
 MANAGE_MODERATORS = "Управление модераторами"
-STATS_SOURCE = "📊 Выбрать таблицу статистики"
-STATS_SEASON = "🗓 Начать новый сезон"
-STATS_LINK = "🔗 Ссылка на статистику"
-STATS_GAME = "📊 Внести участие в статистику"
+MANAGE_STATISTICS = "Управление статистикой"
+STATS_LINKS = "Ссылки на таблицы статистики"
+STATS_ADD_GAME = "Добавить игру в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
 GRANT_GAMEMASTER = "➕ Назначить модератора"
 REVOKE_GAMEMASTER = "➖ Снять модератора"
@@ -120,9 +118,9 @@ MASTER_TABLE_DISCLAIMER = "⚠️ Только для мастеров этой 
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
 ADMIN_ACTIONS = frozenset(
     {
-        STATS_SOURCE,
-        STATS_SEASON,
-        STATS_LINK,
+        MANAGE_STATISTICS,
+        STATS_LINKS,
+        STATS_ADD_GAME,
         "➕ Создать игру",
         MANAGE_GAMES,
         EVENT_TABLES,
@@ -150,7 +148,6 @@ ADMIN_ACTIONS = frozenset(
 )
 FREE_TEXT_DIALOG_STATES = frozenset(
     {
-        "ADMIN_STATS_SOURCE",
         "PROFILE_SURNAME_CYRILLIC",
         "PROFILE_NAME_CYRILLIC",
         "PROFILE_CONTACT",
@@ -333,7 +330,7 @@ class ConversationEngine:
             or value in {ADMIN, ADMIN_MENU}
             or value in ADMIN_ACTIONS
             or value in LEGACY_STATUS_ACTIONS
-            or value.startswith(("ag:", "mod:", "master:", "select:admin-", "page:admin-", "page:a:"))
+            or value.startswith(("ag:", "mod:", "master:", "stats:", "select:admin-", "page:admin-", "page:a:"))
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
         if value == "/start":
@@ -427,30 +424,15 @@ class ConversationEngine:
             return await self._select_event(user, message, value)
         if value.startswith("page:"):
             return await self._page(user, value)
+        if value.startswith("stats:"):
+            return await self._statistics_action(user, message, value)
         if value.startswith("ag:"):
             return await self._admin_game_action(user, message, value)
         if value.startswith(("mod:", "master:")):
             admin_response = await self._admin_callback(user, message, value)
             if admin_response is not None:
                 return admin_response
-        if value in {STATS_SOURCE, STATS_SEASON, STATS_LINK}:
-            if not await self._is_admin(user):
-                return BotResponse(text="Недостаточно прав.")
-            if value == STATS_SOURCE:
-                user.dialog_state = "ADMIN_STATS_SOURCE"
-                return BotResponse(
-                    text="Введите имя актуального XLSX-файла в larp-bot/stats. По умолчанию: initial.",
-                    buttons=[Button(label="initial", value="initial"), admin_menu_button()],
-                )
-            now = datetime.now(ZoneInfo("Europe/Moscow"))
-            year = now.year if now.month >= 9 else now.year - 1
-            payload = (
-                StatisticsPayload(action="link")
-                if value == STATS_LINK
-                else StatisticsPayload(action="season", season_year=year)
-            )
-            return await self._enqueue_statistics(user, message, payload)
-        admin_response = await self.dispatch_idle_admin(user, value)
+        admin_response = await self.dispatch_idle_admin(user, message, value)
         if admin_response is not None:
             return admin_response
         return await self._main(user)
@@ -1041,7 +1023,7 @@ class ConversationEngine:
         ]
         if await self._is_admin(user):
             labels.insert(-1, MANAGE_MODERATORS)
-            labels[-1:-1] = [STATS_SOURCE, STATS_SEASON, STATS_LINK]
+            labels.insert(-1, MANAGE_STATISTICS)
         return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
 
     @staticmethod
@@ -1585,8 +1567,6 @@ class ConversationEngine:
         if not await self._has_admin_access(user):
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
-        if user.dialog_state == "ADMIN_STATS_SOURCE":
-            return await self._enqueue_statistics(user, message, StatisticsPayload(action="select", table_name=value))
         event_bound_states = {
             "ADMIN_STATUS_SELECT",
             "ADMIN_CONFIRMATION_DEADLINE",
@@ -2424,6 +2404,93 @@ class ConversationEngine:
             command_enqueued=True,
         )
 
+    @staticmethod
+    def _statistics_cursor(direction: str, event: Event) -> str:
+        micros = int(event.created_at.timestamp() * 1_000_000)
+        return f"stats:page:{direction}:{micros}:{event.event_id}"
+
+    async def _statistics_menu(self, user: User) -> BotResponse:
+        if not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        return BotResponse(
+            text=MANAGE_STATISTICS,
+            buttons=[
+                Button(label=STATS_LINKS, value=STATS_LINKS),
+                Button(label=STATS_ADD_GAME, value=STATS_ADD_GAME),
+                admin_menu_button(),
+            ],
+        )
+
+    async def _show_statistics_games(
+        self,
+        user: User,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+    ) -> BotResponse:
+        if not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        events = list(
+            await self.events.list_page(
+                after=after,
+                before=before,
+                archived=False,
+                newest_first=True,
+                limit=10,
+            )
+        )
+        back = Button(label=BACK, value=MANAGE_STATISTICS)
+        if not events:
+            return BotResponse(text="Нет неархивированных игр для добавления в статистику.", buttons=[back])
+        first, last = events[0], events[-1]
+        previous, following = await asyncio.gather(
+            self.events.list_page(
+                before=(first.created_at, first.event_id),
+                archived=False,
+                newest_first=True,
+                limit=1,
+            ),
+            self.events.list_page(
+                after=(last.created_at, last.event_id),
+                archived=False,
+                newest_first=True,
+                limit=1,
+            ),
+        )
+        buttons = [Button(label=event.name, value=f"stats:game:{event.event_id}") for event in events]
+        if previous:
+            buttons.append(Button(label="⬅️ Предыдущая", value=self._statistics_cursor("p", first)))
+        if following:
+            buttons.append(Button(label="➡️ Следующая", value=self._statistics_cursor("n", last)))
+        buttons.append(back)
+        return BotResponse(text="Выберите неархивированную игру для добавления в статистику:", buttons=buttons)
+
+    async def _statistics_action(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        if not await self._is_admin(user):
+            return BotResponse(text="Недостаточно прав.")
+        parts = value.split(":", 4)
+        if len(parts) == 5 and parts[:2] == ["stats", "page"]:
+            if parts[2] not in {"n", "p"} or not parts[3].isdigit():
+                return BotResponse(text="Некорректная страница.")
+            cursor = (datetime.fromtimestamp(int(parts[3]) / 1_000_000, UTC), parts[4])
+            if parts[2] == "p":
+                return await self._show_statistics_games(user, before=cursor)
+            return await self._show_statistics_games(user, after=cursor)
+        if len(parts) != 3 or parts[:2] != ["stats", "game"]:
+            return BotResponse(text="Некорректное действие.")
+        event = await self.events.get(parts[2])
+        if event is None or event.archived_at is not None:
+            return BotResponse(
+                text="Игра не найдена или уже архивирована.",
+                buttons=[Button(label=BACK, value=MANAGE_STATISTICS)],
+            )
+        return await self._enqueue_statistics(
+            user,
+            message,
+            StatisticsPayload(action="game", game_id=event.event_id),
+            back=Button(label=BACK, value=MANAGE_STATISTICS),
+        )
+
     async def _show_admin_games(
         self,
         user: User,
@@ -2512,8 +2579,6 @@ class ConversationEngine:
             (MANAGE_MASTERS, "masters"),
             (ARCHIVE_GAME, "archive"),
         ]
-        if is_admin:
-            actions.insert(-1, (STATS_GAME, "stats"))
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))
         return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
@@ -2567,13 +2632,6 @@ class ConversationEngine:
         if action == "status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
             return _admin_status_response(event.name, event.status, event.event_id)
-        if action == "stats":
-            return await self._enqueue_statistics(
-                user,
-                message,
-                StatisticsPayload(action="game", game_id=event.event_id),
-                back=game_management_button(event.event_id),
-            )
         if action == "remind":
             await self._clear(user)
             if event.status is not EventStatus.CONFIRMATION_OPEN:
@@ -2690,9 +2748,20 @@ class ConversationEngine:
         }.get(flow, "manage")
         return await self._admin_game_action(user, message, f"ag:{action}:{event.event_id}")
 
-    async def _admin_start(self, user: User, value: str) -> BotResponse:
+    async def _admin_start(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
+        if value == MANAGE_STATISTICS:
+            return await self._statistics_menu(user)
+        if value == STATS_LINKS:
+            return await self._enqueue_statistics(
+                user,
+                message,
+                StatisticsPayload(action="link"),
+                back=Button(label=BACK, value=MANAGE_STATISTICS),
+            )
+        if value == STATS_ADD_GAME:
+            return await self._show_statistics_games(user)
         if value == MANAGE_MODERATORS:
             return await self._moderator_management_menu(user)
         if value == "➕ Создать игру":
@@ -2737,7 +2806,7 @@ class ConversationEngine:
         return await self._admin_menu(user)
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.
-    async def dispatch_idle_admin(self, user: User, value: str) -> BotResponse | None:
+    async def dispatch_idle_admin(self, user: User, message: InboundMessage, value: str) -> BotResponse | None:
         if value in ADMIN_ACTIONS or value in LEGACY_STATUS_ACTIONS:
-            return await self._admin_start(user, value)
+            return await self._admin_start(user, message, value)
         return None

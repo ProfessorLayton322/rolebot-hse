@@ -20,6 +20,7 @@ flowchart LR
     WORKER --> FIFO
     WORKER --> YDB
     WORKER --> DISK[Yandex Disk master + public XLSX showcases]
+    WORKER --> GDRIVE[Google Drive attendance statistics XLSX]
     GW --> CFE[Cloudflare telegram-egress + runtime config]
     WORKER --> CFE
     CFE --> TGAPI[Telegram Bot API]
@@ -137,16 +138,16 @@ Russian citizens provide only Cyrillic name fields; their Latin cells are blank.
 
 Admins can create a pass table for any game, and admins or that game's masters can reopen its stored table links. The pass table contains every YDB registration in `Подтверждено` whose current YDB profile requests a pass, plus every master of the game whose current profile requests one. A master does not need a player registration to appear, and a person who is both a confirmed player and a master appears only once. Administrators appear under exactly the same membership rule: being a bot administrator alone never adds them to the pass table. Confirmation, cancellation, master-list changes, and later table access regenerate and overwrite the same deterministic resource at `disk:/larp-bot/passes/<event_id>.xlsx`, so its stored public Yandex Disk URL remains unchanged. Both the resource and link remain permanently with the archived game.
 
-Attendance statistics live in `disk:/larp-bot/stats`. Place the starting workbook there as `initial.xlsx`; the private sample workbook in the repository root is not bundled into the deployment. The bot defaults to this file until an administrator selects another source or makes an edit. Statistics controls are available to configured administrators in both bots, with authorization checked again by the worker:
+Attendance statistics use exactly one existing binary XLSX in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx`. Share the folder and file with the service account's `client_email` as an editor, keep exactly one non-trashed file with that name in the folder, and do not rename or replace it. The bot downloads and updates the content of the same Drive file ID, so its name and `webViewLink` remain permanent while Google Drive retains revision history. The bot does not create source copies or backup files.
 
-- `📊 Выбрать таблицу статистики`: enter a filename, with or without `.xlsx`, from that folder. Use `initial` for the starting workbook, or a backup filename to restore it. Selection validates the layout and copies the selected bytes into `current.xlsx` and `showcase.xlsx`; the input file is preserved.
-- `🗓 Начать новый сезон`: creates the current September–August season in Moscow time (September 2026 → `2026-2027`) unless that sheet already exists. It carries all players, lifetime totals and milestone flags from the latest season, leaving no game columns. Older sheets remain intact.
-- In a game's management message, `📊 Внести участие в статистику` adds the game's name as a column and writes `1` for confirmed registrations. Waiting and cancelled registrations are excluded; the bot has no separate check-in status. Run this after the attendance list has been finalized and before archiving the game. Names come from the registration's Cyrillic surname/name snapshot. Matching ignores case, extra whitespace and the difference between ё/е. Missing players are appended before the summaries; matching duplicate rows are all marked. A game name already present in the current season is a no-op, even if its roster subsequently changes.
-- `🔗 Ссылка на статистику`: returns the single published URL of `showcase.xlsx`, creating that copy if absent. This method is admin-only; the published URL itself remains accessible to anyone it is shared with.
+Configured administrators see one `Управление статистикой` entry. Its submenu contains:
 
-Before every season/game edit, the bot saves the complete previous XLSX as `backup-<timestamp>-<operation UUID>.xlsx`. GitHub variable `TABLE_VERSIONING_NUMBER` flows through the Terraform plan/deploy workflows into the functions and controls retention (default/current value: 20). Only the oldest bot-generated backups are deleted; `initial.xlsx`, other supplied inputs, `current.xlsx`, and `showcase.xlsx` are outside the backup count. The showcase is overwritten in place, never deleted/recreated during updates, to preserve its link. Do not manually delete or rename it if the URL must remain valid.
+- `Ссылки на таблицы статистики`: returns a labeled list of permanent Google Drive links. The list currently contains the player attendance workbook and is structured to accept more workbooks later.
+- `Добавить игру в статистику`: opens a paginated picker containing only unarchived games. Selecting a game adds its name as a column and writes `1` for confirmed registrations. Waiting and cancelled registrations are excluded; the bot has no separate check-in status. Names come from the registration's Cyrillic surname/name snapshot. Matching ignores case, extra whitespace, and the difference between ё/е. Missing players are appended before the summaries; matching duplicate rows are all marked.
 
-All statistics commands use the same FIFO group, `statistics`, across games and platforms. `state.json` and a temporary `pending.xlsx` form a recovery journal: the backup and staged result are saved before the commit marker; retries finish a marked commit before applying another action. Retention runs after successful publication. These files are internal; use the source-selection action for restoration. No new YDB tables or direct cloud deployments are required.
+The season is derived at processing time in Moscow: September through December belongs to the season starting that calendar year, while January through August belongs to the season starting the previous year. Thus September 2026 through August 2027 is `2026-2027`. When a game is added, the workbook editor uses the latest seasonal sheet if it is current; otherwise it first appends the current season, carrying players, lifetime totals, and milestone flags while leaving older sheets intact. If the game-name column already exists in the current season, the operation reports that it was already added and performs no upload. This makes retries addition-only and idempotent even if the first Drive response was interrupted after the revision was committed.
+
+All statistics commands use the same FIFO group, `statistics`, across games and platforms. Both the gateway and ordered worker enforce administrator authorization, and the worker rechecks that the selected game is still unarchived. No new YDB tables are required.
 
 See [the supplied workbook analysis](docs/attendance-statistics.md) for colours, formulas, known template issues, and preservation details.
 
@@ -334,6 +335,7 @@ These names are exhaustive for the supplied workflows:
 | `TG_BOT_TOKEN` | BotFather token; installed only in telegram-egress and used by deployment to call `setWebhook` |
 | `TG_WEBHOOK_SECRET` | Random webhook secret using only `A-Z a-z 0-9 _ -`; installed in ingress and passed to `setWebhook` |
 | `YANDEX_DISK_TOKEN` | OAuth token for the dedicated Disk account/folder |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Complete Google service-account JSON document; its `client_email` needs edit access to the configured statistics folder and workbook |
 | `VK_ACCESS_TOKEN` | VK community access token with messaging permission |
 | `VK_CALLBACK_SECRET` | Random secret configured identically in VK Callback API |
 | `VK_CONFIRMATION_STRING` | VK's server-confirmation string |
@@ -362,6 +364,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket |
+| `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent `player_attendance_stats.xlsx` file |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 | `TG_GAMEMASTER_IDS` | Public JSON array of Telegram moderator user IDs; moderators have privileged read access and can mutate games where they are masters |
@@ -373,6 +376,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 
 ```text
 YANDEX_DISK_TOKEN
+GOOGLE_SERVICE_ACCOUNT_JSON
 VK_ACCESS_TOKEN
 VK_CALLBACK_SECRET
 VK_CONFIRMATION_STRING
@@ -404,6 +408,7 @@ YANDEX_GATEWAY_URL
 TG_BOT_TOKEN
 YANDEX_TO_CF_EGRESS_HMAC_SECRET
 YANDEX_DISK_TOKEN
+GOOGLE_SERVICE_ACCOUNT_JSON
 VK_ACCESS_TOKEN
 VK_CALLBACK_SECRET
 VK_CONFIRMATION_STRING
@@ -422,11 +427,11 @@ YANDEX_SERVICE_ACCOUNT_IDS
 
 ## First deployment
 
-1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Cloudflare account, and active Yandex billing folder.
+1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Google service account, Cloudflare account, and active Yandex billing folder. Put `player_attendance_stats.xlsx` in the configured Google Drive folder and grant that service account edit access without replacing the file later.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
-4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the eleven GitHub Variables above.
-5. Add all thirteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
+4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the twelve GitHub Variables above.
+5. Add all fourteen GitHub Secrets above to the protected `production` environment. Mirror non-deployment credentials needed for plan into `production-plan` (`CLOUDFLARE_API_TOKEN` and both state keys).
 6. Run CI on a pull request. Review `plan.yml`, especially IAM bindings, five YDB tables, and public Worker endpoints.
 7. Merge to `main`. The serialized deployment tests, builds, applies Terraform, injects every application secret into Workers, calls Telegram `setWebhook`, and runs live Telegram/VK smoke tests.
 8. In VK community settings, add the emitted `vk_callback_url`, set the same callback secret, select the current API version, confirm the server using `VK_CONFIRMATION_STRING`, and enable message events.
@@ -529,7 +534,7 @@ Search Yandex Logging by operation/event ID. Cloudflare logs should contain requ
 
 **Telegram receives no answer:** check `getWebhookInfo`, ingress Worker secret presence, Cloudflare status, then gateway logs by request ID. Confirm the webhook URL is Cloudflare. A 403 at Yandex usually means HMAC mismatch or stale timestamp.
 
-**Queued acknowledgment arrives but final success does not:** inspect FIFO depth, kick queue/trigger, worker logs, YDB errors, and Disk OAuth validity. Do not delete the FIFO message manually until the authoritative mutation is understood.
+**Queued acknowledgment arrives but final success does not:** inspect FIFO depth, kick queue/trigger, worker logs, YDB errors, Disk OAuth validity, and Google Drive service-account access to the configured folder/file. Do not delete the FIFO message manually until the authoritative mutation is understood.
 
 **VK confirmation fails:** compare numeric group ID, callback secret, and confirmation string with the current egress Worker bindings. The response body and Function content type are plain text.
 

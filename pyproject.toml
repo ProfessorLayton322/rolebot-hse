@@ -10,9 +10,11 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "boto3==1.43.76",
+  "google-auth==2.57.1",
   "httpx==0.28.1",
   "openpyxl==3.1.5",
   "pydantic==2.13.4",
+  "requests==2.34.2",
   "ydb==3.31.2",
 ]
 
@@ -54,5 +56,5 @@ packages = ["larp_bot"]
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["ydb.*", "boto3.*", "botocore.*", "openpyxl.*"]
+module = ["ydb.*", "boto3.*", "botocore.*", "google.*", "openpyxl.*", "requests.*"]
 ignore_missing_imports = true

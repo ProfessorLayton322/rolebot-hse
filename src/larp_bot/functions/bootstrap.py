@@ -5,6 +5,7 @@ from typing import Any
 
 import boto3
 
+from larp_bot.adapters.google_drive import GoogleDriveRestClient, GoogleDriveStatisticsRepository
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.transports import (
     CloudflareTelegramEgress,
@@ -15,7 +16,6 @@ from larp_bot.adapters.yandex_disk.repository import (
     YandexDiskRestClient,
     YandexDiskShowcaseRepository,
 )
-from larp_bot.adapters.yandex_disk.statistics import YandexDiskStatisticsRepository
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.conversation import ConversationEngine
@@ -65,6 +65,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         key: await config.get_secret(key)
         for key in (
             "YANDEX_DISK_TOKEN",
+            "GOOGLE_SERVICE_ACCOUNT_JSON",
             "PARTICIPANT_KEY_HMAC_SECRET",
             "YANDEX_TO_CF_EGRESS_HMAC_SECRET",
             "VK_ACCESS_TOKEN",
@@ -77,6 +78,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     events = YdbEventRepository(db)
     registrations = YdbRegistrationRepository(db)
     disk = YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"])
+    google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
     showcase = YandexDiskShowcaseRepository(disk)
     sqs = boto3.client(
         "sqs",
@@ -130,7 +132,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         notifications,
         max_seconds=settings.worker_max_seconds,
         statistics=StatisticsService(
-            YandexDiskStatisticsRepository(disk, settings.table_versioning_number), config, administration
+            GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id), config, administration
         ),
     )
     return AppContainer(

@@ -169,6 +169,21 @@ class StatisticsWorkbook:
             for c in range(14, self.last_column + 1)
         )
 
+    @property
+    def season_name(self) -> str:
+        return self.season.attrib["name"]
+
+    def add_game(self, season_year: int, name: str, players: Sequence[str]) -> bytes | None:
+        """Add a game to the requested season, creating that season when needed."""
+        title = f"{season_year}-{season_year + 1}"
+        if self.season_name != title:
+            created = self.new_season(season_year)
+            if created is None:
+                raise DomainError("Текущий сезон не является последним листом таблицы.")
+        if self.has_game(name):
+            return None
+        return self.mark_game(name, players)
+
     def new_season(self, year: int) -> bytes | None:
         title = f"{year}-{year + 1}"
         if any(s.attrib["name"] == title for s in self.sheets):
