@@ -143,7 +143,9 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     assert result.attendance_status is AttendanceStatus.CANCELLED
     assert consumer.deleted == [f"receipt-{index}" for index in range(1, 5)]
     assert len(transport.sent) == 4
-    assert [(button.label, button.value) for button in transport.sent[0][4]] == [(MAIN_MENU, MAIN_MENU)]
+    assert [(button.label, button.value) for button in transport.sent[0][4]] == [
+        (CONFIRM_PARTICIPATION, f"select:confirm:{event.event_id}")
+    ]
     saved_user = await users.get(Platform.TELEGRAM, 1)
     assert saved_user is not None
     assert saved_user.last_bot_buttons == [Button(label=MAIN_MENU, value=MAIN_MENU)]
@@ -229,6 +231,47 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
         "Когда придёт время окончательно подтвердить участие, выберите «✅ Подтвердить участие». "
         "Тогда бот попросит пожелания по персонажу."
     )
+    assert all(
+        [(button.label, button.value) for button in sent[4]]
+        == [(CONFIRM_PARTICIPATION, f"select:confirm:{event.event_id}")]
+        for sent in transport.sent
+    )
+
+
+@pytest.mark.asyncio
+async def test_enlist_delivery_keeps_default_button_before_confirmation_opens(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.status = EventStatus.CREATED
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    consumer = FakeConsumer(
+        [
+            queued(
+                event,
+                Operation.ENLIST,
+                EnlistPayload(display_name="Player", wish_play="A"),
+                1,
+                [Button(label=MAIN_MENU, value=MAIN_MENU)],
+            )
+        ]
+    )
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, RegistrationCatalog(events, tables, showcase)),
+        users,
+        transport,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 1
+    assert transport.sent[0][4] == (Button(label=MAIN_MENU, value=MAIN_MENU),)
 
 
 @pytest.mark.asyncio

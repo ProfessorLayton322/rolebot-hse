@@ -68,6 +68,7 @@ class OperationNotAllowed(DomainError):
 class MutationResult:
     text: str
     notifications_enabled: bool = True
+    buttons: tuple[Button, ...] | None = None
 
 
 def event_slug(name: str) -> str:
@@ -1211,7 +1212,8 @@ class OrderedMutationService:
             queue_position = next(
                 index for index, row in enumerate(active, start=1) if row.participant_key == command.participant_key
             )
-            return MutationResult(enlistment_success_text(event, queue_position))
+            buttons = (confirmation_button(event.event_id),) if event.status is EventStatus.CONFIRMATION_OPEN else None
+            return MutationResult(enlistment_success_text(event, queue_position), buttons=buttons)
 
         if command.operation is Operation.CONFIRM and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:

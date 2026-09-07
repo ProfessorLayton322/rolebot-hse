@@ -70,6 +70,7 @@ class OrderedWorker:
                 command = raw.command
                 notification_delivered = False
                 notifications_enabled = True
+                buttons: Sequence[Button] = command.reply_context.buttons
                 try:
                     if command.operation is Operation.STATISTICS:
                         if self.statistics is None:
@@ -79,6 +80,8 @@ class OrderedWorker:
                         result = await self.mutations.apply(command)
                         default_text = result.text
                         notifications_enabled = result.notifications_enabled
+                        if result.buttons is not None:
+                            buttons = result.buttons
                     # ENLIST position is decided only after its ordered write;
                     # ignore text embedded by workers from an older rollout.
                     text = (
@@ -122,7 +125,7 @@ class OrderedWorker:
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
                 if notifications_enabled and not notification_delivered:
-                    await self._deliver_once(raw, text, command.reply_context.buttons)
+                    await self._deliver_once(raw, text, buttons)
                 await self.consumer.delete(raw.receipt_handle)
                 LOGGER.info(
                     "ordered_command_completed",
