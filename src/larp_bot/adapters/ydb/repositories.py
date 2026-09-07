@@ -427,6 +427,8 @@ class YdbEventRepository:
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
         last_reserve_promotion_delivered_operation_id,
+        last_confirmed_link_promotion_operation_id, last_confirmed_link_promotion_participant_key,
+        last_confirmed_link_promotion_delivered_operation_id,
         last_participant_removal_operation_id, participant_removal_keys_json,
         participant_removal_notified_keys_json,
         archived_at,
@@ -464,6 +466,11 @@ class YdbEventRepository:
             last_reserve_promotion_operation_id=row.get("last_reserve_promotion_operation_id"),
             last_reserve_promotion_participant_key=row.get("last_reserve_promotion_participant_key"),
             last_reserve_promotion_delivered_operation_id=row.get("last_reserve_promotion_delivered_operation_id"),
+            last_confirmed_link_promotion_operation_id=row.get("last_confirmed_link_promotion_operation_id"),
+            last_confirmed_link_promotion_participant_key=row.get("last_confirmed_link_promotion_participant_key"),
+            last_confirmed_link_promotion_delivered_operation_id=row.get(
+                "last_confirmed_link_promotion_delivered_operation_id"
+            ),
             last_participant_removal_operation_id=row.get("last_participant_removal_operation_id"),
             participant_removal_keys=_string_list(
                 row.get("participant_removal_keys_json"),
@@ -533,6 +540,9 @@ class YdbEventRepository:
             DECLARE $last_reserve_promotion_operation_id AS Optional<Utf8>;
             DECLARE $last_reserve_promotion_participant_key AS Optional<Utf8>;
             DECLARE $last_reserve_promotion_delivered_operation_id AS Optional<Utf8>;
+            DECLARE $last_confirmed_link_promotion_operation_id AS Optional<Utf8>;
+            DECLARE $last_confirmed_link_promotion_participant_key AS Optional<Utf8>;
+            DECLARE $last_confirmed_link_promotion_delivered_operation_id AS Optional<Utf8>;
             DECLARE $last_participant_removal_operation_id AS Optional<Utf8>;
             DECLARE $participant_removal_keys_json AS Utf8;
             DECLARE $participant_removal_notified_keys_json AS Utf8;
@@ -547,6 +557,8 @@ class YdbEventRepository:
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
                 last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
                 last_reserve_promotion_delivered_operation_id,
+                last_confirmed_link_promotion_operation_id, last_confirmed_link_promotion_participant_key,
+                last_confirmed_link_promotion_delivered_operation_id,
                 last_participant_removal_operation_id, participant_removal_keys_json,
                 participant_removal_notified_keys_json,
                 archived_at,
@@ -559,6 +571,8 @@ class YdbEventRepository:
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
                 $last_reserve_promotion_delivered_operation_id,
+                $last_confirmed_link_promotion_operation_id, $last_confirmed_link_promotion_participant_key,
+                $last_confirmed_link_promotion_delivered_operation_id,
                 $last_participant_removal_operation_id, $participant_removal_keys_json,
                 $participant_removal_notified_keys_json,
                 $archived_at,
@@ -588,6 +602,11 @@ class YdbEventRepository:
                 "$last_reserve_promotion_operation_id": event.last_reserve_promotion_operation_id,
                 "$last_reserve_promotion_participant_key": event.last_reserve_promotion_participant_key,
                 "$last_reserve_promotion_delivered_operation_id": (event.last_reserve_promotion_delivered_operation_id),
+                "$last_confirmed_link_promotion_operation_id": event.last_confirmed_link_promotion_operation_id,
+                "$last_confirmed_link_promotion_participant_key": event.last_confirmed_link_promotion_participant_key,
+                "$last_confirmed_link_promotion_delivered_operation_id": (
+                    event.last_confirmed_link_promotion_delivered_operation_id
+                ),
                 "$last_participant_removal_operation_id": event.last_participant_removal_operation_id,
                 "$participant_removal_keys_json": json.dumps(
                     event.participant_removal_keys,
@@ -883,6 +902,48 @@ class YdbEventRepository:
                 updated_at = $updated_at
             WHERE event_id = $event_id
               AND last_reserve_promotion_operation_id = $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def set_confirmed_link_promotion(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str | None,
+    ) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $participant_key AS Optional<Utf8>; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET last_confirmed_link_promotion_operation_id = $operation_id,
+                last_confirmed_link_promotion_participant_key = $participant_key,
+                updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$participant_key": participant_key,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def mark_confirmed_link_promotion_delivered(self, event_id: str, operation_id: str) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET last_confirmed_link_promotion_delivered_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND last_confirmed_link_promotion_operation_id = $operation_id;
             """,
             {
                 "$event_id": event_id,

@@ -316,6 +316,9 @@ class Event(StrictModel):
     last_reserve_promotion_operation_id: str | None = None
     last_reserve_promotion_participant_key: str | None = None
     last_reserve_promotion_delivered_operation_id: str | None = None
+    last_confirmed_link_promotion_operation_id: str | None = None
+    last_confirmed_link_promotion_participant_key: str | None = None
+    last_confirmed_link_promotion_delivered_operation_id: str | None = None
     last_participant_removal_operation_id: str | None = None
     participant_removal_keys: list[str] = Field(default_factory=list)
     participant_removal_notified_keys: list[str] = Field(default_factory=list)

@@ -500,6 +500,17 @@ class EventAdministrationService:
             for registration in await self.catalog.registrations.list_for_event(event_id)
         )
 
+    async def confirmed_registration_count(self, event_id: str, *, main_roster_only: bool = False) -> int:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        count = sum(
+            registration.attendance_status is AttendanceStatus.CONFIRMED
+            for registration in await self.catalog.registrations.list_for_event(event_id)
+        )
+        return min(count, event.player_amount) if main_roster_only else count
+
     async def registration_user(self, event_id: str, registration_key: str) -> User | None:
         if await self.events.get(event_id) is None:
             raise EventNotFound("Игра не найдена")
@@ -589,7 +600,7 @@ _TELEGRAM_CHAT_HOSTS = frozenset(
     {"t.me", "www.t.me", "telegram.me", "www.telegram.me", "telegram.dog", "www.telegram.dog"}
 )
 _TELEGRAM_CHAT_PATH_RE = re.compile(r"^/(?:\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+|[A-Za-z][A-Za-z0-9_]{3,31})/?$")
-_VK_CHAT_PATH_RE = re.compile(r"^/join/[A-Za-z0-9_=-]+/?$")
+_VK_CHAT_PATH_RE = re.compile(r"^/join/[A-Za-z0-9_+=-]+(?:/[A-Za-z0-9_+=-]+)*/?$")
 
 
 def is_plain_chat_link(value: str) -> bool:
@@ -616,7 +627,7 @@ def is_plain_chat_link(value: str) -> bool:
 def confirmed_notification_text(event_name: str, message: str) -> str:
     clean_message = message.strip()
     if not is_plain_chat_link(clean_message):
-        return clean_message
+        return f"Это сообщение было разослано всем подтвердившимся на игру {event_name}: ***\n\n{clean_message}"
     return (
         f"Вы подтвердили своё участие в игре {event_name}! "
         f"Пожалуйста, добавьтесь в чат игры, мы вас очень ждём: {clean_message}"
@@ -682,13 +693,19 @@ class ConfirmationNotificationService:
         self,
         event: Event,
         attendance_status: AttendanceStatus,
+        *,
+        main_roster_only: bool = False,
     ) -> list[NotificationRecipient]:
         await self.catalog.ensure_migrated(event)
-        participant_keys = {
-            registration.participant_key
+        registrations = [
+            registration
             for registration in await self.catalog.registrations.list_for_event(event.event_id)
             if registration.attendance_status is attendance_status
-        }
+        ]
+        registrations.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+        if main_roster_only:
+            registrations = registrations[: event.player_amount]
+        participant_keys = {registration.participant_key for registration in registrations}
         recipients: list[NotificationRecipient] = []
         for user in await self.users.list_all():
             platform, uid = self._identity(user)
@@ -707,6 +724,7 @@ class ConfirmationNotificationService:
             assert isinstance(command.payload, NotificationPayload)
             text = confirmed_notification_text(event.name, command.payload.text)
             attendance_status = AttendanceStatus.CONFIRMED
+            main_roster_only = is_plain_chat_link(command.payload.text)
             buttons = [main_menu_button()]
         else:
             if event.confirmation_deadline is None:
@@ -717,10 +735,15 @@ class ConfirmationNotificationService:
             else:
                 text = f"Напоминаем о необходимости подтвердить или отменить участие в игре {event.name} до {deadline}!"
             attendance_status = AttendanceStatus.WAITING
+            main_roster_only = False
             buttons = [confirmation_button(event.event_id)]
 
         delivered = 0
-        for recipient in await self._recipients(event, attendance_status):
+        for recipient in await self._recipients(
+            event,
+            attendance_status,
+            main_roster_only=main_roster_only,
+        ):
             request_id = (
                 f"{command.operation_id}:confirmation-notification:{recipient.platform.value}:{recipient.user_id}"
             )
@@ -761,7 +784,19 @@ class ConfirmationNotificationService:
             text=confirmation_text,
             buttons=confirmation_buttons,
         )
-        for index, stored_text in enumerate(event.confirmed_notifications):
+        confirmed = [
+            registration
+            for registration in await self.catalog.registrations.list_for_event(event.event_id)
+            if registration.attendance_status is AttendanceStatus.CONFIRMED
+        ]
+        confirmed.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+        link_recipients = {registration.participant_key for registration in confirmed[: event.player_amount]}
+        delivered_notifications = [
+            (index, stored_text)
+            for index, stored_text in enumerate(event.confirmed_notifications)
+            if not is_plain_chat_link(stored_text) or command.participant_key in link_recipients
+        ]
+        for index, stored_text in delivered_notifications:
             await self.transport.send(
                 platform=command.platform,
                 user_id=command.platform_user_id,
@@ -771,14 +806,14 @@ class ConfirmationNotificationService:
             )
         # One command-level marker is written only after the complete bundle is
         # accepted. No per-notification/per-recipient delivery state is stored.
-        delivered_buttons = [main_menu_button()] if event.confirmed_notifications else confirmation_buttons
+        delivered_buttons = [main_menu_button()] if delivered_notifications else confirmation_buttons
         await self.users.claim_delivery(
             command.platform,
             command.platform_user_id,
             command.operation_id,
             delivered_buttons,
         )
-        return len(event.confirmed_notifications)
+        return len(delivered_notifications)
 
     async def notify_reserve_promotion(self, command: OrderedRegistrationCommand) -> int:
         """Notify the one reserve player promoted by this roster mutation."""
@@ -831,6 +866,56 @@ class ConfirmationNotificationService:
             [main_menu_button()],
         )
         return 1
+
+    async def notify_confirmed_link_promotion(self, command: OrderedRegistrationCommand) -> int:
+        """Replay chat links when a confirmed reserve player enters the confirmed-player limit."""
+
+        if command.operation not in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+            raise ValueError("command does not promote a confirmed link recipient")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.last_confirmed_link_promotion_operation_id != command.operation_id:
+            return 0
+        if event.last_confirmed_link_promotion_delivered_operation_id == command.operation_id:
+            return 0
+        promoted_key = event.last_confirmed_link_promotion_participant_key
+        if promoted_key is None:
+            return 0
+
+        recipient: NotificationRecipient | None = None
+        for user in await self.users.list_all():
+            platform, uid = self._identity(user)
+            if participant_key(self.participant_secret, platform, uid, event.event_id) == promoted_key:
+                recipient = NotificationRecipient(platform, uid, user)
+                break
+        if recipient is None:
+            LOGGER.warning(
+                "confirmed_link_promotion_recipient_missing",
+                extra={"event_id": event.event_id, "operation_id": command.operation_id},
+            )
+            return 0
+
+        links = [text for text in event.confirmed_notifications if is_plain_chat_link(text)]
+        last_request_id: str | None = None
+        for index, link in enumerate(links):
+            last_request_id = f"{command.operation_id}:confirmed-link-promotion:{index}"
+            await self.transport.send(
+                platform=recipient.platform,
+                user_id=recipient.user_id,
+                request_id=last_request_id,
+                text=confirmed_notification_text(event.name, link),
+                buttons=[main_menu_button()],
+            )
+        await self.events.mark_confirmed_link_promotion_delivered(event.event_id, command.operation_id)
+        if last_request_id is not None:
+            await self.users.claim_delivery(
+                recipient.platform,
+                recipient.user_id,
+                last_request_id,
+                [main_menu_button()],
+            )
+        return len(links)
 
     async def notify_removed_participants(self, command: OrderedRegistrationCommand) -> int:
         if command.operation not in {
@@ -960,6 +1045,32 @@ class OrderedMutationService:
         await self.events.set_reserve_promotion(event.event_id, command.operation_id, promoted_key)
         event.last_reserve_promotion_operation_id = command.operation_id
         event.last_reserve_promotion_participant_key = promoted_key
+
+    async def _record_confirmed_link_promotion(
+        self,
+        event: Event,
+        command: OrderedRegistrationCommand,
+        registration: Registration | None,
+    ) -> None:
+        if event.last_confirmed_link_promotion_operation_id == command.operation_id:
+            return
+        promoted_key: str | None = None
+        if registration is not None and registration.attendance_status is AttendanceStatus.CONFIRMED:
+            confirmed = [
+                row
+                for row in await self.catalog.registrations.list_for_event(event.event_id)
+                if row.attendance_status is AttendanceStatus.CONFIRMED
+            ]
+            confirmed.sort(key=lambda row: (row.created_at, row.participant_key))
+            target_index = next(
+                (index for index, row in enumerate(confirmed) if row.participant_key == registration.participant_key),
+                None,
+            )
+            if target_index is not None and target_index < event.player_amount < len(confirmed):
+                promoted_key = confirmed[event.player_amount].participant_key
+        await self.events.set_confirmed_link_promotion(event.event_id, command.operation_id, promoted_key)
+        event.last_confirmed_link_promotion_operation_id = command.operation_id
+        event.last_confirmed_link_promotion_participant_key = promoted_key
 
     async def apply(self, command: OrderedRegistrationCommand) -> MutationResult:
         event = await self.events.get(command.event_id)
@@ -1118,6 +1229,7 @@ class OrderedMutationService:
                     [command.participant_key] if registration is not None else [],
                 )
             await self._record_reserve_promotion(event, command, registration)
+            await self._record_confirmed_link_promotion(event, command, registration)
             if registration is not None:
                 await self.catalog.registrations.remove(
                     event.event_id,
@@ -1157,6 +1269,7 @@ class OrderedMutationService:
             return MutationResult("Пожелания по персонажу обновлены")
         if command.operation is Operation.CANCEL:
             await self._record_reserve_promotion(event, command, registration)
+            await self._record_confirmed_link_promotion(event, command, registration)
             await self.catalog.registrations.cancel(
                 event.event_id,
                 operation_id=command.operation_id,

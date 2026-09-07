@@ -118,6 +118,7 @@ class OrderedWorker:
                                 await self.notifications.notify_removed_participants(command)
                             if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
                                 await self.notifications.notify_reserve_promotion(command)
+                                await self.notifications.notify_confirmed_link_promotion(command)
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
                 if notifications_enabled and not notification_delivered:

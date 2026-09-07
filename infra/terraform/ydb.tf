@@ -182,6 +182,18 @@ resource "yandex_ydb_table" "events" {
     type = "Utf8"
   }
   column {
+    name = "last_confirmed_link_promotion_operation_id"
+    type = "Utf8"
+  }
+  column {
+    name = "last_confirmed_link_promotion_participant_key"
+    type = "Utf8"
+  }
+  column {
+    name = "last_confirmed_link_promotion_delivered_operation_id"
+    type = "Utf8"
+  }
+  column {
     name = "last_participant_removal_operation_id"
     type = "Utf8"
   }

@@ -43,6 +43,7 @@ from larp_bot.application.conversation import (
     MANAGE_GAMES,
     MANAGE_MASTERS,
     MANAGE_MODERATORS,
+    MANAGE_NOTIFICATIONS,
     MANAGE_PLAYERS,
     MASTER_TABLE_DISCLAIMER,
     PAGE_BACK,
@@ -54,6 +55,7 @@ from larp_bot.application.conversation import (
     REMOVE_WAITING_PLAYERS,
     REVOKE_GAMEMASTER,
     SEND_CONFIRMATION_REMINDER,
+    SEND_CONFIRMED_LINK,
     SEND_CONFIRMED_NOTIFICATION,
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
@@ -1595,7 +1597,8 @@ async def test_event_leader_can_add_another_gamemaster_who_can_then_notify_playe
     await engine.handle(inbound(1, MANAGE_GAMES, user_id=2))
     await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True, user_id=2))
     await engine.handle(inbound(3, f"ag:notify:{event.event_id}", callback=True, user_id=2))
-    queued = await engine.handle(inbound(4, "Сбор в 18:30", user_id=2))
+    preview = await engine.handle(inbound(4, "Сбор в 18:30", user_id=2))
+    queued = await engine.handle(inbound(5, preview.buttons[0].value, callback=True, user_id=2))
 
     assert queued.deferred
     assert publisher.commands[-1].operation is Operation.SEND_CONFIRMED_NOTIFICATION
@@ -1981,8 +1984,12 @@ async def test_admin_has_separate_confirmation_reminder_action(disk_store: Memor
     menu = await engine.handle(inbound(1, ADMIN))
     assert MANAGE_GAMES in [button.value for button in menu.buttons]
     management = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
-    assert SEND_CONFIRMATION_REMINDER in [button.label for button in management.buttons]
-    queued = await engine.handle(inbound(3, f"ag:remind:{event.event_id}", callback=True))
+    management_labels = [button.label for button in management.buttons]
+    assert MANAGE_NOTIFICATIONS in management_labels
+    assert SEND_CONFIRMATION_REMINDER not in management_labels
+    notifications = await engine.handle(inbound(3, f"ag:notifications:{event.event_id}", callback=True))
+    assert SEND_CONFIRMATION_REMINDER in [button.label for button in notifications.buttons]
+    queued = await engine.handle(inbound(4, f"ag:remind:{event.event_id}", callback=True))
 
     assert queued.deferred
     assert publisher.commands[-1].operation is Operation.SEND_CONFIRMATION_REMINDER
@@ -1996,22 +2003,111 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
     menu = await engine.handle(inbound(1, ADMIN))
     assert MANAGE_GAMES in [button.value for button in menu.buttons]
     management = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
-    assert SEND_CONFIRMED_NOTIFICATION in [button.label for button in management.buttons]
-    prompt = await engine.handle(inbound(3, f"ag:notify:{event.event_id}", callback=True))
-    assert "просто вставить ссылку-приглашение" in prompt.text
-    assert "бот сам добавит её и название игры" in prompt.text
+    management_labels = [button.label for button in management.buttons]
+    assert MANAGE_NOTIFICATIONS in management_labels
+    assert SEND_CONFIRMED_NOTIFICATION not in management_labels
+    notifications = await engine.handle(inbound(3, f"ag:notifications:{event.event_id}", callback=True))
+    assert [button.label for button in notifications.buttons[:3]] == [
+        SEND_CONFIRMATION_REMINDER,
+        SEND_CONFIRMED_LINK,
+        SEND_CONFIRMED_NOTIFICATION,
+    ]
+    prompt = await engine.handle(inbound(4, f"ag:notify-message:{event.event_id}", callback=True))
+    assert prompt.text.startswith(
+        "Эта кнопка нужна для рассылки оргинформации всем подтвердившимся на игру игрокам, "
+        "включая подтвердившихся в запас"
+    )
 
-    stale_button = await engine.handle(inbound(4, CHANGE_STATUS, callback=True))
+    stale_button = await engine.handle(inbound(5, CHANGE_STATUS, callback=True))
     assert "кнопка устарела" in stale_button.text.casefold()
     assert stale_button.buttons == prompt.buttons
     assert not publisher.commands
 
-    queued = await engine.handle(inbound(5, "https://t.me/+GameChat_123"))
+    preview = await engine.handle(inbound(6, "Сбор в 18:30"))
+    assert "Получателей: 0" in preview.text
+    assert (
+        f"Это сообщение было разослано всем подтвердившимся на игру {event.name}: ***\n\nСбор в 18:30" in preview.text
+    )
+    queued = await engine.handle(inbound(7, "admin:notification:confirm", callback=True))
     assert queued.deferred
     command = publisher.commands[-1]
     assert command.operation is Operation.SEND_CONFIRMED_NOTIFICATION
     assert isinstance(command.payload, NotificationPayload)
-    assert command.payload.text == "https://t.me/+GameChat_123"
+    assert command.payload.text == "Сбор в 18:30"
+
+
+@pytest.mark.asyncio
+async def test_admin_link_notification_requires_a_chat_link_and_previews_main_roster_count(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.player_amount = 1
+    engine, _, publisher, tables = await engine_setup(disk_store, event, admin=True)
+    for index in range(2):
+        key = f"{index}" * 43
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{index}",
+            participant_key=key,
+            display_name=f"Player {index}",
+            wish_play="A",
+        )
+        await tables.confirm(
+            event.event_id,
+            operation_id=f"confirm-{index}",
+            participant_key=key,
+            character_wish="Doctor",
+        )
+
+    await engine.handle(inbound(1, f"ag:notifications:{event.event_id}", callback=True))
+    prompt = await engine.handle(inbound(2, f"ag:notify-link:{event.event_id}", callback=True))
+    assert "только из корректной ссылки на чат Telegram или VK" in prompt.text
+
+    invalid = await engine.handle(inbound(3, "Чат игры: https://vk.me/join/AJQ1d4V/FAtt9xoXEwCAfx1q"))
+    assert "Пришлите только корректную ссылку-приглашение" in invalid.text
+    assert not publisher.commands
+
+    link = "https://vk.me/join/AJQ1d4V/FAtt9xoXEwCAfx1q"
+    preview = await engine.handle(inbound(4, link))
+    assert "Получателей: 1" in preview.text
+    assert (
+        f"Вы подтвердили своё участие в игре {event.name}! Пожалуйста, добавьтесь в чат игры, "
+        f"мы вас очень ждём: {link}" in preview.text
+    )
+
+    queued = await engine.handle(inbound(5, "admin:notification:confirm", callback=True))
+    assert queued.deferred
+    assert isinstance(publisher.commands[-1].payload, NotificationPayload)
+    assert publisher.commands[-1].payload.text == link
+
+
+@pytest.mark.asyncio
+async def test_information_notification_preview_counts_confirmed_reserve_players(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.player_amount = 1
+    engine, _, _, tables = await engine_setup(disk_store, event, admin=True)
+    for index in range(2):
+        key = f"{index}" * 43
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{index}",
+            participant_key=key,
+            display_name=f"Player {index}",
+            wish_play="A",
+        )
+        await tables.confirm(
+            event.event_id,
+            operation_id=f"confirm-{index}",
+            participant_key=key,
+            character_wish="Doctor",
+        )
+
+    await engine.handle(inbound(1, f"ag:notify-message:{event.event_id}", callback=True))
+    preview = await engine.handle(inbound(2, "Сбор в 18:30"))
+
+    assert "Получателей: 2" in preview.text
 
 
 @pytest.mark.asyncio
