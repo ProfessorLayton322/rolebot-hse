@@ -25,6 +25,9 @@ from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.application.conversation import (
     ADMIN,
     MANAGE_STATISTICS,
+    PAGE_BACK,
+    PAGE_FORWARD,
+    PAGE_SIZE,
     STATS_ADD_GAME,
     STATS_LINKS,
 )
@@ -33,6 +36,7 @@ from larp_bot.application.statistics import StatisticsService, current_season_ye
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
+    Button,
     Event,
     Operation,
     OrderedRegistrationCommand,
@@ -295,6 +299,38 @@ async def test_statistics_admin_menu_picker_and_global_fifo_only_show_active_gam
 
     game_menu = await engine.handle(inbound(6, f"ag:manage:{event.event_id}"))
     assert STATS_ADD_GAME not in {button.label for button in game_menu.buttons}
+
+
+async def test_statistics_game_picker_uses_shared_bidirectional_pagination(event: Event) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        event.model_copy(
+            update={
+                "event_id": f"event-{index:04d}",
+                "name": f"Game {index}",
+                "created_at": base.replace(second=index),
+                "updated_at": base.replace(second=index),
+            }
+        )
+        for index in range(PAGE_SIZE + 1)
+    ]
+    engine, _users, _publisher, _registrations = await engine_setup(
+        MemoryDiskStore(),
+        *events,
+        admin=True,
+    )
+
+    first = await engine.handle(inbound(1, STATS_ADD_GAME))
+    assert len([button for button in first.buttons if button.value.startswith("stats:game:")]) == PAGE_SIZE
+    assert PAGE_BACK not in {button.label for button in first.buttons}
+
+    second = await engine.handle(
+        inbound(2, next(button.value for button in first.buttons if button.label == PAGE_FORWARD), callback=True)
+    )
+    assert len([button for button in second.buttons if button.value.startswith("stats:game:")]) == 1
+    assert PAGE_BACK in {button.label for button in second.buttons}
+    assert PAGE_FORWARD not in {button.label for button in second.buttons}
+    assert second.buttons[-1] == Button(label="Отмена", value=MANAGE_STATISTICS)
 
 
 async def test_statistics_actions_are_denied_to_moderators_even_with_forged_callbacks(event: Event) -> None:
