@@ -131,6 +131,15 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 
+    async def set_player_amount(self, event_id: str, player_amount: int) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        changed = event.player_amount != player_amount
+        event.player_amount = player_amount
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return changed
+
     async def open_confirmation(self, event_id: str, deadline: datetime) -> bool:
         event = self.rows.get(event_id)
         if event is None:

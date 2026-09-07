@@ -86,6 +86,7 @@ class Operation(StrEnum):
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
+    UPDATE_PLAYER_AMOUNT = "UPDATE_PLAYER_AMOUNT"
     REMOVE_PARTICIPANT = "REMOVE_PARTICIPANT"
     REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
     CLOSE_EVENT = "CLOSE_EVENT"
@@ -409,6 +410,10 @@ class NotificationPayload(StrictModel):
         return normalized
 
 
+class PlayerAmountPayload(StrictModel):
+    player_amount: int = Field(ge=1, le=MAX_PLAYER_AMOUNT)
+
+
 class StatisticsPayload(StrictModel):
     action: Literal["game", "link"]
     game_id: str | None = None
@@ -425,6 +430,7 @@ CommandPayload = (
     | CharacterWishPayload
     | ConfirmationDeadlinePayload
     | NotificationPayload
+    | PlayerAmountPayload
     | StatisticsPayload
     | EmptyPayload
 )
@@ -476,6 +482,8 @@ class OrderedRegistrationCommand(StrictModel):
             self.payload, NotificationPayload
         ):
             raise ValueError("SEND_CONFIRMED_NOTIFICATION requires NotificationPayload")
+        if self.operation is Operation.UPDATE_PLAYER_AMOUNT and not isinstance(self.payload, PlayerAmountPayload):
+            raise ValueError("UPDATE_PLAYER_AMOUNT requires PlayerAmountPayload")
         empty_payload_operations = {
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,

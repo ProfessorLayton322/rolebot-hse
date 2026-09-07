@@ -131,6 +131,18 @@ async def test_event_creation_atomically_seeds_platform_specific_leaders() -> No
 
 
 @pytest.mark.asyncio
+async def test_player_amount_is_updated_on_existing_event() -> None:
+    executor = RecordingExecutor([event_row("CREATED")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.set_player_amount("event-a1", 24)
+
+    assert "player_amount = $player_amount" in executor.query_text
+    assert executor.params["$event_id"] == "event-a1"
+    assert executor.params["$player_amount"] == 24
+
+
+@pytest.mark.asyncio
 async def test_reserve_promotion_operation_and_participant_are_persisted_together() -> None:
     executor = RecordingExecutor([])
     repository = YdbEventRepository(executor)  # type: ignore[arg-type]

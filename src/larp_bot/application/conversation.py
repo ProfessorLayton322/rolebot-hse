@@ -25,6 +25,7 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     PassDetails,
     Platform,
+    PlayerAmountPayload,
     Registration,
     ReplyContext,
     StatisticsPayload,
@@ -73,6 +74,7 @@ KEEP = "Оставить без изменений"
 SKIP = "Пропустить"
 NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
+CHANGE_PLAYER_AMOUNT = "👥 Изменить количество игроков"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
@@ -130,6 +132,7 @@ ADMIN_ACTIONS = frozenset(
         ARCHIVED_GAMES,
         EVENT_TABLES,
         CHANGE_STATUS,
+        CHANGE_PLAYER_AMOUNT,
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_NOTIFICATION,
         LIST_WAITING_PLAYERS,
@@ -167,6 +170,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "CHARACTER_EDIT",
         "ADMIN_CREATE_NAME",
         "ADMIN_CREATE_PLAYER_AMOUNT",
+        "ADMIN_UPDATE_PLAYER_AMOUNT",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_TEXT",
         "ADMIN_GAMEMASTER_PROFILE",
@@ -1693,6 +1697,7 @@ class ConversationEngine:
             return BotResponse(text="Недостаточно прав.")
         event_bound_states = {
             "ADMIN_STATUS_SELECT",
+            "ADMIN_UPDATE_PLAYER_AMOUNT",
             "ADMIN_CONFIRMATION_DEADLINE",
             "ADMIN_NOTIFICATION_TEXT",
             "ADMIN_ARCHIVE_NAME",
@@ -1818,6 +1823,33 @@ class ConversationEngine:
                     "но пока не могут подтверждать участие."
                 ),
                 buttons=[game_management_button(event.event_id)],
+            )
+        if user.dialog_state == "ADMIN_UPDATE_PLAYER_AMOUNT":
+            raw_amount = value.strip()
+            if not raw_amount.isdecimal():
+                return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
+            player_amount = int(raw_amount)
+            if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
+                return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
+            context = user.dialog_context.copy()
+            await self._clear(user)
+            await self.registrations.enqueue(
+                operation=Operation.UPDATE_PLAYER_AMOUNT,
+                event_id=str(context["event_id"]),
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=PlayerAmountPayload(player_amount=player_amount),
+                reply_context=ReplyContext(
+                    text_success=(f"Количество игроков игры «{context['event_name']}» изменено: {player_amount}."),
+                    buttons=[game_management_button(str(context["event_id"]))],
+                ),
+                idempotency_key=f"{message.update_id}:{Operation.UPDATE_PLAYER_AMOUNT.value}",
+            )
+            return BotResponse(
+                text="⏳ Изменение количества игроков принято в обработку.",
+                buttons=[game_management_button(str(context["event_id"]))],
+                deferred=True,
+                command_enqueued=True,
             )
         if user.dialog_state == "ADMIN_STATUS_SELECT":
             choice = ADMIN_STATUS_CHOICES.get(value)
@@ -2732,6 +2764,7 @@ class ConversationEngine:
             )
         actions = [
             (CHANGE_STATUS, "status"),
+            (CHANGE_PLAYER_AMOUNT, "player-amount"),
             (SEND_CONFIRMATION_REMINDER, "remind"),
             (SEND_CONFIRMED_NOTIFICATION, "notify"),
             (LIST_WAITING_PLAYERS, "waiting"),
@@ -2793,6 +2826,15 @@ class ConversationEngine:
         if action == "status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
             return _admin_status_response(event.name, event.status, event.event_id)
+        if action == "player-amount":
+            user.dialog_state = "ADMIN_UPDATE_PLAYER_AMOUNT"
+            return BotResponse(
+                text=(
+                    f"Текущее количество игроков: {event.player_amount}.\n\n"
+                    f"Введите новое количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):"
+                ),
+                buttons=[game_management_button(event.event_id)],
+            )
         if action == "remind":
             await self._clear(user)
             if event.status is not EventStatus.CONFIRMATION_OPEN:
@@ -2933,6 +2975,7 @@ class ConversationEngine:
             return BotResponse(text="Введите название игры:")
         if value == MANAGE_GAMES or value in {
             CHANGE_STATUS,
+            CHANGE_PLAYER_AMOUNT,
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_NOTIFICATION,
             LIST_WAITING_PLAYERS,

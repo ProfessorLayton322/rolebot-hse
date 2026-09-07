@@ -8,6 +8,7 @@ from larp_bot.domain.models import (
     Event,
     EventStatus,
     PassDetails,
+    PlayerAmountPayload,
     Registration,
     TelegramUser,
     VkUser,
@@ -101,6 +102,12 @@ def test_event_has_exactly_three_states_and_starts_before_confirmation() -> None
     assert event.player_amount > 0
     with pytest.raises(ValidationError):
         event.player_amount = 0
+
+
+@pytest.mark.parametrize("value", [0, 10_001])
+def test_player_amount_payload_enforces_game_capacity_bounds(value: int) -> None:
+    with pytest.raises(ValidationError):
+        PlayerAmountPayload(player_amount=value)
 
 
 def test_russian_pass_profile_keeps_latin_fields_blank_and_uses_dash_for_no_patronym() -> None:

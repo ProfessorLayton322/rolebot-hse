@@ -33,6 +33,7 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     PassDetails,
     Platform,
+    PlayerAmountPayload,
     Registration,
     TelegramUser,
 )
@@ -43,7 +44,12 @@ from tests.conftest import MemoryDiskStore
 def command(
     event: Event,
     operation: Operation,
-    payload: EnlistPayload | CharacterWishPayload | ConfirmationDeadlinePayload | NotificationPayload | EmptyPayload,
+    payload: EnlistPayload
+    | CharacterWishPayload
+    | ConfirmationDeadlinePayload
+    | NotificationPayload
+    | PlayerAmountPayload
+    | EmptyPayload,
     *,
     key: str = "a" * 43,
 ) -> OrderedRegistrationCommand:
@@ -61,6 +67,7 @@ def command(
                 Operation.OPEN_CONFIRMATION,
                 Operation.SEND_CONFIRMATION_REMINDER,
                 Operation.SEND_CONFIRMED_NOTIFICATION,
+                Operation.UPDATE_PLAYER_AMOUNT,
                 Operation.REMOVE_WAITING_PARTICIPANTS,
                 Operation.CLOSE_EVENT,
                 Operation.ARCHIVE_EVENT,
@@ -153,6 +160,53 @@ async def test_worker_allows_admin_privileged_mutation_without_event_master_memb
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
     assert stored_event.confirmed_notifications == ["Администраторское уведомление"]
+
+
+@pytest.mark.asyncio
+async def test_player_amount_change_is_retryable_and_moves_reserve_row_in_both_tables(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    public_path = f"disk:/larp-bot/events/{event.event_id}/public_table_{event.name}.xlsx"
+    event = event.model_copy(
+        update={
+            "player_amount": 4,
+            "public_table_resource_path": public_path,
+            "public_table_public_url": "https://disk.example/public-table",
+        }
+    )
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    await showcase.create_public_event_workbook(public_path, player_amount=event.player_amount)
+    for index in range(3):
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{index}",
+            participant_key=str(index) * 43,
+            display_name=f"Игрок {index + 1}",
+            wish_play="Без пожеланий",
+        )
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    update = command(event, Operation.UPDATE_PLAYER_AMOUNT, PlayerAmountPayload(player_amount=2))
+
+    result = await mutations.apply(update)
+    await mutations.apply(update)
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.player_amount == 2
+    assert result.text == "Количество игроков изменено: 2"
+    for path in (event.disk_resource_path, public_path):
+        workbook = load_workbook(BytesIO(disk_store.files[path]))
+        try:
+            assert workbook.active.cell(4, 1).value == "ЗАПАС"
+            assert workbook.active.cell(5, 1).value == 3
+            assert workbook.active.cell(5, 2).value == "Игрок 3"
+        finally:
+            workbook.close()
+        assert disk_store.replace_count[path] == 2
 
 
 @pytest.mark.asyncio
