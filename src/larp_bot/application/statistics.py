@@ -6,7 +6,11 @@ from collections.abc import Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from larp_bot.adapters.google_drive.statistics import ATTENDANCE_FILE_NAME, GoogleDriveStatisticsRepository
+from larp_bot.adapters.google_drive.statistics import (
+    ATTENDANCE_FILE_NAME,
+    MASTER_STATISTICS_FILE_NAME,
+    GoogleDriveStatisticsRepository,
+)
 from larp_bot.adapters.google_drive.statistics_workbook import StatisticsWorkbook
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -33,12 +37,14 @@ class StatisticsService:
     def __init__(
         self,
         repository: GoogleDriveStatisticsRepository,
+        master_repository: GoogleDriveStatisticsRepository,
         admins: AdminConfigProvider,
         administration: EventAdministrationService,
         registrations: RegistrationService,
         season_year: Callable[[], int] = current_season_year,
     ) -> None:
         self.repository = repository
+        self.master_repository = master_repository
         self.admins = admins
         self.administration = administration
         self.registrations = registrations
@@ -80,9 +86,12 @@ class StatisticsService:
         payload = command.payload
         assert isinstance(payload, StatisticsPayload)
         if payload.action == "link":
+            player_link = await self.repository.link()
+            master_link = await self.master_repository.link()
             return (
                 "Ссылки на таблицы статистики\n\n"
-                f"Посещаемость игроков — {ATTENDANCE_FILE_NAME}:\n{await self.repository.link()}"
+                f"Посещаемость игроков — {ATTENDANCE_FILE_NAME}:\n{player_link}\n\n"
+                f"Участие мастеров — {MASTER_STATISTICS_FILE_NAME}:\n{master_link}"
             )
         assert payload.game_id is not None
         event = await self.administration.events.get(payload.game_id)
@@ -91,28 +100,51 @@ class StatisticsService:
         if event.archived_at is not None:
             raise DomainError("Игра уже архивирована и не может быть добавлена в статистику.")
         await self.administration.catalog.ensure_migrated(event)
-        registrations = await self.administration.catalog.registrations.list_for_event(event.event_id)
+        registrations, leaders, users = await asyncio.gather(
+            self.administration.catalog.registrations.list_for_event(event.event_id),
+            self.administration.events.list_leaders(event.event_id),
+            self.administration.users.list_all(),
+        )
         # Full names are stored as two or three Cyrillic parts by the shared profile flow.
         # Keep the registration snapshot so subsequent profile edits cannot rename history.
         players = [r.display_name for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED]
+        users_by_identity = {self._identity(user): user for user in users}
+        masters: list[str] = []
+        for leader in leaders:
+            user = users_by_identity.get((leader.platform, leader.platform_user_id))
+            if user is None or user.full_name is None:
+                raise DomainError("Не удалось найти профили всех мастеров игры.")
+            masters.append(user.full_name)
         season_year = self.season_year()
 
-        def transform(book: StatisticsWorkbook) -> bytes | None:
-            if book.season_name == f"{season_year}-{season_year + 1}" and book.has_game(event.name):
-                return None
-            invalid = [name for name in players if not re.fullmatch(r"[А-ЯЁа-яё-]+(?:\s+[А-ЯЁа-яё-]+)+", name.strip())]
+        def validate_names(names: list[str], role: str) -> None:
+            invalid = [name for name in names if not re.fullmatch(r"[А-ЯЁа-яё-]+(?:\s+[А-ЯЁа-яё-]+)+", name.strip())]
             if invalid:
                 raise DomainError(
-                    "У подтвердивших игроков отсутствует корректная фамилия и имя кириллицей: " + ", ".join(invalid[:5])
+                    f"У {role} отсутствует корректная фамилия и имя кириллицей: " + ", ".join(invalid[:5])
                 )
+
+        validate_names(players, "подтвердивших игроков")
+        validate_names(masters, "мастеров игры")
+
+        def player_transform(book: StatisticsWorkbook) -> bytes | None:
             return book.add_game(season_year, event.name, players)
 
-        changed = await self.repository.edit(transform)
+        def master_transform(book: StatisticsWorkbook) -> bytes | None:
+            return book.add_game(season_year, event.name, masters)
+
+        # Fully parse and stage both revisions before replacing either Drive file.
+        # A partial upload is retry-safe because each workbook independently rejects
+        # a game column that is already present in the current season.
+        player_edit = await self.repository.prepare(player_transform)
+        master_edit = await self.master_repository.prepare(master_transform)
+        player_changed = await self.repository.commit(player_edit)
+        master_changed = await self.master_repository.commit(master_edit)
         await self._grant_experience(
             event.event_id,
             {r.participant_key for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED},
             command.operation_id,
         )
-        if not changed:
-            return f"Игра «{event.name}» уже есть в статистике. Таблица не изменена."
+        if not player_changed and not master_changed:
+            return f"Игра «{event.name}» уже есть в статистике. Таблицы не изменены."
         return f"Игра «{event.name}» внесена в статистику сезона {season_year}-{season_year + 1}."

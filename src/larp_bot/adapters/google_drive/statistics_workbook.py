@@ -11,6 +11,7 @@ import re
 from collections.abc import Sequence
 from copy import deepcopy
 from io import BytesIO
+from typing import ClassVar
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
@@ -35,6 +36,21 @@ def normalized_name(value: str) -> str:
 
 
 class StatisticsWorkbook:
+    required_headers: ClassVar[dict[int, str]] = {1: "Игрок", 4: "5 игр", 13: "50 игр"}
+    fixed_column = 13
+    game_column = 14
+    carried_column = 3
+    total_column = 2
+    award_column = 4
+    footer_titles: ClassVar[tuple[str, ...]] = (
+        "Всего",
+        "Участники сезона",
+        "Новички",
+        "Активные игроки сезона",
+    )
+    layout_error = "Нужна XLSX-таблица с сезонным листом, колонками Игрок, итоги и 5–50 игр."
+    skip_nonblank_game_formatting = True
+
     def __init__(self, content: bytes) -> None:
         self.original = content
         try:
@@ -59,7 +75,7 @@ class StatisticsWorkbook:
                 self.strings = ["".join(t.text or "" for t in s.iter(tag("t"))) for s in strings]
             self.rows = {int(r.attrib["r"]): r for r in self.data}
             self.cells = {c.attrib["r"]: c for r in self.data for c in r}
-            if self.value("A1") != "Игрок" or self.value("D1") != "5 игр" or self.value("M1") != "50 игр":
+            if any(self.value(f"{get_column_letter(col)}1") != value for col, value in self.required_headers.items()):
                 raise ValueError("unsupported layout")
             self.last_column = max(
                 column_index_from_string(re.sub(r"\d", "", c.attrib["r"]))
@@ -72,17 +88,12 @@ class StatisticsWorkbook:
                     continue
                 name = self.value(f"A{row}")
                 cell = self.cells.get(f"A{row}")
-                if not isinstance(name, str) or name in {
-                    "Всего",
-                    "Участники сезона",
-                    "Новички",
-                    "Активные игроки сезона",
-                }:
+                if not isinstance(name, str) or name in self.footer_titles:
                     break
                 if cell is not None and cell.find(tag("f")) is not None:
                     break
                 self.last_player = row
-            footer_labels = {"Всего", "Участники сезона", "Новички", "Активные игроки сезона"}
+            footer_labels = set(self.footer_titles)
             for index, xml_row in self.rows.items():
                 if index <= self.last_player:
                     continue
@@ -94,10 +105,23 @@ class StatisticsWorkbook:
                 name = self.value(f"A{index}")
                 cell = self.cells.get(f"A{index}")
                 exported_total = index == self.last_player + 1 and cell is not None and cell.find(tag("f")) is not None
-                if index > self.last_player + 4 or (name not in footer_labels and not exported_total):
+                if index > self.last_player + len(self.footer_titles) or (
+                    name not in footer_labels and not exported_total
+                ):
                     raise ValueError("unexpected data below player rows")
+            style_game_column = self.game_column if self.last_column >= self.game_column else self.fixed_column
+            self.player_styles = {col: self.style(2, col) for col in range(1, self.fixed_column + 1)}
+            self.game_header_style = self.style(1, style_game_column)
+            self.game_cell_style = self.style(2, style_game_column)
+            summary = self.last_player + 1
+            self.footer_styles = {
+                (offset, col): self.style(summary + offset, col)
+                for offset in range(len(self.footer_titles))
+                for col in range(1, self.last_column + 1)
+                if f"{get_column_letter(col)}{summary + offset}" in self.cells
+            }
         except (BadZipFile, KeyError, ValueError, AssertionError, StopIteration, ET.ParseError) as exc:
-            raise DomainError("Нужна XLSX-таблица с сезонным листом, колонками Игрок, итоги и 5–50 игр.") from exc
+            raise DomainError(self.layout_error) from exc
 
     def value(self, address: str) -> str | float | bool | None:
         cell = self.cells.get(address)
@@ -130,8 +154,9 @@ class StatisticsWorkbook:
         raise DomainError(f"Нет числового результата в {self.season.attrib['name']}!{address}. Пересчитайте XLSX.")
 
     def total(self, row: int) -> float:
-        return self.number(f"C{row}") + sum(
-            self.number(f"{get_column_letter(c)}{row}", sum_cell=True) for c in range(14, self.last_column + 1)
+        return self.number(f"{get_column_letter(self.carried_column)}{row}") + sum(
+            self.number(f"{get_column_letter(c)}{row}", sum_cell=True)
+            for c in range(self.game_column, self.last_column + 1)
         )
 
     def set_cell(
@@ -159,6 +184,19 @@ class StatisticsWorkbook:
                 cell.set("t", "b")
             ET.SubElement(cell, tag("v")).text = str(int(value) if isinstance(value, bool) else value)
 
+    def set_blank_cell(self, row: int, col: int, *, style: str) -> None:
+        address = f"{get_column_letter(col)}{row}"
+        if row not in self.rows:
+            self.rows[row] = ET.SubElement(self.data, tag("row"), r=str(row))
+        cell = self.cells.get(address)
+        if cell is None:
+            cell = ET.SubElement(self.rows[row], tag("c"), r=address)
+            self.cells[address] = cell
+        cell.set("s", style)
+        cell.attrib.pop("t", None)
+        for child in list(cell):
+            cell.remove(child)
+
     def style(self, row: int, col: int) -> str:
         cell = self.cells.get(f"{get_column_letter(col)}{row}")
         return cell.get("s", "0") if cell is not None else "0"
@@ -166,7 +204,7 @@ class StatisticsWorkbook:
     def has_game(self, name: str) -> bool:
         return any(
             normalized_name(str(self.value(f"{get_column_letter(c)}1") or "")) == normalized_name(name)
-            for c in range(14, self.last_column + 1)
+            for c in range(self.game_column, self.last_column + 1)
         )
 
     def has_any_player(self, names: Sequence[str]) -> bool:
@@ -190,6 +228,31 @@ class StatisticsWorkbook:
             return None
         return self.mark_game(name, players)
 
+    def carried_header(self, year: int) -> str:
+        return f"Игр на 01.09.{year}"
+
+    def new_player_value(self, col: int, name: str) -> str | float | bool:
+        if col == 1:
+            return name
+        if col >= self.award_column:
+            return False
+        return 0
+
+    def footer_style(self, offset: int, col: int) -> str:
+        exact = self.footer_styles.get((offset, col))
+        if exact is not None:
+            return exact
+        if col >= self.game_column:
+            game_style = self.footer_styles.get((offset, self.game_column))
+            if game_style is not None:
+                return game_style
+        return self.style(1, min(col, self.fixed_column))
+
+    def prepare_footer(self, summary: int) -> None:
+        for offset in range(len(self.footer_titles)):
+            for col in range(1, self.last_column + 1):
+                self.set_blank_cell(summary + offset, col, style=self.footer_style(offset, col))
+
     def new_season(self, year: int) -> bytes | None:
         title = f"{year}-{year + 1}"
         if any(s.attrib["name"] == title for s in self.sheets):
@@ -205,13 +268,13 @@ class StatisticsWorkbook:
                 self.rows.pop(index, None)
             else:
                 for cell in list(xml_row):
-                    if column_index_from_string(re.sub(r"\d", "", cell.attrib["r"])) > 13:
+                    if column_index_from_string(re.sub(r"\d", "", cell.attrib["r"])) > self.fixed_column:
                         xml_row.remove(cell)
         self.cells = {c.attrib["r"]: c for r in self.data for c in r}
-        self.set_cell(1, 3, f"Игр на 01.09.{year}")
+        self.set_cell(1, self.carried_column, self.carried_header(year))
         for row, total in totals.items():
-            self.set_cell(row, 3, total)
-        self.last_column = 13
+            self.set_cell(row, self.carried_column, total)
+        self.last_column = self.fixed_column
         # A new sheet must not inherit relationships to old comments/drawings.
         for node in list(self.sheet):
             if node.tag not in {
@@ -233,10 +296,10 @@ class StatisticsWorkbook:
         columns = self.sheet.find(tag("cols"))
         if columns is not None:
             for col in list(columns):
-                if int(col.attrib["min"]) > 13:
+                if int(col.attrib["min"]) > self.fixed_column:
                     columns.remove(col)
-                elif int(col.attrib["max"]) > 13:
-                    col.set("max", "13")
+                elif int(col.attrib["max"]) > self.fixed_column:
+                    col.set("max", str(self.fixed_column))
         index = max(int(s.attrib["sheetId"]) for s in self.sheets) + 1
         self.path = f"xl/worksheets/statsSeason{index}.xml"
         rid = f"statsSeason{index}"
@@ -270,8 +333,8 @@ class StatisticsWorkbook:
         for row in range(2, self.last_player + 1):
             lookup.setdefault(normalized_name(str(self.value(f"A{row}"))), []).append(row)
         self.last_column += 1
-        self.set_cell(1, self.last_column, name, style=self.style(1, 13))
-        # Rebuild the four known summary rows below the extended player list.
+        self.set_cell(1, self.last_column, name, style=self.game_header_style)
+        # Rebuild the known summary rows below the extended participant list.
         for xml_row in list(self.data):
             index = int(xml_row.attrib["r"])
             if index > self.last_player:
@@ -285,11 +348,10 @@ class StatisticsWorkbook:
                 self.last_player += 1
                 row = self.last_player
                 lookup[key] = [row]
-                for col in range(1, 14):
-                    value: str | float | bool = player if col == 1 else False if col >= 4 else 0
-                    self.set_cell(row, col, value, style=self.style(2, col))
+                for col in range(1, self.fixed_column + 1):
+                    self.set_cell(row, col, self.new_player_value(col, player), style=self.player_styles[col])
             for row in lookup[key]:
-                self.set_cell(row, self.last_column, 1, style=self.style(2, 14))
+                self.set_cell(row, self.last_column, 1, style=self.game_cell_style)
         self.refresh()
         return self.save()
 
@@ -298,22 +360,35 @@ class StatisticsWorkbook:
         end = get_column_letter(self.last_column)
         totals = {row: self.total(row) for row in range(2, last + 1)}
         for row, total in totals.items():
-            formula = f"C{row}+SUM(N{row}:{end}{row})" if self.last_column >= 14 else f"C{row}"
-            self.set_cell(row, 2, total, formula=formula)
+            formula = (
+                f"C{row}+SUM({get_column_letter(self.game_column)}{row}:{end}{row})"
+                if self.last_column >= self.game_column
+                else f"C{row}"
+            )
+            self.set_cell(row, self.total_column, total, formula=formula)
         summary = last + 1
-        for offset, title in enumerate(("Всего", "Участники сезона", "Новички", "Активные игроки сезона")):
-            self.set_cell(summary + offset, 1, title, style=self.style(1, 1))
+        self.prepare_footer(summary)
+        for offset, title in enumerate(self.footer_titles):
+            self.set_cell(summary + offset, 1, title, style=self.footer_style(offset, 1))
         for col in (2, 3):
             letter = get_column_letter(col)
             count = sum(self.number(f"{letter}{row}") > 0 for row in totals)
             self.set_cell(
-                summary, col, count, style=self.style(1, col), formula=f'COUNTIF({letter}2:{letter}{last},">0")'
+                summary,
+                col,
+                count,
+                style=self.footer_style(0, col),
+                formula=f'COUNTIF({letter}2:{letter}{last},">0")',
             )
-        for col in range(14, self.last_column + 1):
+        for col in range(self.game_column, self.last_column + 1):
             letter = get_column_letter(col)
             attendance_count = sum(self.number(f"{letter}{row}", sum_cell=True) for row in totals)
             self.set_cell(
-                summary, col, attendance_count, style=self.style(1, col), formula=f"SUM({letter}2:{letter}{last})"
+                summary,
+                col,
+                attendance_count,
+                style=self.footer_style(0, col),
+                formula=f"SUM({letter}2:{letter}{last})",
             )
         for offset, threshold in ((1, 0), (3, 3)):
             count = sum(total > self.number(f"C{row}") + threshold for row, total in totals.items())
@@ -321,50 +396,67 @@ class StatisticsWorkbook:
                 summary + offset,
                 2,
                 count,
-                style=self.style(1, 2),
+                style=self.footer_style(offset, 2),
                 formula=f"SUMPRODUCT(--(B2:B{last}>C2:C{last}+{threshold}))",
             )
         self.set_cell(
             summary + 2,
             2,
             self.number(f"B{summary}") - self.number(f"C{summary}"),
-            style=self.style(1, 2),
+            style=self.footer_style(2, 2),
             formula=f"B{summary}-C{summary}",
         )
-        # Retain rule expressions and differential styles; extend to all players/games.
+        self.refresh_conditional_formatting(last, end)
+        dimension = self.sheet.find(tag("dimension"))
+        if dimension is not None:
+            dimension.set("ref", f"A1:{end}{summary + len(self.footer_titles) - 1}")
+
+    def refresh_conditional_formatting(self, last: int, end: str) -> None:
+        """Retain rule expressions and differential styles while extending their ranges."""
+
+        game_letter = get_column_letter(self.game_column)
+        total_letter = get_column_letter(self.total_column)
         for cf in list(self.sheet.findall(tag("conditionalFormatting"))):
-            if any(rule.get("type") == "notContainsBlanks" for rule in cf):
+            old = cf.get("sqref", "")
+            first = old.split()[0].split(":", 1)[0] if old else ""
+            match = re.fullmatch(r"([A-Z]+)(\d+)", first)
+            if match is None:
+                continue
+            column, _row = match.groups()
+            if (
+                column == game_letter
+                and self.skip_nonblank_game_formatting
+                and any(rule.get("type") == "notContainsBlanks" for rule in cf)
+            ):
                 # The template limits this extra green rule to its first two
                 # games. Extending it would also paint text such as ❌ green.
                 continue
-            old = cf.get("sqref", "")
-            first = old.split(":", 1)[0]
-            if re.fullmatch(r"A\d+", first):
+            if column == "A":
                 cf.set("sqref", f"A2:A{last}")
-            elif re.fullmatch(r"B\d+", first):
-                cf.set("sqref", f"B1:B{last}")
-            elif self.last_column < 14:
+            elif column == total_letter:
+                cf.set("sqref", f"{total_letter}1:{total_letter}{last}")
+            elif column != game_letter:
+                continue
+            elif self.last_column < self.game_column:
                 # Keep dormant formatting for the first future game without adding cells.
-                cf.set("sqref", f"N2:N{last}")
+                cf.set("sqref", f"{game_letter}2:{game_letter}{last}")
                 for cf_formula in cf.iter(tag("formula")):
-                    cf_formula.text = re.sub(r"\b[A-Z]+2\b", "N2", cf_formula.text or "")
+                    cf_formula.text = re.sub(r"\b[A-Z]+2\b", f"{game_letter}2", cf_formula.text or "")
             else:
-                cf.set("sqref", f"N2:{end}{last}")
+                cf.set("sqref", f"{game_letter}2:{end}{last}")
                 for cf_formula in cf.iter(tag("formula")):
-                    cf_formula.text = re.sub(r"\b[A-Z]+2\b", "N2", cf_formula.text or "")
-        if self.last_column >= 14 and not any(
-            cf.get("sqref", "").startswith("N2:") for cf in self.sheet.findall(tag("conditionalFormatting"))
+                    cf_formula.text = re.sub(r"\b[A-Z]+2\b", f"{game_letter}2", cf_formula.text or "")
+        if self.last_column >= self.game_column and not any(
+            cf.get("sqref", "").startswith(f"{game_letter}2:")
+            for cf in self.sheet.findall(tag("conditionalFormatting"))
         ):
             # New seasons obtain the same green/yellow attendance rules as their source.
             source = ET.fromstring(self.parts[self._source_path()])  # noqa: S314
             for cf in source.findall(tag("conditionalFormatting")):
-                if cf.get("sqref", "").startswith("N"):
+                if cf.get("sqref", "").startswith(game_letter):
                     clone = deepcopy(cf)
-                    clone.set("sqref", f"N2:{end}{last}")
+                    clone.set("sqref", f"{game_letter}2:{end}{last}")
                     self._insert_cf(clone)
-        dimension = self.sheet.find(tag("dimension"))
-        if dimension is not None:
-            dimension.set("ref", f"A1:{end}{summary + 3}")
 
     def _source_path(self) -> str:
         # Current sheet for a game update; original latest season for a new one.
@@ -386,3 +478,84 @@ class StatisticsWorkbook:
             for name, content in self.parts.items():
                 archive.writestr(name, content)
         return output.getvalue()
+
+
+class MasterStatisticsWorkbook(StatisticsWorkbook):
+    """Edit the separate gamemaster workbook without rewriting historical sheets."""
+
+    required_headers: ClassVar[dict[int, str]] = {
+        1: "Мастер",
+        2: "Участие в сезоне",
+        3: "Игр на начало сезона",
+        4: "Игр на текущий момент",
+        5: "1 игра",
+        6: "5 игр",
+        12: "35 игр",
+    }
+    fixed_column = 12
+    game_column = 13
+    carried_column = 3
+    total_column = 4
+    award_column = 5
+    footer_titles: ClassVar[tuple[str, ...]] = ("Всего", "Участники сезона", "Новички")
+    layout_error = "Нужна XLSX-таблица мастеров с сезонным листом, итогами, отметками 1–35 игр и колонками игр."
+    skip_nonblank_game_formatting = False
+
+    def carried_header(self, year: int) -> str:
+        return "Игр на начало сезона"
+
+    def refresh(self) -> None:
+        last = self.last_player
+        end = get_column_letter(self.last_column)
+        game_letter = get_column_letter(self.game_column)
+        totals = {row: self.total(row) for row in range(2, last + 1)}
+        season_totals: dict[int, float] = {}
+        for row, total in totals.items():
+            carried = self.number(f"C{row}")
+            season_total = total - carried
+            season_totals[row] = season_total
+            total_formula = (
+                f"C{row}+SUM({game_letter}{row}:{end}{row})" if self.last_column >= self.game_column else f"C{row}"
+            )
+            self.set_cell(row, 2, season_total, formula=f"D{row}-C{row}")
+            self.set_cell(row, 4, total, formula=total_formula)
+
+        summary = last + 1
+        self.prepare_footer(summary)
+        for offset, title in enumerate(self.footer_titles):
+            self.set_cell(summary + offset, 1, title, style=self.footer_style(offset, 1))
+        self.set_cell(
+            summary,
+            2,
+            len(totals),
+            style=self.footer_style(0, 2),
+            formula=f'COUNTIF(B2:B{last},">=0")',
+        )
+        for col in range(self.game_column, self.last_column + 1):
+            letter = get_column_letter(col)
+            attendance_count = sum(self.number(f"{letter}{row}", sum_cell=True) for row in totals)
+            self.set_cell(
+                summary,
+                col,
+                attendance_count,
+                style=self.footer_style(0, col),
+                formula=f"SUM({letter}2:{letter}{last})",
+            )
+        self.set_cell(
+            summary + 1,
+            2,
+            sum(total > 0 for total in season_totals.values()),
+            style=self.footer_style(1, 2),
+            formula=f'COUNTIF(B2:B{last},">0")',
+        )
+        self.set_cell(
+            summary + 2,
+            2,
+            sum(self.number(f"C{row}") == 0 for row in totals),
+            style=self.footer_style(2, 2),
+            formula=f'COUNTIF(C2:C{last},"=0")',
+        )
+        self.refresh_conditional_formatting(last, end)
+        dimension = self.sheet.find(tag("dimension"))
+        if dimension is not None:
+            dimension.set("ref", f"A1:{end}{summary + len(self.footer_titles) - 1}")

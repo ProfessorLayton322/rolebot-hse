@@ -20,7 +20,7 @@ flowchart LR
     WORKER --> FIFO
     WORKER --> YDB
     WORKER --> DISK[Yandex Disk master + public XLSX showcases]
-    WORKER --> GDRIVE[Google Drive attendance statistics XLSX]
+    WORKER --> GDRIVE[Google Drive player and master statistics XLSX]
     GW --> CFE[Cloudflare telegram-egress + runtime config]
     WORKER --> CFE
     CFE --> TGAPI[Telegram Bot API]
@@ -138,14 +138,14 @@ Russian citizens provide only Cyrillic name fields; their Latin cells are blank.
 
 Admins can create a pass table for any game, and admins or that game's masters can reopen its stored table links. The pass table contains every YDB registration in `Подтверждено` whose current YDB profile requests a pass, plus every master of the game whose current profile requests one. A master does not need a player registration to appear, and a person who is both a confirmed player and a master appears only once. Administrators appear under exactly the same membership rule: being a bot administrator alone never adds them to the pass table. Confirmation, cancellation, master-list changes, and later table access regenerate and overwrite the same deterministic resource at `disk:/larp-bot/passes/<event_id>.xlsx`, so its stored public Yandex Disk URL remains unchanged. Both the resource and link remain permanently with the archived game.
 
-Attendance statistics use exactly one existing binary XLSX in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx`. Share the folder and file with the service account's `client_email` as an editor, keep exactly one non-trashed file with that name in the folder, and do not rename or replace it. The bot downloads and updates the content of the same Drive file ID, so its name and `webViewLink` remain permanent while Google Drive retains revision history. The bot does not create source copies or backup files.
+Statistics use exactly two existing binary XLSX files in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx` and `master_statistics.xlsx`. Share the folder and both files with the service account's `client_email` as an editor, keep exactly one non-trashed file with each name in the folder, and do not rename or replace them. The bot downloads and updates the content of the same Drive file IDs, so their names and `webViewLink` values remain permanent while Google Drive retains revision history. The bot does not create source copies or backup files.
 
 Configured administrators see one `Управление статистикой` entry. Its submenu contains:
 
-- `Ссылки на таблицы статистики`: returns a labeled list of permanent Google Drive links. The list currently contains the player attendance workbook and is structured to accept more workbooks later.
-- `Добавить игру в статистику`: opens a paginated picker containing only unarchived games. Selecting a game adds its name as a column and writes `1` for confirmed registrations. Waiting and cancelled registrations are excluded; the bot has no separate check-in status. Names come from the registration's Cyrillic full-name snapshot. Matching ignores case, extra whitespace, and the difference between ё/е. Missing players are appended before the summaries; matching duplicate rows are all marked.
+- `Ссылки на таблицы статистики`: returns labeled permanent Google Drive links for both the player-attendance and master-participation workbooks.
+- `Добавить игру в статистику`: opens a paginated picker containing only unarchived games. In the same FIFO operation, selecting a game adds its name to both workbooks. The player workbook writes `1` for confirmed registrations; waiting and cancelled registrations are excluded because the bot has no separate check-in status. The master workbook writes `1` for every current event leader, including a leader who is not registered as a player. Player names come from the registration's Cyrillic full-name snapshot, while master names come from their current profiles. Matching ignores case, extra whitespace, and the difference between ё/е. Missing people are appended before the summaries; matching duplicate rows are all marked.
 
-The season is derived at processing time in Moscow: September through December belongs to the season starting that calendar year, while January through August belongs to the season starting the previous year. Thus September 2026 through August 2027 is `2026-2027`. When a game is added, the workbook editor uses the latest seasonal sheet if it is current; otherwise it first appends the current season, carrying players, lifetime totals, and milestone flags while leaving older sheets intact. If the game-name column already exists in the current season, the operation reports that it was already added and performs no upload. This makes retries addition-only and idempotent even if the first Drive response was interrupted after the revision was committed.
+The season is derived at processing time in Moscow: September through December belongs to the season starting that calendar year, while January through August belongs to the season starting the previous year. Thus September 2026 through August 2027 is `2026-2027`. For each workbook, the editor uses the latest seasonal sheet if it is current; otherwise it appends a new current-season sheet based on the latest list, carrying names, lifetime totals, milestone flags, styles, and conditional-formatting rules while leaving every older worksheet part intact. Both revisions are fully parsed and staged before either file is uploaded. Each workbook independently skips a game-name column that already exists in its current season, so retries safely complete a partially interrupted two-file update without duplicating the game in either table.
 
 All statistics commands use the same FIFO group, `statistics`, across games and platforms. Both the gateway and ordered worker enforce administrator authorization, and the worker rechecks that the selected game is still unarchived. No new YDB tables are required.
 
@@ -335,7 +335,7 @@ These names are exhaustive for the supplied workflows:
 | `TG_BOT_TOKEN` | BotFather token; installed only in telegram-egress and used by deployment to call `setWebhook` |
 | `TG_WEBHOOK_SECRET` | Random webhook secret using only `A-Z a-z 0-9 _ -`; installed in ingress and passed to `setWebhook` |
 | `YANDEX_DISK_TOKEN` | OAuth token for the dedicated Disk account/folder |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Complete Google service-account JSON document; its `client_email` needs edit access to the configured statistics folder and workbook |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Complete Google service-account JSON document; its `client_email` needs edit access to the configured statistics folder and both workbooks |
 | `VK_ACCESS_TOKEN` | VK community access token with messaging permission |
 | `VK_CALLBACK_SECRET` | Random secret configured identically in VK Callback API |
 | `VK_CONFIRMATION_STRING` | VK's server-confirmation string |
@@ -364,7 +364,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket |
-| `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent `player_attendance_stats.xlsx` file |
+| `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent `player_attendance_stats.xlsx` and `master_statistics.xlsx` files |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 | `TG_GAMEMASTER_IDS` | Public JSON array of Telegram moderator user IDs; moderators have privileged read access and can mutate games where they are masters |
@@ -427,7 +427,7 @@ YANDEX_SERVICE_ACCOUNT_IDS
 
 ## First deployment
 
-1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Google service account, Cloudflare account, and active Yandex billing folder. Put `player_attendance_stats.xlsx` in the configured Google Drive folder and grant that service account edit access without replacing the file later.
+1. Create the Telegram bot, VK community, dedicated Yandex Disk OAuth token, Google service account, Cloudflare account, and active Yandex billing folder. Put `player_attendance_stats.xlsx` and `master_statistics.xlsx` in the configured Google Drive folder and grant that service account edit access without replacing either file later.
 2. Create a private, versioned Object Storage bucket for Terraform state. Create a dedicated state service-account static S3 key and put its two parts in `TF_STATE_*` GitHub Secrets.
 3. Create a Yandex deployment service account with service-specific roles needed to manage IAM accounts/bindings, Functions, API Gateway, YDB, YMQ, Logging, and Smart Web Security, plus `storage.viewer` for the private Function-package bucket. Do not reuse a runtime account.
 4. Create the GitHub OIDC workload identity federation and federated credentials for the exact `production` and `production-plan` environment subjects. Add the twelve GitHub Variables above.
