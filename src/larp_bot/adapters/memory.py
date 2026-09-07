@@ -404,6 +404,30 @@ class MemoryRegistrationRepository:
         registration.updated_at = datetime.now(UTC)
         return True
 
+    async def update_profile(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        display_name: str,
+        larp_experience: bool,
+        crossplay: bool,
+        vk_profile: str,
+        telegram_profile: str | None,
+    ) -> bool:
+        registration = self.rows.get((event_id, participant_key))
+        if registration is None or registration.last_operation_id == operation_id:
+            return False
+        registration.display_name = display_name
+        registration.larp_experience = larp_experience
+        registration.crossplay = crossplay
+        registration.vk_profile = vk_profile
+        registration.telegram_profile = telegram_profile
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(UTC)
+        return True
+
     async def confirm(
         self,
         event_id: str,

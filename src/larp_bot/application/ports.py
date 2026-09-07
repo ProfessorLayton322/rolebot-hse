@@ -151,6 +151,19 @@ class RegistrationRepository(Protocol):
         telegram_profile: str | None = None,
     ) -> bool: ...
 
+    async def update_profile(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        display_name: str,
+        larp_experience: bool,
+        crossplay: bool,
+        vk_profile: str,
+        telegram_profile: str | None,
+    ) -> bool: ...
+
     async def confirm(
         self,
         event_id: str,

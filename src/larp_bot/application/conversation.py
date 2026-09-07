@@ -529,7 +529,7 @@ class ConversationEngine:
     async def _continue(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         state = user.dialog_state
         if state.startswith("PROFILE_"):
-            return await self._profile_step(user, value)
+            return await self._profile_step(user, message, value)
         if state.startswith("ENLIST_"):
             return await self._enlist_step(user, message, value)
         if state == "CONFIRM_WISH":
@@ -543,7 +543,7 @@ class ConversationEngine:
         await self._clear(user)
         return await self._main(user, "Диалог сброшен. Выберите действие:")
 
-    async def _profile_step(self, user: User, value: str) -> BotResponse:
+    async def _profile_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         context = user.dialog_context
         state = user.dialog_state
         if context.get("profile_format") != PROFILE_FORMAT:
@@ -589,7 +589,7 @@ class ConversationEngine:
             if state == "PROFILE_CROSSPLAY":
                 user.dialog_state = "PROFILE_EXPERIENCE"
                 return BotResponse(text="Играли ли вы в LARP до этого?", buttons=yes_no_buttons())
-            return await self._finish_profile(user)
+            return await self._finish_profile(user, message)
         if state == "PROFILE_PASS_FOREIGNER":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
@@ -636,7 +636,7 @@ class ConversationEngine:
             return self._profile_contact_prompt(user)
         raise AssertionError(f"unknown profile state: {state}")
 
-    async def _finish_profile(self, user: User) -> BotResponse:
+    async def _finish_profile(self, user: User, message: InboundMessage) -> BotResponse:
         context = user.dialog_context
         user.full_name = str(context["full_name"])
         user.crossplay = bool(context["crossplay"])
@@ -664,6 +664,16 @@ class ConversationEngine:
         else:
             contact = context.get("contact")
             user.telegram_handle = None if contact is None else str(contact)
+        # Persist the completed profile before publishing per-game commands so
+        # an ordered worker can always project the new values. Keep the current
+        # profile state until every deterministic command has been published;
+        # a failed request can then safely retry the same final answer.
+        await self.users.save(user)
+        await self.registrations.enqueue_profile_updates(
+            message.identity.platform,
+            message.identity.platform_user_id,
+            idempotency_key=message.update_id,
+        )
         await self._clear(user)
         return await self._main(user, "✅ Профиль сохранён.")
 

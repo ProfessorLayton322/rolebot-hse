@@ -69,7 +69,10 @@ class OrderedWorker:
                     raise TypeError("consumer returned an invalid queue envelope")
                 command = raw.command
                 notification_delivered = False
-                notifications_enabled = True
+                # Profile projections are background maintenance. Keep stale
+                # commands (for example, when a game was archived meanwhile)
+                # silent even when worker-time validation rejects them.
+                notifications_enabled = command.operation is not Operation.UPDATE_PROFILE
                 buttons: Sequence[Button] = command.reply_context.buttons
                 try:
                     if command.operation is Operation.STATISTICS:

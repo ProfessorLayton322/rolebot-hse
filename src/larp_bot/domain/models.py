@@ -97,6 +97,7 @@ class AttendanceStatus(StrEnum):
 class Operation(StrEnum):
     STATISTICS = "STATISTICS"
     ENLIST = "ENLIST"
+    UPDATE_PROFILE = "UPDATE_PROFILE"
     CONFIRM = "CONFIRM"
     UPDATE_CHARACTER_WISH = "UPDATE_CHARACTER_WISH"
     CANCEL = "CANCEL"
@@ -484,6 +485,7 @@ class OrderedRegistrationCommand(StrictModel):
                 raise ValueError("STATISTICS requires StatisticsPayload and the global statistics group")
         participant_ops = {
             Operation.ENLIST,
+            Operation.UPDATE_PROFILE,
             Operation.CONFIRM,
             Operation.UPDATE_CHARACTER_WISH,
             Operation.CANCEL,
@@ -506,6 +508,7 @@ class OrderedRegistrationCommand(StrictModel):
         if self.operation is Operation.UPDATE_PLAYER_AMOUNT and not isinstance(self.payload, PlayerAmountPayload):
             raise ValueError("UPDATE_PLAYER_AMOUNT requires PlayerAmountPayload")
         empty_payload_operations = {
+            Operation.UPDATE_PROFILE,
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,
             Operation.OPEN_REGISTRATION,

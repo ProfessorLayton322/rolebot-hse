@@ -794,6 +794,74 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
 
 
 @pytest.mark.asyncio
+async def test_profile_save_queues_projection_updates_for_all_unarchived_participating_games(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    second = event.model_copy(
+        update={
+            "event_id": "event-second",
+            "disk_resource_path": "disk:/larp-bot/events/event-second/master_table_second.xlsx",
+            "public_registration_url": "https://disk.example/second",
+            "created_at": event.created_at + timedelta(seconds=1),
+        }
+    )
+    archived = event.model_copy(
+        update={
+            "event_id": "event-archived",
+            "disk_resource_path": "disk:/larp-bot/events/event-archived/master_table_archived.xlsx",
+            "public_registration_url": "https://disk.example/archived",
+            "archived_at": datetime.now(UTC),
+            "created_at": event.created_at + timedelta(seconds=2),
+        }
+    )
+    leader_only = event.model_copy(
+        update={
+            "event_id": "event-led",
+            "disk_resource_path": "disk:/larp-bot/events/event-led/master_table_led.xlsx",
+            "public_registration_url": "https://disk.example/led",
+            "created_at": event.created_at + timedelta(seconds=3),
+        }
+    )
+    engine, users, publisher, tables = await engine_setup(disk_store, event, second, archived, leader_only)
+    for game in (event, second, archived):
+        await tables.enlist(
+            game.event_id,
+            operation_id=f"enlist-{game.event_id}",
+            participant_key=engine.registrations.key(Platform.TELEGRAM, 1, game.event_id),
+            display_name="Иван Иванов",
+            wish_play="Без пожеланий",
+        )
+    await engine.events.add_leader(
+        leader_only.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+
+    answers = (
+        "profile:edit",
+        "Новиков Новый Нович",
+        "Нет",
+        "https://vk.com/new-profile",
+        "Нет",
+        "Да",
+    )
+    for update, answer in enumerate(answers, start=1):
+        response = await engine.handle(inbound(update, answer, user_id=1, telegram_username="new_profile"))
+
+    profile = await users.get(Platform.TELEGRAM, 1)
+    assert "Профиль сохранён" in response.text
+    assert profile is not None and profile.full_name == "Новиков Новый Нович"
+    assert profile.last_update_id == "6"
+    updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
+    assert {command.event_id for command in updates} == {event.event_id, second.event_id, leader_only.event_id}
+    assert all(
+        command.participant_key == engine.registrations.key(Platform.TELEGRAM, 1, command.event_id)
+        for command in updates
+    )
+    assert all(command.reply_context.text_success == "" for command in updates)
+
+
+@pytest.mark.asyncio
 async def test_foreign_profile_collects_combined_latin_full_name(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, users, _, _ = await engine_setup(disk_store, event)
     answers = (

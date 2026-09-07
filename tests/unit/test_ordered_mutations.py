@@ -250,6 +250,174 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
 
 
 @pytest.mark.asyncio
+async def test_profile_update_refreshes_registration_and_every_existing_game_table(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    public_path = f"disk:/larp-bot/events/{event.event_id}/public_table_{event.name}.xlsx"
+    pass_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+    event = event.model_copy(
+        update={
+            "public_table_resource_path": public_path,
+            "public_table_public_url": "https://disk.example/public-table",
+            "pass_table_resource_path": pass_path,
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    secret = "participant-secret"
+    key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    old_pass = PassDetails(
+        surname_cyrillic="Старов",
+        name_cyrillic="Стар",
+        patronym_cyrillic="Старович",
+        foreigner=False,
+        mobile_phone="+7 900 000-00-00",
+        email="old@example.com",
+    )
+    new_pass = PassDetails(
+        surname_cyrillic="Новиков",
+        name_cyrillic="Новый",
+        patronym_cyrillic="Нович",
+        foreigner=False,
+        mobile_phone="+7 999 111-22-33",
+        email="new@example.com",
+    )
+    registration = Registration(
+        event_id=event.event_id,
+        participant_key=key,
+        display_name="Старов Стар Старович",
+        vk_profile="https://vk.com/old-profile",
+        telegram_profile="https://t.me/old_profile",
+        wish_play="С другом",
+        larp_experience=True,
+        crossplay=False,
+        character_wish="Врач",
+        attendance_status=AttendanceStatus.CONFIRMED,
+        last_operation_id="confirm-old",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository([registration])
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="Новиков Новый Нович",
+            vk_url="https://vk.com/new-profile",
+            telegram_handle="@new_profile",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=True,
+            pass_details=new_pass,
+        )
+    )
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, [registration])
+    await showcase.create_public_event_workbook(public_path, [registration])
+    await showcase.create_pass_table(pass_path, [old_pass])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        users,
+        secret,
+    )
+    update = command(event, Operation.UPDATE_PROFILE, EmptyPayload(), key=key)
+
+    result = await mutations.apply(update)
+
+    stored = await tables.get(event.event_id, key)
+    assert result.notifications_enabled is False
+    assert stored is not None
+    assert stored.display_name == "Новиков Новый Нович"
+    assert stored.vk_profile == "https://vk.com/new-profile"
+    assert stored.telegram_profile == "https://t.me/new_profile"
+    assert stored.larp_experience is False
+    assert stored.crossplay is True
+    assert stored.wish_play == "С другом"
+    assert stored.character_wish == "Врач"
+    assert stored.attendance_status is AttendanceStatus.CONFIRMED
+    assert stored.created_at == created_at
+
+    master = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    public = load_workbook(BytesIO(disk_store.files[public_path]))
+    passes = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert master.active["B2"].value == "Новиков Новый Нович"
+        assert master.active["C2"].value == "https://vk.com/new-profile"
+        assert master.active["D2"].value == "https://t.me/new_profile"
+        assert master.active["E2"].value == "Нет"
+        assert master.active["F2"].value == "Да"
+        assert public.active["B2"].value == "Новиков Новый Нович"
+        assert public.active["C2"].value == "Нет"
+        assert public.active["D2"].value == "Да"
+        assert passes.active["A2"].value == "Новиков"
+        assert passes.active["H2"].value == "+7 999 111-22-33"
+        assert passes.active["I2"].value == "new@example.com"
+    finally:
+        master.close()
+        public.close()
+        passes.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_update_refreshes_pass_table_for_master_without_registration(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    pass_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+    event = event.model_copy(
+        update={
+            "pass_table_resource_path": pass_path,
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    secret = "participant-secret"
+    key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    profile = PassDetails(
+        surname_cyrillic="Мастеров",
+        name_cyrillic="Мастер",
+        patronym_cyrillic="Мастерович",
+        foreigner=False,
+        mobile_phone="+7 999 444-55-66",
+        email="master@example.com",
+    )
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="Мастеров Мастер Мастерович",
+            vk_url="https://vk.com/master",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=True,
+            pass_details=profile,
+        )
+    )
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_pass_table(pass_path, [])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        users,
+        secret,
+    )
+
+    await mutations.apply(command(event, Operation.UPDATE_PROFILE, EmptyPayload(), key=key))
+
+    workbook = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert workbook.active["A2"].value == "Мастеров"
+        assert workbook.active["I2"].value == "master@example.com"
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_rejects_enlist_when_ydb_profile_is_missing(disk_store: MemoryDiskStore, event: Event) -> None:
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
