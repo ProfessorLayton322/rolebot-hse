@@ -468,7 +468,7 @@ class ConversationEngine:
                 return BotResponse(
                     text=(
                         f"Профиль\n\nИмя: {user.full_name}\n{contact_label}: {contact or 'не указан'}\n"
-                        f"Кроссплей: {_bool_text(user.crossplay)}\n"
+                        f"Кросспол: {_bool_text(user.crossplay)}\n"
                         f"Нужен пропуск: {_bool_text(user.needs_pass)}"
                     ),
                     buttons=[
@@ -566,7 +566,7 @@ class ConversationEngine:
             context["patronym_cyrillic"] = patronym
             context["full_name"] = " ".join(part for part in (surname, name, patronym) if part != "-")
             user.dialog_state = "PROFILE_NEEDS_PASS"
-            return BotResponse(text="Нужен ли вам пропуск на локацию?", buttons=yes_no_buttons())
+            return BotResponse(text="Нужен ли вам пропуск на место проведения?", buttons=yes_no_buttons())
         if state == "PROFILE_NEEDS_PASS":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
@@ -930,7 +930,8 @@ class ConversationEngine:
             user.dialog_state = "ENLIST_WISH_PLAY"
             return BotResponse(
                 text=(
-                    "С кем бы вы ХОТЕЛИ играть?\n\n"
+                    "С кем из других игроков вы бы хотели попасть в одну игровую сессию? "
+                    "(Напишите через запятую в именительном падеже имена и фамилии)\n\n"
                     "Нажмите «Пропустить» на клавиатуре или отправьте сообщением, "
                     "с кем вы хотите играть."
                 ),
