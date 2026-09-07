@@ -380,7 +380,7 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
         response = await engine.handle(message)
         saved = await users.get(Platform.TELEGRAM, 1)
 
-        assert response.text == "Привет! Этот бот поможет зарегистрироваться на LARP-игры."
+        assert response.text == "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры."
         assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
         assert saved is not None and saved.dialog_state == "IDLE"
         assert saved.dialog_context == {}
@@ -712,7 +712,7 @@ async def test_vk_profile_parses_telegram_reference_or_treats_it_as_missing(
         responses.append(await engine.handle(vk(update, value)))
 
     profile = await users.get(Platform.VK, 7)
-    assert responses[3].text == "Готовы ли вы кроссполу?"
+    assert responses[3].text == "Готовы ли вы играть за персонажа противоположного пола?"
     assert isinstance(profile, VkUser)
     assert profile.profile_complete
     assert profile.telegram_handle == expected_handle
