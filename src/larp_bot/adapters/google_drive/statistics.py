@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from urllib.parse import quote
 
@@ -12,9 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from larp_bot.application.services import DomainError
 
-from .statistics_workbook import StatisticsWorkbook
+from .statistics_workbook import MasterStatisticsWorkbook, StatisticsWorkbook
 
 ATTENDANCE_FILE_NAME = "player_attendance_stats.xlsx"
+MASTER_STATISTICS_FILE_NAME = "master_statistics.xlsx"
 DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
@@ -55,6 +57,12 @@ class DriveStorage(Protocol):
     async def download(self, file_id: str) -> bytes: ...
 
     async def replace(self, file_id: str, content: bytes) -> None: ...
+
+
+@dataclass(frozen=True)
+class PreparedStatisticsEdit:
+    file: DriveFile
+    content: bytes | None
 
 
 def _drive_query_literal(value: str) -> str:
@@ -136,14 +144,34 @@ class GoogleDriveRestClient:
 class GoogleDriveStatisticsRepository:
     """Read and revise one permanent Drive XLSX without replacing its file resource."""
 
-    def __init__(self, drive: DriveStorage, folder_id: str) -> None:
+    def __init__(
+        self,
+        drive: DriveStorage,
+        folder_id: str,
+        *,
+        file_name: str = ATTENDANCE_FILE_NAME,
+        workbook_type: type[StatisticsWorkbook] = StatisticsWorkbook,
+    ) -> None:
         if not folder_id.strip():
             raise ValueError("Google Drive folder ID must not be empty")
+        if not file_name.strip():
+            raise ValueError("Google Drive statistics file name must not be empty")
         self.drive = drive
         self.folder_id = folder_id.strip()
+        self.file_name = file_name.strip()
+        self.workbook_type = workbook_type
+
+    @classmethod
+    def masters(cls, drive: DriveStorage, folder_id: str) -> GoogleDriveStatisticsRepository:
+        return cls(
+            drive,
+            folder_id,
+            file_name=MASTER_STATISTICS_FILE_NAME,
+            workbook_type=MasterStatisticsWorkbook,
+        )
 
     async def _file(self) -> DriveFile:
-        return await self.drive.find_file(self.folder_id, ATTENDANCE_FILE_NAME)
+        return await self.drive.find_file(self.folder_id, self.file_name)
 
     async def link(self) -> str:
         file = await self._file()
@@ -152,13 +180,19 @@ class GoogleDriveStatisticsRepository:
     async def has_any_player(self, names: Collection[str]) -> bool:
         file = await self._file()
         content = await self.drive.download(file.file_id)
-        return await asyncio.to_thread(lambda: StatisticsWorkbook(content).has_any_player(tuple(names)))
+        return await asyncio.to_thread(lambda: self.workbook_type(content).has_any_player(tuple(names)))
 
-    async def edit(self, transform: Callable[[StatisticsWorkbook], bytes | None]) -> bool:
+    async def prepare(self, transform: Callable[[StatisticsWorkbook], bytes | None]) -> PreparedStatisticsEdit:
         file = await self._file()
         content = await self.drive.download(file.file_id)
-        result = await asyncio.to_thread(lambda: transform(StatisticsWorkbook(content)))
-        if result is None:
+        result = await asyncio.to_thread(lambda: transform(self.workbook_type(content)))
+        return PreparedStatisticsEdit(file=file, content=result)
+
+    async def commit(self, edit: PreparedStatisticsEdit) -> bool:
+        if edit.content is None:
             return False
-        await self.drive.replace(file.file_id, result)
+        await self.drive.replace(edit.file.file_id, edit.content)
         return True
+
+    async def edit(self, transform: Callable[[StatisticsWorkbook], bytes | None]) -> bool:
+        return await self.commit(await self.prepare(transform))

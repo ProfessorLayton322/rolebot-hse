@@ -1,4 +1,6 @@
-# Attendance statistics workbook
+# Player and master statistics workbooks
+
+## Player attendance
 
 The supplied `Копия Сводная статистика посещений.xlsx` has 12 sheets. Seasons are ordered newest first, alongside older helper lists and a special-awards sheet. The latest season is `2025-2026`: 747 player rows (2–748), game columns N–AN, and four summary rows (749–752). Formatting extends well below the real data; worksheet dimensions must not be used as the player count. The editor locates the latest year-pair sheet by its name, not by whichever tab happens to be active.
 
@@ -21,3 +23,20 @@ Older sheets contain exported Google Sheets formulas, including DUMMYFUNCTION wr
 New seasons retain A–M, carry the previous final totals into C, preserve award flags, update C's date, and create no game columns or attendance marks. Totals initially use `=C2`. Attendance and milestone formatting ranges follow new rows/columns; existing differential colours and milestone expressions are retained, including the original 19/24 text-search semantics. New players start with zero carried games and false milestone flags. Names and game titles are written as literal strings, even when they begin with `=`.
 
 The supported input layout is the current A–M schema. Older layouts without the 5–50 milestone columns are rejected rather than interpreted as a current table. A missing or invalid source produces an admin error without changing the working workbook. Formula cells needed for carried totals must have usable cached numeric results; the bot cannot execute arbitrary Excel or Google Sheets formulas.
+
+## Master participation
+
+The supplied `master_statistics.xlsx` has nine seasonal sheets. The latest source season is `2025-2026`: 101 master rows (2–102), fixed columns A–L, game columns M–AK, and three summary rows (103–105). Formatting extends to row 1024, so the editor finds the real master boundary from the names and known summaries rather than using worksheet dimensions.
+
+| Columns | Contents | Preserved appearance/behaviour |
+| --- | --- | --- |
+| A | Master name | Lavender fill. A conditional pink fill flags a reached milestone whose corresponding award flag is FALSE. |
+| B | Participation in the current season | Pale yellow fill and formula `=D2-C2`. |
+| C | Lifetime games brought forward | Existing numeric value and per-row style. |
+| D | Current lifetime game count | Formula `=C2+SUM(M2:AK2)` and analogous row formulas. Existing red milestone text rules are retained. |
+| E–L | 1, 5, 10, …, 35 game milestones | Existing TRUE/FALSE award flags, carried unchanged into a new season. New masters start with FALSE flags. |
+| M onward | Games | `1` marks participation; the source green/nonblank and yellow/blank conditional-formatting rules expand with new masters and games. |
+
+A new season copies the latest master list and fixed-column styling into a newly inserted seasonal sheet, carries each final lifetime total into C, resets B to zero through `=D-C`, and removes the old season's game columns. Adding the first game recreates the lifetime formulas from M through the actual last game column. The summaries remain `Всего`, `Участники сезона`, and `Новички`; their formulas and cached values are rebuilt with expanded row and game ranges, using the source summary styles.
+
+As with the player workbook, the editor changes OOXML parts directly. Existing worksheet parts, shared strings, styles, drawings, comments, and formula caches remain byte-identical when a new season is added. Names and game titles are stored as literal strings, name matching is normalized, and an existing current-season game header makes the edit a no-op.

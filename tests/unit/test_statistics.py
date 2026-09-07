@@ -14,12 +14,13 @@ from openpyxl.styles import PatternFill
 
 from larp_bot.adapters.google_drive.statistics import (
     ATTENDANCE_FILE_NAME,
+    MASTER_STATISTICS_FILE_NAME,
     XLSX_MIME_TYPE,
     DriveFile,
     GoogleDriveRestClient,
     GoogleDriveStatisticsRepository,
 )
-from larp_bot.adapters.google_drive.statistics_workbook import StatisticsWorkbook
+from larp_bot.adapters.google_drive.statistics_workbook import MasterStatisticsWorkbook, StatisticsWorkbook
 from larp_bot.adapters.memory import MemoryDeferredTransport
 from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.application.conversation import (
@@ -36,6 +37,7 @@ from larp_bot.application.statistics import StatisticsService, current_season_ye
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
+    BotIdentity,
     Button,
     Event,
     Operation,
@@ -72,6 +74,45 @@ def template() -> bytes:
     )
     historical = workbook.create_sheet("2024-2025")
     historical["A1"] = "Do not rewrite historical formula caches"
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def master_template() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "2025-2026"
+    sheet.append(
+        [
+            "Мастер",
+            "Участие в сезоне",
+            "Игр на начало сезона",
+            "Игр на текущий момент",
+            "1 игра",
+            *[f"{n} игр" for n in range(5, 36, 5)],
+            "Старая игра",
+        ]
+    )
+    sheet.append(["Иванов Иван", "=D2-C2", 4, "=C2+SUM(M2:M2)", True, *([False] * 7), 1])
+    sheet.append(["Петрова Анна", "=D3-C3", 0, "=C3+SUM(M3:M3)", False, *([False] * 7), None])
+    sheet.append(["Всего", '=COUNTIF(B2:B3,">=0")', *([None] * 10), "=SUM(M2:M3)"])
+    sheet.append(["Участники сезона", '=COUNTIF(B2:B3,">0")'])
+    sheet.append(["Новички", '=COUNTIF(C2:C3,"=0")'])
+    sheet["A2"].fill = PatternFill("solid", fgColor="FFDBF6")
+    sheet["B2"].fill = PatternFill("solid", fgColor="FFF2CC")
+    sheet["A4"].fill = PatternFill("solid", fgColor="FFDBF6")
+    sheet["B4"].fill = PatternFill("solid", fgColor="FFDBF6")
+    sheet["M4"].fill = PatternFill("solid", fgColor="FFDBF6")
+    sheet.conditional_formatting.add(
+        "M2:M3", CellIsRule(operator="equal", formula=["1"], fill=PatternFill("solid", fgColor="D9EAD3"))
+    )
+    sheet.conditional_formatting.add(
+        "A2:A3",
+        FormulaRule(formula=["AND($D2>=1,$E2=FALSE)"], fill=PatternFill("solid", fgColor="EAD1DC")),
+    )
+    historical = workbook.create_sheet("2024-2025")
+    historical["A1"] = "Do not rewrite historical master formula caches"
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -139,6 +180,62 @@ def test_add_game_automatically_rolls_over_and_is_idempotent_within_current_seas
     assert StatisticsWorkbook(result).add_game(2026, "Осенняя игра", ["Другой Игрок"]) is None
 
 
+def test_master_game_rollover_preserves_totals_formulas_styles_and_is_idempotent() -> None:
+    original = master_template()
+    result = MasterStatisticsWorkbook(original).add_game(
+        2026,
+        "=Осенняя игра",
+        ["  ИВАНОВ  Иван ", "Новый Мастер", "Новый Мастер"],
+    )
+    assert result is not None
+    current = sheet(result)
+    formulas = sheet(result, formulas=True)
+    assert current.title == "2026-2027"
+    assert current["M1"].value == "=Осенняя игра"
+    assert formulas["M1"].data_type == "s"
+    assert current["B2"].value == 1
+    assert current["C2"].value == 5
+    assert current["D2"].value == 6
+    assert formulas["B2"].value == "=D2-C2"
+    assert formulas["D2"].value == "=C2+SUM(M2:M2)"
+    assert current["A4"].value == "Новый Мастер"
+    assert current["B4"].value == 1
+    assert current["C4"].value == 0
+    assert current["D4"].value == current["M4"].value == 1
+    assert current["E4"].value is False
+    assert current["A5"].value == "Всего"
+    assert current["M5"].value == 2
+    assert current["B6"].value == 2
+    assert current["B7"].value == 2
+    assert current["A4"].fill.fgColor.rgb == current["A2"].fill.fgColor.rgb
+    assert current["B5"].fill.fgColor.rgb == "00FFDBF6"
+    assert any(str(cf.sqref) == "M2:M4" for cf in current.conditional_formatting)
+    assert any(str(cf.sqref) == "A2:A4" for cf in current.conditional_formatting)
+    assert MasterStatisticsWorkbook(result).add_game(2026, "=Осенняя игра", ["Другой Мастер"]) is None
+    with ZipFile(BytesIO(original)) as before, ZipFile(BytesIO(result)) as after:
+        for path in before.namelist():
+            if path.startswith("xl/worksheets/") or path == "xl/styles.xml":
+                assert before.read(path) == after.read(path)
+
+
+def test_master_game_appends_to_current_season_and_expands_real_formula_ranges() -> None:
+    result = MasterStatisticsWorkbook(master_template()).mark_game(
+        "Новая игра",
+        ["Иванов Иван", "Новый Мастер"],
+    )
+    assert result is not None
+    current = sheet(result)
+    formulas = sheet(result, formulas=True)
+    assert current.title == "2025-2026"
+    assert current["N1"].value == "Новая игра"
+    assert current["N2"].value == current["N4"].value == 1
+    assert current["D2"].value == 6
+    assert formulas["D2"].value == "=C2+SUM(M2:N2)"
+    assert current["A5"].value == "Всего"
+    assert current["N5"].value == 2
+    assert any(str(cf.sqref) == "M2:N4" for cf in current.conditional_formatting)
+
+
 @pytest.mark.parametrize(
     ("instant", "expected"),
     [
@@ -152,28 +249,40 @@ def test_current_season_uses_moscow_september_boundary(instant: datetime, expect
 
 
 class MemoryGoogleDrive:
-    def __init__(self, content: bytes) -> None:
-        self.file = DriveFile(
-            id="permanent-file-id",
-            name=ATTENDANCE_FILE_NAME,
-            mimeType=XLSX_MIME_TYPE,
-            webViewLink="https://drive.google.com/file/d/permanent-file-id/view",
-        )
-        self.content = content
+    def __init__(self, content: bytes, master_content: bytes | None = None) -> None:
+        contents = {ATTENDANCE_FILE_NAME: content}
+        if master_content is not None:
+            contents[MASTER_STATISTICS_FILE_NAME] = master_content
+        self.files = {
+            name: DriveFile(
+                id=f"permanent-{index}-id",
+                name=name,
+                mimeType=XLSX_MIME_TYPE,
+                webViewLink=f"https://drive.google.com/file/d/permanent-{index}-id/view",
+            )
+            for index, name in enumerate(contents, start=1)
+        }
+        self.contents = {self.files[name].file_id: value for name, value in contents.items()}
         self.lookups: list[tuple[str, str]] = []
         self.replacements: list[tuple[str, bytes]] = []
 
+    @property
+    def file(self) -> DriveFile:
+        return self.files[ATTENDANCE_FILE_NAME]
+
+    @property
+    def content(self) -> bytes:
+        return self.contents[self.file.file_id]
+
     async def find_file(self, folder_id: str, name: str) -> DriveFile:
         self.lookups.append((folder_id, name))
-        return self.file
+        return self.files[name]
 
     async def download(self, file_id: str) -> bytes:
-        assert file_id == self.file.file_id
-        return self.content
+        return self.contents[file_id]
 
     async def replace(self, file_id: str, content: bytes) -> None:
-        assert file_id == self.file.file_id
-        self.content = content
+        self.contents[file_id] = content
         self.replacements.append((file_id, content))
 
 
@@ -259,7 +368,7 @@ async def test_repository_keeps_the_file_id_name_and_link_while_updating_content
     assert await repository.edit(lambda book: book.add_game(2026, "Новая игра", ["Новый Игрок"]))
     assert await repository.link() == original_link
     assert drive.file.name == ATTENDANCE_FILE_NAME
-    assert [file_id for file_id, _ in drive.replacements] == ["permanent-file-id"]
+    assert [file_id for file_id, _ in drive.replacements] == ["permanent-1-id"]
     assert drive.lookups == [
         ("stats-folder", ATTENDANCE_FILE_NAME),
         ("stats-folder", ATTENDANCE_FILE_NAME),
@@ -368,6 +477,14 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
             needs_pass=False,
         )
     )
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.VK, platform_user_id=7),
+    )
     for status, name, key in (
         (
             AttendanceStatus.CONFIRMED,
@@ -393,9 +510,10 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
                 )
             ]
         )
-    drive = MemoryGoogleDrive(template())
+    drive = MemoryGoogleDrive(template(), master_template())
     service = StatisticsService(
         GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        GoogleDriveStatisticsRepository.masters(drive, "stats-folder"),
         engine.admins,
         engine.administration,
         engine.registrations,
@@ -416,6 +534,12 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
     assert current["A6"].value == "Всего"
     assert current["N4"].value == 1
     assert current["N5"].value == 1
+    master_file = drive.files[MASTER_STATISTICS_FILE_NAME]
+    master_sheet = sheet(drive.contents[master_file.file_id])
+    assert master_sheet["A4"].value == "Иван Иванов"
+    assert master_sheet["A5"].value == "Второй Игрок"
+    assert master_sheet["M4"].value == 1
+    assert master_sheet["M5"].value == 1
     experienced_admin = await users.get(Platform.TELEGRAM, 1)
     experienced_vk = await users.get(Platform.VK, 7)
     assert experienced_admin is not None and experienced_admin.larp_experience is True
@@ -424,18 +548,45 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
     assert [command.event_id for command in profile_updates] == [event.event_id, event.event_id]
     retry = command.model_copy(update={"operation_id": str(uuid4())})
     assert "уже есть" in await service.apply(retry)
-    assert len(drive.replacements) == 1
+    assert len(drive.replacements) == 2
     await engine.events.archive(event.event_id, datetime(2026, 9, 2, tzinfo=UTC))
     with pytest.raises(DomainError, match="архивирована"):
         await service.apply(retry.model_copy(update={"operation_id": str(uuid4())}))
 
 
+async def test_statistics_stages_both_workbooks_before_replacing_either(event: Event) -> None:
+    engine, _users, _publisher, _registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    drive = MemoryGoogleDrive(template(), b"not a workbook")
+    service = StatisticsService(
+        GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        GoogleDriveStatisticsRepository.masters(drive, "stats-folder"),
+        engine.admins,
+        engine.administration,
+        engine.registrations,
+        season_year=lambda: 2026,
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id="statistics",
+        operation=Operation.STATISTICS,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=StatisticsPayload(action="game", game_id=event.event_id),
+    )
+
+    with pytest.raises(DomainError, match="таблица мастеров"):
+        await service.apply(command)
+
+    assert not drive.replacements
+
+
 async def test_statistics_worker_delivers_permanent_link_and_rechecks_admin(event: Event) -> None:
     engine, users, publisher, _registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
     await engine.handle(inbound(1, STATS_LINKS))
-    drive = MemoryGoogleDrive(template())
+    drive = MemoryGoogleDrive(template(), master_template())
     service = StatisticsService(
         GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        GoogleDriveStatisticsRepository.masters(drive, "stats-folder"),
         engine.admins,
         engine.administration,
         engine.registrations,
@@ -453,7 +604,9 @@ async def test_statistics_worker_delivers_permanent_link_and_rechecks_admin(even
     assert await worker.run() == 1
     assert consumer.deleted == ["receipt"]
     assert drive.file.web_view_link in transport.sent[0][3]
+    assert drive.files[MASTER_STATISTICS_FILE_NAME].web_view_link in transport.sent[0][3]
     assert "Посещаемость игроков" in transport.sent[0][3]
+    assert "Участие мастеров" in transport.sent[0][3]
     unauthorized = command.model_copy(update={"platform_user_id": 999})
     with pytest.raises(DomainError, match="прав"):
         await service.apply(unauthorized)
@@ -471,6 +624,27 @@ def test_supplied_workbook_when_available() -> None:
     with ZipFile(BytesIO(original)) as before, ZipFile(BytesIO(result)) as after:
         for name in before.namelist():
             if name.startswith("xl/worksheets/"):
+                assert before.read(name) == after.read(name)
+
+
+def test_supplied_master_workbook_when_available() -> None:
+    path = Path(__file__).resolve().parents[2] / MASTER_STATISTICS_FILE_NAME
+    if not path.exists():
+        pytest.skip("Private master statistics workbook is not committed to the repository")
+    original = path.read_bytes()
+    result = MasterStatisticsWorkbook(original).add_game(2026, "Проверка", ["Новый Мастер", "Лука Филин"])
+    assert result is not None
+    current = sheet(result)
+    assert current.title == "2026-2027"
+    assert current["M1"].value == "Проверка"
+    assert current["M102"].value == 1
+    assert current["A103"].value == "Новый Мастер"
+    assert current["M103"].value == 1
+    assert current["A104"].value == "Всего"
+    assert current["M104"].value == 2
+    with ZipFile(BytesIO(original)) as before, ZipFile(BytesIO(result)) as after:
+        for name in before.namelist():
+            if name.startswith("xl/worksheets/") or name == "xl/styles.xml":
                 assert before.read(name) == after.read(name)
 
 
