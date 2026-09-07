@@ -280,6 +280,55 @@ class RegistrationService:
             has_next=bool(following),
         )
 
+    async def enqueue_profile_updates(
+        self,
+        platform: Platform,
+        user_id: int,
+        *,
+        idempotency_key: str,
+        page_size: int = 100,
+        concurrency: int = 10,
+    ) -> int:
+        """Queue a profile projection refresh for every unarchived game containing the user."""
+
+        queued = 0
+        after: tuple[datetime, str] | None = None
+        semaphore = asyncio.Semaphore(concurrency)
+        while True:
+            events = list(await self.events.list_page(after=after, archived=False, limit=page_size))
+            if not events:
+                return queued
+
+            async def participation_for(event: Event) -> tuple[Event, Registration | None, bool]:
+                async with semaphore:
+                    key = self.key(platform, user_id, event.event_id)
+                    registration, leaders = await asyncio.gather(
+                        self.catalog.get(event, key),
+                        self.events.list_leaders(event.event_id),
+                    )
+                    identity = BotIdentity(platform=platform, platform_user_id=user_id)
+                    return event, registration, identity in leaders
+
+            participations = await asyncio.gather(*(participation_for(event) for event in events))
+            for event, registration, is_leader in participations:
+                if registration is None and not is_leader:
+                    continue
+                await self.enqueue(
+                    operation=Operation.UPDATE_PROFILE,
+                    event_id=event.event_id,
+                    platform=platform,
+                    user_id=user_id,
+                    payload=EmptyPayload(),
+                    reply_context=ReplyContext(),
+                    idempotency_key=f"{idempotency_key}:{Operation.UPDATE_PROFILE.value}:{event.event_id}",
+                )
+                queued += 1
+
+            if len(events) < page_size:
+                return queued
+            last = events[-1]
+            after = (last.created_at, last.event_id)
+
     async def enqueue(
         self,
         *,
@@ -1170,6 +1219,51 @@ class OrderedMutationService:
             return MutationResult(f"Удалено не подтвердивших участие: {count}")
 
         assert command.participant_key is not None
+        if command.operation is Operation.UPDATE_PROFILE:
+            if self.users is None or self.participant_secret is None:
+                raise RuntimeError("profile update requires users and participant secret")
+            expected_key = participant_key(
+                self.participant_secret,
+                command.platform,
+                command.platform_user_id,
+                event.event_id,
+            )
+            if command.participant_key != expected_key:
+                raise OperationNotAllowed("Некорректная запись участника")
+            user = await self.users.get(command.platform, command.platform_user_id)
+            if user is None or not user.profile_complete or user.full_name is None:
+                raise OperationNotAllowed("Сначала полностью заполните профиль")
+            registration, leaders = await asyncio.gather(
+                self.catalog.registrations.get(event.event_id, command.participant_key),
+                self.events.list_leaders(event.event_id),
+            )
+            identity = BotIdentity(
+                platform=command.platform,
+                platform_user_id=command.platform_user_id,
+            )
+            if registration is None and identity not in leaders:
+                return MutationResult("Запись игрока уже отсутствует", notifications_enabled=False)
+            if isinstance(user, TelegramUser):
+                vk_profile = user.vk_url or ""
+                telegram_handle = user.telegram_handle
+            else:
+                vk_profile = f"https://vk.com/id{user.vk_id}"
+                telegram_handle = user.telegram_handle
+            telegram_profile = None if telegram_handle is None else f"https://t.me/{telegram_handle.removeprefix('@')}"
+            if registration is not None:
+                await self.catalog.registrations.update_profile(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_key=command.participant_key,
+                    display_name=user.full_name,
+                    larp_experience=bool(user.larp_experience),
+                    crossplay=bool(user.crossplay),
+                    vk_profile=vk_profile,
+                    telegram_profile=telegram_profile,
+                )
+                await self.catalog.refresh(event)
+            await self._refresh_pass_table(event)
+            return MutationResult("Профиль игрока обновлён", notifications_enabled=False)
         if command.operation is Operation.ENLIST:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")

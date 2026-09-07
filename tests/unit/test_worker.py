@@ -83,7 +83,14 @@ def queued(
         platform_user_id=1,
         participant_key=(
             "a" * 43
-            if operation in {Operation.ENLIST, Operation.CONFIRM, Operation.UPDATE_CHARACTER_WISH, Operation.CANCEL}
+            if operation
+            in {
+                Operation.ENLIST,
+                Operation.UPDATE_PROFILE,
+                Operation.CONFIRM,
+                Operation.UPDATE_CHARACTER_WISH,
+                Operation.CANCEL,
+            }
             else None
         ),
         payload=payload,
@@ -174,6 +181,32 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     assert consumer.deleted == []
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
+
+
+@pytest.mark.asyncio
+async def test_stale_profile_update_failure_is_silent(disk_store: MemoryDiskStore, event: Event) -> None:
+    event.archived_at = datetime.now(UTC)
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    consumer = FakeConsumer([queued(event, Operation.UPDATE_PROFILE, EmptyPayload(), 1)])
+    transport = MemoryDeferredTransport()
+    events = MemoryEventRepository([event])
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(
+            events,
+            RegistrationCatalog(events, MemoryRegistrationRepository(), YandexDiskShowcaseRepository(disk_store)),
+            users,
+            "participant-secret",
+        ),
+        users,
+        transport,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 1
+    assert consumer.deleted == ["receipt-1"]
+    assert transport.sent == []
 
 
 @pytest.mark.asyncio

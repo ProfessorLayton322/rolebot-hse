@@ -1351,6 +1351,50 @@ class YdbRegistrationRepository:
         await self._save(registration)
         return True
 
+    async def update_profile(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        display_name: str,
+        larp_experience: bool,
+        crossplay: bool,
+        vk_profile: str,
+        telegram_profile: str | None,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DECLARE $operation_id AS Utf8; DECLARE $display_name AS Utf8;
+            DECLARE $larp_experience AS Bool; DECLARE $crossplay AS Bool;
+            DECLARE $vk_profile AS Utf8; DECLARE $telegram_profile AS Optional<Utf8>;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET display_name = $display_name,
+                larp_experience = $larp_experience,
+                crossplay = $crossplay,
+                vk_profile = $vk_profile,
+                telegram_profile = $telegram_profile,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $participant_key
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$display_name": display_name,
+                "$larp_experience": larp_experience,
+                "$crossplay": crossplay,
+                "$vk_profile": vk_profile,
+                "$telegram_profile": telegram_profile,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def confirm(
         self,
         event_id: str,

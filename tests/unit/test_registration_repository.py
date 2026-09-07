@@ -287,6 +287,33 @@ async def test_ydb_enlist_uses_composite_key_and_persists_showcase_fields() -> N
 
 
 @pytest.mark.asyncio
+async def test_ydb_profile_update_changes_only_registration_profile_projection() -> None:
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    await repository.update_profile(
+        "event-a1",
+        operation_id="profile-update",
+        participant_key="a" * 43,
+        display_name="Новое Имя",
+        larp_experience=False,
+        crossplay=True,
+        vk_profile="https://vk.com/new-profile",
+        telegram_profile="https://t.me/new_profile",
+    )
+
+    query, params = executor.queries[0]
+    assert "SET display_name = $display_name" in query
+    assert "wish_play" not in query
+    assert "character_wish" not in query
+    assert "attendance_status" not in query
+    assert "created_at" not in query
+    assert "last_operation_id != $operation_id" in query
+    assert params["$display_name"] == "Новое Имя"
+    assert params["$telegram_profile"] == "https://t.me/new_profile"
+
+
+@pytest.mark.asyncio
 async def test_ydb_reenlist_after_cancellation_resets_queue_position() -> None:
     base = datetime(2000, 1, 1, tzinfo=UTC)
     cancelled = Registration(
