@@ -13,6 +13,7 @@ from larp_bot.domain.models import (
     TelegramUser,
     VkUser,
     normalize_telegram_profile,
+    parse_full_name,
 )
 
 
@@ -176,3 +177,38 @@ def test_pass_profile_rejects_invalid_identity_fields(overrides: dict[str, str],
     }
     with pytest.raises(ValidationError, match=message):
         PassDetails(**(values | overrides))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("raw", "alphabet", "expected"),
+    [
+        (
+            "Семёнова-Звенигородская  Ева-Лотта\tИльинична",
+            "cyrillic",
+            ("Семёнова-Звенигородская", "Ева-Лотта", "Ильинична"),
+        ),
+        ("Li Anna", "latin", ("Li", "Anna", "-")),
+        ("O'Connor Eva-Lotta Marie", "latin", ("O'Connor", "Eva-Lotta", "Marie")),
+    ],
+)
+def test_full_name_uses_only_whitespace_as_the_part_delimiter(
+    raw: str,
+    alphabet: str,
+    expected: tuple[str, str, str],
+) -> None:
+    assert parse_full_name(raw, alphabet=alphabet) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("raw", "alphabet"),
+    [
+        ("Иванов", "cyrillic"),
+        ("Иванов Иван Иванович Младший", "cyrillic"),
+        ("Ivanov Иван", "cyrillic"),
+        ("Иванов Иван", "latin"),
+        ("Иванов,Иван", "cyrillic"),
+    ],
+)
+def test_full_name_requires_two_or_three_parts_in_the_requested_script(raw: str, alphabet: str) -> None:
+    with pytest.raises(ValueError):
+        parse_full_name(raw, alphabet=alphabet)  # type: ignore[arg-type]

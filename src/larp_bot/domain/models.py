@@ -24,6 +24,8 @@ PassEmail = Annotated[str, StringConstraints(max_length=254, pattern=r"^[^=\s@][
 _PASS_EMAIL_ADAPTER = TypeAdapter(PassEmail)
 _CYRILLIC_NAME_RE = re.compile(r"^[А-ЯЁа-яё](?:[А-ЯЁа-яё -]{0,98}[А-ЯЁа-яё])?$")
 _LATIN_NAME_RE = re.compile(r"^[A-Za-z](?:[A-Za-z '\-]{0,98}[A-Za-z])?$")
+_CYRILLIC_FULL_NAME_PART_RE = re.compile(r"^[А-ЯЁа-яё]+(?:-[А-ЯЁа-яё]+)*$")
+_LATIN_FULL_NAME_PART_RE = re.compile(r"^[A-Za-z]+(?:[-'][A-Za-z]+)*$")
 _PHONE_RE = re.compile(r"^\+?[0-9][0-9 ()\-]{7,23}$")
 
 
@@ -49,6 +51,22 @@ def validate_latin_name(value: str, *, patronym: bool = False) -> str:
     if not _LATIN_NAME_RE.fullmatch(clean):
         raise ValueError("Используйте только латиницу")
     return clean
+
+
+def parse_full_name(value: str, *, alphabet: Literal["cyrillic", "latin"]) -> tuple[str, str, str]:
+    """Split a two- or three-part full name without treating hyphens as separators."""
+
+    parts = value.split()
+    pattern = _CYRILLIC_FULL_NAME_PART_RE if alphabet == "cyrillic" else _LATIN_FULL_NAME_PART_RE
+    if (
+        len(parts) not in {2, 3}
+        or len(" ".join(parts)) > 300
+        or any(len(part) > 100 or pattern.fullmatch(part) is None for part in parts)
+    ):
+        raise ValueError(f"Введите ФИО {alphabet}")
+    surname, name = parts[:2]
+    patronym = parts[2] if len(parts) == 3 else "-"
+    return surname, name, patronym
 
 
 def normalize_mobile_phone(value: str) -> str:
