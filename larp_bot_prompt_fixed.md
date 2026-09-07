@@ -684,16 +684,16 @@ If a profile exists, show current non-sensitive values and allow editing.
 
 Initial flow:
 
-1. `Введите ваши Фамилию и Имя:`
-2. mandatory VK page URL;
-3. ready to crossplay? Да/Нет;
-4. played LARP before? Да/Нет;
-5. need a location pass? Да/Нет;
-6. if yes:
-   - full name Cyrillic;
-   - full name Latin;
+1. one two- or three-part Cyrillic full name (surname, name, optional patronym);
+2. need a location pass? Да/Нет;
+3. if yes:
+   - foreign citizen? Да/Нет;
+   - for a foreign citizen, one two- or three-part Latin full name;
+   - mobile phone;
    - email;
-   - Russian citizen? Да/Нет;
+4. mandatory VK page URL;
+5. ready to crossplay? Да/Нет;
+6. played LARP before? Да/Нет;
 7. save/update.
 
 Telegram-specific difference:
@@ -706,12 +706,12 @@ Telegram-specific difference:
 
 Same overall flow.
 
-The ONLY intentional profile-data interface difference is step 2.
+The ONLY intentional profile-data interface difference is the contact step (step 4).
 
 Ask:
 
 ```text
-Ваш Telegram username, если он есть:
+Ваш Telegram username или ссылка на профиль, если есть:
 ```
 
 Make it optional.

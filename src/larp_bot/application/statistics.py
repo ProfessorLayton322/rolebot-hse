@@ -51,7 +51,7 @@ class StatisticsService:
             raise DomainError("Игра уже архивирована и не может быть добавлена в статистику.")
         await self.administration.catalog.ensure_migrated(event)
         registrations = await self.administration.catalog.registrations.list_for_event(event.event_id)
-        # Full names are stored as Cyrillic surname + name by the shared profile flow.
+        # Full names are stored as two or three Cyrillic parts by the shared profile flow.
         # Keep the registration snapshot so subsequent profile edits cannot rename history.
         players = [r.display_name for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED]
         season_year = self.season_year()

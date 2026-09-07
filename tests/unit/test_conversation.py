@@ -192,7 +192,7 @@ async def test_unsupported_content_is_rejected_without_advancing_dialog(
     await engine.handle(inbound(2, "profile:edit", callback=True))
     before = await users.get(Platform.TELEGRAM, 1)
     assert before is not None
-    assert before.dialog_state == "PROFILE_SURNAME_CYRILLIC"
+    assert before.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
 
     response = await engine.handle(
         InboundMessage(
@@ -579,7 +579,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
             peer_id=7,
         )
 
-    for update, value in enumerate((PROFILE, "Иванов", "Иван", "Пропустить", "Да", "Нет", "Нет"), start=1):
+    for update, value in enumerate((PROFILE, "Иванов Иван", "Нет", "Пропустить", "Да", "Нет"), start=1):
         await engine.handle(vk(update, value))
     profile = await users.get(Platform.VK, 7)
     assert isinstance(profile, VkUser)
@@ -663,7 +663,7 @@ async def test_vk_profile_parses_telegram_reference_or_treats_it_as_missing(
 
     responses = []
     for update, value in enumerate(
-        (PROFILE, "Иванов", "Иван", telegram_profile, "Да", "Нет", "Нет"),
+        (PROFILE, "Иванов Иван", "Нет", telegram_profile, "Да", "Нет"),
         start=1,
     ):
         responses.append(await engine.handle(vk(update, value)))
@@ -736,20 +736,15 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     user_id = 2
     answers = (
         PROFILE,
-        "Иванов",
-        "Иван",
-        "https://vk.com/id2",
+        "Иванов Иван Иванович",
         "Да",
-        "Нет",
-        "Да",
-        "Иванович",
         "Нет",
         "+7 999 123-45-67",
     )
     for update, answer in enumerate(answers, start=1):
         await engine.handle(inbound(update, answer, user_id=user_id))
 
-    invalid = await engine.handle(inbound(11, "not-an-email", user_id=user_id))
+    invalid = await engine.handle(inbound(6, "not-an-email", user_id=user_id))
 
     assert "Некорректный email" in invalid.text
     pending = await users.get(Platform.TELEGRAM, user_id)
@@ -757,67 +752,72 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     assert pending.dialog_state == "PROFILE_PASS_EMAIL_ADDRESS"
     assert "email" not in pending.dialog_context
 
-    saved = await engine.handle(inbound(12, "player@example.com", user_id=user_id))
+    contact_prompt = await engine.handle(inbound(7, "player@example.com", user_id=user_id))
+    await engine.handle(inbound(8, "https://vk.com/id2", user_id=user_id))
+    await engine.handle(inbound(9, "Да", user_id=user_id))
+    saved = await engine.handle(inbound(10, "Нет", user_id=user_id))
     profile = await users.get(Platform.TELEGRAM, user_id)
+    assert "страницу VK" in contact_prompt.text
     assert "Профиль сохранён" in saved.text
     assert profile is not None and profile.pass_details is not None
     assert profile.pass_details.email == "player@example.com"
     assert profile.pass_details.mobile_phone == "+7 999 123-45-67"
     assert profile.pass_details.foreigner is False
     assert profile.pass_details.surname_latin is None
-    assert profile.full_name == "Иванов Иван"
+    assert profile.full_name == "Иванов Иван Иванович"
 
 
 @pytest.mark.asyncio
-async def test_every_profile_collects_cyrillic_surname_and_name_separately(
+async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_parts(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, users, _, _ = await engine_setup(disk_store, event)
 
-    surname_prompt = await engine.handle(inbound(1, PROFILE, user_id=2))
-    invalid_surname = await engine.handle(inbound(2, "Smith", user_id=2))
-    name_prompt = await engine.handle(inbound(3, "Смирнов", user_id=2))
-    invalid_name = await engine.handle(inbound(4, "John", user_id=2))
-    contact_prompt = await engine.handle(inbound(5, "Иван", user_id=2))
-    for update, answer in enumerate(("https://vk.com/id2", "Нет", "Нет", "Нет"), start=6):
+    full_name_prompt = await engine.handle(inbound(1, PROFILE, user_id=2))
+    invalid_full_name = await engine.handle(inbound(2, "Smith John", user_id=2))
+    pass_prompt = await engine.handle(inbound(3, "  Семёнова-Звенигородская   Ева-Лотта Ильинична ", user_id=2))
+    contact_prompt = await engine.handle(inbound(4, "Нет", user_id=2))
+    for update, answer in enumerate(("https://vk.com/id2", "Нет", "Нет"), start=5):
         saved = await engine.handle(inbound(update, answer, user_id=2))
 
     profile = await users.get(Platform.TELEGRAM, 2)
-    assert "фамилию кириллицей" in surname_prompt.text
-    assert "только кириллицу" in invalid_surname.text
-    assert "имя кириллицей" in name_prompt.text
-    assert "только кириллицу" in invalid_name.text
+    assert full_name_prompt.text == "Введите ФИО кириллицей (фамилию имя, если отчества нету):"
+    assert [button.value for button in full_name_prompt.buttons] == ["Отмена"]
+    assert invalid_full_name.text == "Введите ФИО, либо фамилию имя, если отчества нету"
+    assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
+    assert pass_prompt.text == "Нужен ли вам пропуск на локацию?"
     assert "страницу VK" in contact_prompt.text
     assert "Профиль сохранён" in saved.text
-    assert profile is not None and profile.full_name == "Смирнов Иван"
+    assert profile is not None
+    assert profile.full_name == "Семёнова-Звенигородская Ева-Лотта Ильинична"
     assert profile.needs_pass is False and profile.pass_details is None
 
 
 @pytest.mark.asyncio
-async def test_foreign_profile_collects_separate_pass_fields(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_foreign_profile_collects_combined_latin_full_name(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, users, _, _ = await engine_setup(disk_store, event)
     answers = (
         PROFILE,
-        "Ли",
-        "Анна",
+        "Ли Анна",
+        "Да",
+        "Да",
+        "Li Анна",
+        "Li Anna",
+        "+44 7700 900123",
+        "anna@example.com",
         "https://vk.com/anna-li",
         "Нет",
         "Да",
-        "Да",
-        "-",
-        "Да",
-        "Li",
-        "Anna",
-        "-",
-        "+44 7700 900123",
-        "anna@example.com",
     )
-    response = None
+    responses = []
     for update, answer in enumerate(answers, start=1):
-        response = await engine.handle(inbound(update, answer, user_id=2))
+        responses.append(await engine.handle(inbound(update, answer, user_id=2)))
 
     profile = await users.get(Platform.TELEGRAM, 2)
-    assert response is not None and "Профиль сохранён" in response.text
+    assert responses[3].text == "Введите ФИО латиницей (фамилию имя, если отчества нету):"
+    assert responses[4].text == "Введите ФИО, либо фамилию имя, если отчества нету"
+    assert [button.value for button in responses[4].buttons] == ["Отмена"]
+    assert "Профиль сохранён" in responses[-1].text
     assert profile is not None and profile.profile_complete and profile.pass_details is not None
     assert profile.pass_details.model_dump() == {
         "surname_cyrillic": "Ли",
