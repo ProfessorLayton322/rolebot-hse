@@ -203,6 +203,15 @@ async def _event_pass_profiles(
     return profiles
 
 
+@dataclass(frozen=True)
+class RegisteredGamesPage:
+    rows: list[tuple[Event, Registration]]
+    first_event: Event | None
+    last_event: Event | None
+    has_previous: bool
+    has_next: bool
+
+
 class RegistrationService:
     def __init__(
         self,
@@ -235,10 +244,11 @@ class RegistrationService:
         user_id: int,
         *,
         after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
         event_limit: int = 10,
         concurrency: int = 3,
-    ) -> tuple[list[tuple[Event, Registration]], tuple[datetime, str] | None]:
-        candidates = list(await self.events.list_page(after=after, limit=event_limit))
+    ) -> RegisteredGamesPage:
+        candidates = list(await self.events.list_page(after=after, before=before, limit=event_limit))
         semaphore = asyncio.Semaphore(concurrency)
 
         async def inspect(event: Event) -> tuple[Event, Registration] | None:
@@ -247,11 +257,26 @@ class RegistrationService:
                 return (event, found) if found is not None else None
 
         matches = [item for item in await asyncio.gather(*(inspect(e) for e in candidates)) if item]
-        cursor = None
-        if len(candidates) == event_limit:
-            last = candidates[-1]
-            cursor = (last.created_at, last.event_id)
-        return matches, cursor
+        if not candidates:
+            return RegisteredGamesPage(
+                rows=matches,
+                first_event=None,
+                last_event=None,
+                has_previous=False,
+                has_next=False,
+            )
+        first, last = candidates[0], candidates[-1]
+        previous, following = await asyncio.gather(
+            self.events.list_page(before=(first.created_at, first.event_id), limit=1),
+            self.events.list_page(after=(last.created_at, last.event_id), limit=1),
+        )
+        return RegisteredGamesPage(
+            rows=matches,
+            first_event=first,
+            last_event=last,
+            has_previous=bool(previous),
+            has_next=bool(following),
+        )
 
     async def enqueue(
         self,

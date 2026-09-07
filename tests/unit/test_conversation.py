@@ -23,6 +23,7 @@ from larp_bot.application.conversation import (
     ADMIN,
     ADMIN_MENU,
     ARCHIVE_GAME,
+    ARCHIVED_GAMES,
     CANCEL,
     CHANGE_STATUS,
     CHARACTER,
@@ -43,6 +44,9 @@ from larp_bot.application.conversation import (
     MANAGE_MODERATORS,
     MANAGE_PLAYERS,
     MASTER_TABLE_DISCLAIMER,
+    PAGE_BACK,
+    PAGE_FORWARD,
+    PAGE_SIZE,
     PROFILE,
     REMOVE_EVENT_LEADER,
     REMOVE_PLAYER,
@@ -966,8 +970,8 @@ async def test_event_leader_pages_waiting_players_and_shows_signup_profiles(
 
     first = await engine.handle(inbound(2, f"ag:waiting:{event.event_id}", callback=True))
     first_players = [button for button in first.buttons if button.value.startswith("admin:waiting:pick:")]
-    assert len(first_players) == 10
-    assert [button.label for button in first_players] == [f"Игрок Telegram {index}" for index in range(10)]
+    assert len(first_players) == PAGE_SIZE
+    assert [button.label for button in first_players] == [f"Игрок Telegram {index}" for index in range(PAGE_SIZE)]
     assert "Подтвердивший игрок" not in [button.label for button in first_players]
     assert "Отменивший игрок" not in [button.label for button in first_players]
 
@@ -979,12 +983,17 @@ async def test_event_leader_pages_waiting_players_and_shows_signup_profiles(
     )
 
     returned = await engine.handle(inbound(4, f"ag:waiting:{event.event_id}", callback=True))
-    next_button = next(button for button in returned.buttons if button.label == "➡️ Следующая")
+    next_button = next(button for button in returned.buttons if button.label == PAGE_FORWARD)
     second = await engine.handle(inbound(5, next_button.value, callback=True))
     second_players = [button for button in second.buttons if button.value.startswith("admin:waiting:pick:")]
-    assert [button.label for button in second_players] == ["Игрок ВК"]
+    assert [button.label for button in second_players] == [f"Игрок Telegram {index}" for index in range(5, 10)]
 
-    vk_profile = await engine.handle(inbound(6, second_players[0].value, callback=True))
+    next_button = next(button for button in second.buttons if button.label == PAGE_FORWARD)
+    third = await engine.handle(inbound(6, next_button.value, callback=True))
+    third_players = [button for button in third.buttons if button.value.startswith("admin:waiting:pick:")]
+    assert [button.label for button in third_players] == ["Игрок ВК"]
+
+    vk_profile = await engine.handle(inbound(7, third_players[0].value, callback=True))
     assert vk_profile.text == (
         "Этот пользователь зарегистрировался через бота ВК. "
         "Вот его профиль вк: https://vk.com/id250\n"
@@ -1033,21 +1042,27 @@ async def test_event_leader_pages_profile_names_and_confirms_player_removal(
 
     first = await engine.handle(inbound(3, f"ag:remove:{event.event_id}", callback=True))
     first_players = [button for button in first.buttons if button.value.startswith("admin:remove:pick:")]
-    assert len(first_players) == 10
+    assert len(first_players) == PAGE_SIZE
     assert first_players[0].label == "Фамилия0 Имя0 — Ожидается"
     assert "Отменённый Игрок" not in [button.label for button in first_players]
     assert "имена из их профилей" in first.text
 
-    next_button = next(button for button in first.buttons if button.label == "➡️ Следующая")
+    next_button = next(button for button in first.buttons if button.label == PAGE_FORWARD)
     second = await engine.handle(inbound(4, next_button.value, callback=True))
     second_players = [button for button in second.buttons if button.value.startswith("admin:remove:pick:")]
-    assert [button.label for button in second_players] == ["Фамилия10 Имя10 — Ожидается"]
+    assert [button.label for button in second_players] == [
+        "Фамилия5 Имя5 — Подтверждено",
+        "Фамилия6 Имя6 — Ожидается",
+        "Фамилия7 Имя7 — Подтверждено",
+        "Фамилия8 Имя8 — Ожидается",
+        "Фамилия9 Имя9 — Подтверждено",
+    ]
 
     stale = await engine.handle(inbound(5, first_players[0].value, callback=True))
     assert "кнопка устарела" in stale.text.casefold()
     assert publisher.commands == []
 
-    previous_button = next(button for button in second.buttons if button.label == "⬅️ Предыдущая")
+    previous_button = next(button for button in second.buttons if button.label == PAGE_BACK)
     returned = await engine.handle(inbound(6, previous_button.value, callback=True))
     target = next(button for button in returned.buttons if button.label.startswith("Фамилия1 Имя1 —"))
     warning = await engine.handle(inbound(7, target.value, callback=True))
@@ -1336,8 +1351,8 @@ async def test_admin_lists_and_removes_moderators_with_pagination_and_notificati
 
     first_page = await engine.handle(inbound(3, LIST_GAMEMASTERS, callback=True))
     profile_buttons = [button for button in first_page.buttons if button.value.startswith("mod:view:")]
-    assert len(profile_buttons) == 10
-    assert any(button.value == "mod:list-page:10" for button in first_page.buttons)
+    assert len(profile_buttons) == PAGE_SIZE
+    assert any(button.value == f"mod:list-page:{PAGE_SIZE}" for button in first_page.buttons)
     profile = await engine.handle(inbound(4, profile_buttons[0].value, callback=True))
     assert "Модератор" in profile.text
     assert "https://t.me/moderator_" in profile.text
@@ -1588,8 +1603,8 @@ async def test_master_management_adds_lists_and_removes_moderator_with_notificat
 
     candidates = await engine.handle(inbound(3, f"master:add:{event.event_id}", callback=True))
     candidate_buttons = [button for button in candidates.buttons if button.value.startswith("master:add-pick:")]
-    assert len(candidate_buttons) == 10
-    assert any(button.value == "master:add-page:10" for button in candidates.buttons)
+    assert len(candidate_buttons) == PAGE_SIZE
+    assert any(button.value == f"master:add-page:{PAGE_SIZE}" for button in candidates.buttons)
     assert any(button.value == "master:add-direct" for button in candidates.buttons)
     added = await engine.handle(inbound(4, "master:add-pick:t:2", callback=True))
 
@@ -1728,32 +1743,45 @@ async def test_admin_game_buttons_are_newest_first_and_paginated(disk_store: Mem
 
     first = await engine.handle(inbound(1, MANAGE_GAMES))
     game_buttons = [button for button in first.buttons if button.value.startswith("ag:manage:")]
-    next_button = next(button for button in first.buttons if button.label == "➡️ Следующая")
-    assert len(game_buttons) == 10
-    assert [button.label for button in game_buttons] == [f"Game {index}" for index in range(20, 10, -1)]
+    next_button = next(button for button in first.buttons if button.label == PAGE_FORWARD)
+    assert len(game_buttons) == PAGE_SIZE
+    assert [button.label for button in game_buttons] == [f"Game {index}" for index in range(20, 15, -1)]
+    assert PAGE_BACK not in {button.label for button in first.buttons}
 
     second = await engine.handle(inbound(2, next_button.value, callback=True))
     assert [button.label for button in second.buttons if button.value.startswith("ag:manage:")] == [
-        f"Game {index}" for index in range(10, 0, -1)
+        f"Game {index}" for index in range(15, 10, -1)
     ]
-    previous_button = next(button for button in second.buttons if button.label == "⬅️ Предыдущая")
+    previous_button = next(button for button in second.buttons if button.label == PAGE_BACK)
     returned = await engine.handle(inbound(3, previous_button.value, callback=True))
     assert [button.label for button in returned.buttons if button.value.startswith("ag:manage:")] == [
-        f"Game {index}" for index in range(20, 10, -1)
+        f"Game {index}" for index in range(20, 15, -1)
     ]
-    second_next = next(button for button in second.buttons if button.label == "➡️ Следующая")
+    second_next = next(button for button in second.buttons if button.label == PAGE_FORWARD)
     third = await engine.handle(inbound(4, second_next.value, callback=True))
-    assert [button.label for button in third.buttons if button.value.startswith("ag:manage:")] == ["Game 0"]
+    assert [button.label for button in third.buttons if button.value.startswith("ag:manage:")] == [
+        f"Game {index}" for index in range(10, 5, -1)
+    ]
     second_again = await engine.handle(
-        inbound(5, next(button.value for button in third.buttons if button.label == "⬅️ Предыдущая"), callback=True)
+        inbound(5, next(button.value for button in third.buttons if button.label == PAGE_BACK), callback=True)
     )
     assert [button.label for button in second_again.buttons if button.value.startswith("ag:manage:")] == [
-        f"Game {index}" for index in range(10, 0, -1)
+        f"Game {index}" for index in range(15, 10, -1)
     ]
+    fourth = await engine.handle(
+        inbound(6, next(button.value for button in third.buttons if button.label == PAGE_FORWARD), callback=True)
+    )
+    last = await engine.handle(
+        inbound(7, next(button.value for button in fourth.buttons if button.label == PAGE_FORWARD), callback=True)
+    )
+    assert [button.label for button in last.buttons if button.value.startswith("ag:manage:")] == ["Game 0"]
+    assert PAGE_BACK in {button.label for button in last.buttons}
+    assert PAGE_FORWARD not in {button.label for button in last.buttons}
+    assert last.buttons[-1] == Button(label="Отмена", value=ADMIN_MENU)
 
 
 @pytest.mark.asyncio
-async def test_admin_sees_archived_games_as_read_only_management_entries(
+async def test_admin_sees_archived_games_only_in_read_only_archive_menu(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -1766,25 +1794,44 @@ async def test_admin_sees_archived_games_as_read_only_management_entries(
         created_at=now,
         updated_at=now,
     )
-    archived = Event.model_validate(
-        event.model_dump()
-        | {
-            "event_id": "event-archived",
-            "name": "Archived",
-            "status": EventStatus.CLOSED,
-            "created_at": now + timedelta(seconds=1),
-            "archived_at": now,
-        }
-    )
-    engine, _, _, _ = await engine_setup(disk_store, closed, archived, admin=True)
+    archived = [
+        Event.model_validate(
+            event.model_dump()
+            | {
+                "event_id": f"event-archived-{index}",
+                "name": f"Archived {index}",
+                "status": EventStatus.CLOSED,
+                "created_at": now + timedelta(seconds=index + 1),
+                "archived_at": now,
+            }
+        )
+        for index in range(PAGE_SIZE + 1)
+    ]
+    engine, _, _, _ = await engine_setup(disk_store, closed, *archived, admin=True)
 
     games = await engine.handle(inbound(1, MANAGE_GAMES))
 
     labels = [button.label for button in games.buttons if button.value.startswith("ag:manage:")]
-    assert labels == ["Archived", "Closed but managed"]
-    archived_management = await engine.handle(inbound(2, "ag:manage:event-archived", callback=True))
+    assert labels == ["Closed but managed"]
+    assert ARCHIVED_GAMES in {button.label for button in games.buttons}
+    assert sum(button.label == ARCHIVED_GAMES for button in games.buttons) == 1
+
+    archive = await engine.handle(inbound(2, ARCHIVED_GAMES, callback=True))
+    assert [button.label for button in archive.buttons if button.value.startswith("ag:manage:")] == [
+        f"Archived {index}" for index in range(PAGE_SIZE, 0, -1)
+    ]
+    assert PAGE_BACK not in {button.label for button in archive.buttons}
+    archive_next = next(button.value for button in archive.buttons if button.label == PAGE_FORWARD)
+    assert archive.buttons[-1] == Button(label="Отмена", value=MANAGE_GAMES)
+
+    archive_last = await engine.handle(inbound(3, archive_next, callback=True))
+    assert [button.label for button in archive_last.buttons if button.value.startswith("ag:manage:")] == ["Archived 0"]
+    assert PAGE_BACK in {button.label for button in archive_last.buttons}
+    assert PAGE_FORWARD not in {button.label for button in archive_last.buttons}
+
+    archived_management = await engine.handle(inbound(4, "ag:manage:event-archived-0", callback=True))
     assert "Статус: Архивирована" in archived_management.text
-    assert archived_management.buttons == [Button(label="⬅️ Назад", value=MANAGE_GAMES)]
+    assert archived_management.buttons == [Button(label="⬅️ Назад", value=ARCHIVED_GAMES)]
 
 
 @pytest.mark.asyncio
@@ -1958,8 +2005,8 @@ async def test_event_tables_action_returns_all_three_permanent_links(disk_store:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("count", [0, 1, 10, 11, 20, 21])
-async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDiskStore) -> None:
+@pytest.mark.parametrize("count", [0, 1, 5, 6, 10, 11])
+async def test_admin_pagination_uses_shared_page_size(count: int, disk_store: MemoryDiskStore) -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     events = [
         Event(
@@ -1996,10 +2043,78 @@ async def test_admin_pagination_is_exactly_ten(count: int, disk_store: MemoryDis
     )
     page = await engine.handle(inbound(1, MANAGE_GAMES))
     game_buttons = [button for button in page.buttons if button.value.startswith("ag:manage:")]
-    assert len(game_buttons) == min(count, 10)
+    assert len(game_buttons) == min(count, PAGE_SIZE)
     assert [button.label for button in game_buttons] == [
-        f"Game {index}" for index in range(count - 1, max(count - 11, -1), -1)
+        f"Game {index}" for index in range(count - 1, max(count - PAGE_SIZE - 1, -1), -1)
     ]
     assert "https://disk.example/" not in page.text
-    has_next = any(button.label == "➡️ Следующая" for button in page.buttons)
-    assert has_next is (count > 10)
+    labels = {button.label for button in page.buttons}
+    assert (PAGE_FORWARD in labels) is (count > PAGE_SIZE)
+    assert PAGE_BACK not in labels
+    assert page.buttons[-1] == Button(label="Отмена", value=ADMIN_MENU)
+
+
+@pytest.mark.asyncio
+async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_store: MemoryDiskStore) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        Event(
+            event_id=f"event-{index:04d}",
+            name=f"Game {index}",
+            disk_resource_path=f"disk:/larp-bot/events/event-{index:04d}/game.xlsx",
+            public_registration_url=f"https://disk.example/{index}",
+            status=EventStatus.CONFIRMATION_OPEN,
+            registrations_migrated_at=base,
+            created_at=base + timedelta(seconds=index),
+            updated_at=base + timedelta(seconds=index),
+        )
+        for index in range(PAGE_SIZE + 1)
+    ]
+    engine, _, _, registrations = await engine_setup(disk_store, *events)
+    await registrations.import_missing(
+        [
+            Registration(
+                event_id=candidate.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, 1, candidate.event_id),
+                display_name="Иван Иванов",
+                wish_play="Без пожеланий",
+            )
+            for candidate in events
+        ]
+    )
+
+    enlist_first = await engine.handle(inbound(1, ENLIST))
+    assert len([button for button in enlist_first.buttons if button.value.startswith("select:enlist:")]) == PAGE_SIZE
+    assert PAGE_BACK not in {button.label for button in enlist_first.buttons}
+    enlist_second = await engine.handle(
+        inbound(
+            2,
+            next(button.value for button in enlist_first.buttons if button.label == PAGE_FORWARD),
+            callback=True,
+        )
+    )
+    assert len([button for button in enlist_second.buttons if button.value.startswith("select:enlist:")]) == 1
+    assert PAGE_BACK in {button.label for button in enlist_second.buttons}
+    assert PAGE_FORWARD not in {button.label for button in enlist_second.buttons}
+    assert enlist_second.buttons[-1] == Button(label="Отмена", value="Отмена")
+
+    registered_first = await engine.handle(inbound(3, CONFIRM))
+    registered_second = await engine.handle(
+        inbound(
+            4,
+            next(button.value for button in registered_first.buttons if button.label == PAGE_FORWARD),
+            callback=True,
+        )
+    )
+    assert len([button for button in registered_second.buttons if button.value.startswith("select:confirm:")]) == 1
+    assert PAGE_BACK in {button.label for button in registered_second.buttons}
+    assert PAGE_FORWARD not in {button.label for button in registered_second.buttons}
+    returned = await engine.handle(
+        inbound(
+            5,
+            next(button.value for button in registered_second.buttons if button.label == PAGE_BACK),
+            callback=True,
+        )
+    )
+    assert len([button for button in returned.buttons if button.value.startswith("select:confirm:")]) == PAGE_SIZE
+    assert PAGE_BACK not in {button.label for button in returned.buttons}

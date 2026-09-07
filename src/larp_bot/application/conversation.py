@@ -65,6 +65,9 @@ CANCEL = "❌ Отменить участие"
 ADMIN = "🛠 Администрирование"
 BACK = "⬅️ Назад"
 CANCEL_DIALOG = "Отмена"
+PAGE_BACK = "Назад"
+PAGE_FORWARD = "Вперёд"
+PAGE_SIZE = 5
 NO_WISHES = "Без пожеланий"
 KEEP = "Оставить без изменений"
 SKIP = "Пропустить"
@@ -79,6 +82,7 @@ REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
+ARCHIVED_GAMES = "Архив игр"
 MANAGE_MODERATORS = "Управление модераторами"
 MANAGE_STATISTICS = "Управление статистикой"
 STATS_LINKS = "Ссылки на таблицы статистики"
@@ -123,6 +127,7 @@ ADMIN_ACTIONS = frozenset(
         STATS_ADD_GAME,
         "➕ Создать игру",
         MANAGE_GAMES,
+        ARCHIVED_GAMES,
         EVENT_TABLES,
         CHANGE_STATUS,
         SEND_CONFIRMATION_REMINDER,
@@ -220,6 +225,21 @@ def _bool_text(value: bool | None) -> str:
 
 def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
+
+
+def _pagination_buttons(
+    *,
+    previous: str | None,
+    following: str | None,
+    cancel: str,
+) -> list[Button]:
+    buttons: list[Button] = []
+    if previous is not None:
+        buttons.append(Button(label=PAGE_BACK, value=previous))
+    if following is not None:
+        buttons.append(Button(label=PAGE_FORWARD, value=following))
+    buttons.append(Button(label=CANCEL_DIALOG, value=cancel))
+    return buttons
 
 
 def game_management_button(event_id: str) -> Button:
@@ -330,7 +350,9 @@ class ConversationEngine:
             or value in {ADMIN, ADMIN_MENU}
             or value in ADMIN_ACTIONS
             or value in LEGACY_STATUS_ACTIONS
-            or value.startswith(("ag:", "mod:", "master:", "stats:", "select:admin-", "page:admin-", "page:a:"))
+            or value.startswith(
+                ("ag:", "mod:", "master:", "stats:", "select:admin-", "page:admin-", "page:a:", "page:r:")
+            )
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
         if value == "/start":
@@ -649,23 +671,47 @@ class ConversationEngine:
         statuses: frozenset[EventStatus] | None,
         *,
         after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
         empty_text: str = "Подходящих игр сейчас нет.",
     ) -> BotResponse:
-        events = list(await self.events.list_page(statuses=statuses, after=after, archived=False, limit=10))
+        events = list(
+            await self.events.list_page(
+                statuses=statuses,
+                after=after,
+                before=before,
+                archived=False,
+                limit=PAGE_SIZE,
+            )
+        )
+        cancel = ADMIN_MENU if flow.startswith("admin-") else CANCEL_DIALOG
         if not events:
-            return BotResponse(text=empty_text, buttons=[Button(label=BACK, value=BACK)])
-        buttons = _event_buttons(events, flow)
-        if len(events) == 10:
-            last = events[-1]
-            more = await self.events.list_page(
+            return BotResponse(
+                text=empty_text,
+                buttons=_pagination_buttons(previous=None, following=None, cancel=cancel),
+            )
+        first, last = events[0], events[-1]
+        previous, following = await asyncio.gather(
+            self.events.list_page(
+                statuses=statuses,
+                before=(first.created_at, first.event_id),
+                archived=False,
+                limit=1,
+            ),
+            self.events.list_page(
                 statuses=statuses,
                 after=(last.created_at, last.event_id),
                 archived=False,
                 limit=1,
+            ),
+        )
+        buttons = _event_buttons(events, flow)
+        buttons.extend(
+            _pagination_buttons(
+                previous=self._event_cursor("e", "p", flow, first) if previous else None,
+                following=self._event_cursor("e", "n", flow, last) if following else None,
+                cancel=cancel,
             )
-            if more:
-                buttons.append(Button(label="➡️ Далее", value=self._cursor(flow, last)))
-        buttons.append(Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG))
+        )
         return BotResponse(text="🎮 Выберите игру:", buttons=buttons)
 
     async def _show_open_events(self, flow: str) -> BotResponse:
@@ -676,21 +722,78 @@ class ConversationEngine:
         )
 
     @staticmethod
-    def _cursor(flow: str, event: Event) -> str:
+    def _event_cursor(kind: str, direction: str, flow: str, event: Event) -> str:
+        flow_codes = {
+            "enlist": "e",
+            "confirm": "c",
+            "character": "w",
+            "cancel": "x",
+            "admin-status": "s",
+            "admin-archive": "a",
+            "admin-delete": "d",
+            "admin-reminder": "r",
+            "admin-notification": "n",
+            "admin-pass-create": "p",
+            "admin-leader-add": "l",
+        }
         micros = int(event.created_at.timestamp() * 1_000_000)
-        return f"page:{flow}:{micros}:{event.event_id}"
+        return f"page:{kind}:{direction}:{flow_codes[flow]}:{micros}:{event.event_id}"
 
     async def _page(self, user: User, value: str) -> BotResponse:
-        if value.startswith("page:a:"):
+        if value.startswith(("page:a:", "page:r:")):
             parts = value.split(":", 4)
             if len(parts) != 5 or parts[2] not in {"n", "p"} or not parts[3].isdigit():
                 return BotResponse(text="Некорректная страница.")
             if not await self._has_admin_access(user):
                 return BotResponse(text="Недостаточно прав.")
+            archived = parts[1] == "r"
+            if archived and not await self._is_admin(user):
+                return BotResponse(text="Недостаточно прав.")
             cursor = (datetime.fromtimestamp(int(parts[3]) / 1_000_000, UTC), parts[4])
             if parts[2] == "p":
-                return await self._show_admin_games(user, before=cursor)
-            return await self._show_admin_games(user, after=cursor)
+                return await self._show_admin_games(user, before=cursor, archived=archived)
+            return await self._show_admin_games(user, after=cursor, archived=archived)
+        parts = value.split(":", 5)
+        if len(parts) == 6 and parts[1] in {"e", "u"}:
+            flow_codes = {
+                "e": "enlist",
+                "c": "confirm",
+                "w": "character",
+                "x": "cancel",
+                "s": "admin-status",
+                "a": "admin-archive",
+                "d": "admin-delete",
+                "r": "admin-reminder",
+                "n": "admin-notification",
+                "p": "admin-pass-create",
+                "l": "admin-leader-add",
+            }
+            _, kind, direction, flow_code, micros, event_id = parts
+            flow = flow_codes.get(flow_code)
+            if direction not in {"n", "p"} or flow is None or not micros.isdigit():
+                return BotResponse(text="Некорректная страница.")
+            if flow.startswith("admin-") and not await self._has_admin_access(user):
+                return BotResponse(text="Недостаточно прав.")
+            cursor = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
+            if kind == "u":
+                if direction == "p":
+                    return await self._show_registered(user, flow, before=cursor)
+                return await self._show_registered(user, flow, after=cursor)
+            event_flow_statuses = {
+                "enlist": REGISTRATION_OPEN_STATUSES,
+                "admin-status": None,
+                "admin-archive": None,
+                "admin-delete": None,
+                "admin-reminder": frozenset({EventStatus.CONFIRMATION_OPEN}),
+                "admin-notification": None,
+                "admin-pass-create": None,
+                "admin-leader-add": None,
+            }
+            if flow not in event_flow_statuses:
+                return BotResponse(text="Некорректная страница.")
+            if direction == "p":
+                return await self._show_events(flow, event_flow_statuses[flow], before=cursor)
+            return await self._show_events(flow, event_flow_statuses[flow], after=cursor)
         parts = value.split(":", 3)
         if len(parts) != 4 or not parts[2].isdigit():
             return BotResponse(text="Некорректная страница.")
@@ -722,6 +825,7 @@ class ConversationEngine:
         flow: str,
         *,
         after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
     ) -> BotResponse:
         if not is_profile_complete(user):
             return BotResponse(
@@ -729,18 +833,36 @@ class ConversationEngine:
                 buttons=[Button(label=PROFILE, value=PROFILE)],
             )
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        matches, cursor = await self.registrations.registered_games_page(platform, user_id(user), after=after)
+        page = await self.registrations.registered_games_page(
+            platform,
+            user_id(user),
+            after=after,
+            before=before,
+            event_limit=PAGE_SIZE,
+        )
+        matches = page.rows
         actionable_matches = matches
         if flow == "confirm":
             actionable_matches = [item for item in matches if item[0].status is EventStatus.CONFIRMATION_OPEN]
         elif flow in {"cancel", "character"}:
             actionable_matches = [item for item in matches if item[0].archived_at is None]
         buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
-        if cursor is not None:
-            micros = int(cursor[0].timestamp() * 1_000_000)
-            buttons.append(Button(label="➡️ Далее", value=f"page:{flow}:{micros}:{cursor[1]}"))
-        buttons.append(Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG))
-        if not matches and cursor is None:
+        buttons.extend(
+            _pagination_buttons(
+                previous=(
+                    self._event_cursor("u", "p", flow, page.first_event)
+                    if page.has_previous and page.first_event is not None
+                    else None
+                ),
+                following=(
+                    self._event_cursor("u", "n", flow, page.last_event)
+                    if page.has_next and page.last_event is not None
+                    else None
+                ),
+                cancel=CANCEL_DIALOG,
+            )
+        )
+        if not matches and not page.has_previous and not page.has_next:
             return BotResponse(text="У вас пока нет записей на игры.", buttons=buttons)
         if flow == "confirm" and not actionable_matches:
             created = any(event.status is EventStatus.CREATED for event, _ in matches)
@@ -1181,8 +1303,8 @@ class ConversationEngine:
             return BotResponse(text="Некорректная страница.")
         profiles = await self._moderator_users(removable=mode == "remove")
         if offset >= len(profiles) and offset:
-            offset = max(0, ((len(profiles) - 1) // 10) * 10)
-        page = profiles[offset : offset + 10]
+            offset = max(0, ((len(profiles) - 1) // PAGE_SIZE) * PAGE_SIZE)
+        page = profiles[offset : offset + PAGE_SIZE]
         user.dialog_state = "ADMIN_MODERATOR_REMOVE" if mode == "remove" else "ADMIN_MODERATOR_LIST"
         user.dialog_context = {"moderator_offset": offset}
         if mode == "remove":
@@ -1200,11 +1322,13 @@ class ConversationEngine:
             )
             for profile in page
         ]
-        if offset:
-            buttons.append(Button(label="⬅️ Предыдущая", value=f"mod:{mode}-page:{max(0, offset - 10)}"))
-        if offset + 10 < len(profiles):
-            buttons.append(Button(label="➡️ Следующая", value=f"mod:{mode}-page:{offset + 10}"))
-        buttons.append(Button(label=BACK, value=MANAGE_MODERATORS))
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"mod:{mode}-page:{max(0, offset - PAGE_SIZE)}" if offset else None,
+                following=f"mod:{mode}-page:{offset + PAGE_SIZE}" if offset + PAGE_SIZE < len(profiles) else None,
+                cancel=MANAGE_MODERATORS,
+            )
+        )
         return BotResponse(text=text if page else empty, buttons=buttons)
 
     async def _event_masters_menu(self, user: User, event: Event) -> BotResponse:
@@ -1260,8 +1384,8 @@ class ConversationEngine:
             ),
         )
         if offset >= len(candidates) and offset:
-            offset = max(0, ((len(candidates) - 1) // 10) * 10)
-        page = candidates[offset : offset + 10]
+            offset = max(0, ((len(candidates) - 1) // PAGE_SIZE) * PAGE_SIZE)
+        page = candidates[offset : offset + PAGE_SIZE]
         user.dialog_state = "ADMIN_EVENT_LEADER_ADD_PICK"
         user.dialog_context = {
             "event_id": event.event_id,
@@ -1275,15 +1399,13 @@ class ConversationEngine:
             )
             for profile in page
         ]
-        if offset:
-            buttons.append(Button(label="⬅️ Предыдущая", value=f"master:add-page:{max(0, offset - 10)}"))
-        if offset + 10 < len(candidates):
-            buttons.append(Button(label="➡️ Следующая", value=f"master:add-page:{offset + 10}"))
+        buttons.append(Button(label="🔗 Ввести профиль Telegram или VK", value="master:add-direct"))
         buttons.extend(
-            [
-                Button(label="🔗 Ввести профиль Telegram или VK", value="master:add-direct"),
-                Button(label=BACK, value=f"ag:masters:{event.event_id}"),
-            ]
+            _pagination_buttons(
+                previous=f"master:add-page:{max(0, offset - PAGE_SIZE)}" if offset else None,
+                following=f"master:add-page:{offset + PAGE_SIZE}" if offset + PAGE_SIZE < len(candidates) else None,
+                cancel=f"ag:masters:{event.event_id}",
+            )
         )
         text = (
             f"Выберите модератора или администратора, которого нужно добавить мастером игры «{event.name}»:"
@@ -1309,8 +1431,8 @@ class ConversationEngine:
         if mode == "remove":
             records = [record for record in records if record[1] is not None]
         if offset >= len(records) and offset:
-            offset = max(0, ((len(records) - 1) // 10) * 10)
-        page = records[offset : offset + 10]
+            offset = max(0, ((len(records) - 1) // PAGE_SIZE) * PAGE_SIZE)
+        page = records[offset : offset + PAGE_SIZE]
         user.dialog_state = "ADMIN_EVENT_LEADER_REMOVE" if mode == "remove" else "ADMIN_EVENT_LEADER_LIST"
         user.dialog_context = {
             "event_id": event.event_id,
@@ -1325,11 +1447,13 @@ class ConversationEngine:
             )
             for identity, profile in page
         ]
-        if offset:
-            buttons.append(Button(label="⬅️ Предыдущая", value=f"master:{mode}-page:{max(0, offset - 10)}"))
-        if offset + 10 < len(records):
-            buttons.append(Button(label="➡️ Следующая", value=f"master:{mode}-page:{offset + 10}"))
-        buttons.append(Button(label=BACK, value=f"ag:masters:{event.event_id}"))
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"master:{mode}-page:{max(0, offset - PAGE_SIZE)}" if offset else None,
+                following=f"master:{mode}-page:{offset + PAGE_SIZE}" if offset + PAGE_SIZE < len(records) else None,
+                cancel=f"ag:masters:{event.event_id}",
+            )
+        )
         if mode == "remove":
             text = f"Выберите мастера, которого нужно удалить из игры «{event.name}»:"
             empty = "В этой игре нет назначенных мастеров, которых можно удалить."
@@ -2019,9 +2143,10 @@ class ConversationEngine:
         )
 
     @staticmethod
-    def _admin_game_cursor(direction: str, event: Event) -> str:
+    def _admin_game_cursor(direction: str, event: Event, *, archived: bool) -> str:
         micros = int(event.created_at.timestamp() * 1_000_000)
-        return f"page:a:{direction}:{micros}:{event.event_id}"
+        scope = "r" if archived else "a"
+        return f"page:{scope}:{direction}:{micros}:{event.event_id}"
 
     @staticmethod
     def _stored_registration_cursor(user: User, name: str) -> tuple[datetime, str]:
@@ -2043,6 +2168,7 @@ class ConversationEngine:
             event.event_id,
             after=after,
             before=before,
+            limit=PAGE_SIZE,
         )
         user.dialog_state = "ADMIN_REMOVE_PICK"
         user.dialog_context = {
@@ -2052,7 +2178,11 @@ class ConversationEngine:
         if not page.rows:
             return BotResponse(
                 text=(f"В игре «{event.name}» нет записавшихся или подтвердивших участие игроков."),
-                buttons=[player_management_button(event.event_id)],
+                buttons=_pagination_buttons(
+                    previous=None,
+                    following=None,
+                    cancel=f"ag:players:{event.event_id}",
+                ),
             )
 
         choices: dict[str, str] = {}
@@ -2067,11 +2197,13 @@ class ConversationEngine:
                 )
             )
         page_token = token_urlsafe(8)
-        if page.has_previous:
-            buttons.append(Button(label="⬅️ Предыдущая", value=f"admin:remove:page:p:{page_token}"))
-        if page.has_next:
-            buttons.append(Button(label="➡️ Следующая", value=f"admin:remove:page:n:{page_token}"))
-        buttons.append(player_management_button(event.event_id))
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"admin:remove:page:p:{page_token}" if page.has_previous else None,
+                following=f"admin:remove:page:n:{page_token}" if page.has_next else None,
+                cancel=f"ag:players:{event.event_id}",
+            )
+        )
         user.dialog_context.update(
             {
                 "remove_choices": choices,
@@ -2103,6 +2235,7 @@ class ConversationEngine:
             event.event_id,
             after=after,
             before=before,
+            limit=PAGE_SIZE,
         )
         user.dialog_state = "ADMIN_WAITING_PICK"
         user.dialog_context = {
@@ -2112,7 +2245,11 @@ class ConversationEngine:
         if not page.rows:
             return BotResponse(
                 text=f"В игре «{event.name}» нет записавшихся, которые ещё не подтвердили участие.",
-                buttons=[game_management_button(event.event_id)],
+                buttons=_pagination_buttons(
+                    previous=None,
+                    following=None,
+                    cancel=f"ag:manage:{event.event_id}",
+                ),
             )
 
         choices: dict[str, str] = {}
@@ -2127,11 +2264,13 @@ class ConversationEngine:
                 )
             )
         page_token = token_urlsafe(8)
-        if page.has_previous:
-            buttons.append(Button(label="⬅️ Предыдущая", value=f"admin:waiting:page:p:{page_token}"))
-        if page.has_next:
-            buttons.append(Button(label="➡️ Следующая", value=f"admin:waiting:page:n:{page_token}"))
-        buttons.append(game_management_button(event.event_id))
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"admin:waiting:page:p:{page_token}" if page.has_previous else None,
+                following=f"admin:waiting:page:n:{page_token}" if page.has_next else None,
+                cancel=f"ag:manage:{event.event_id}",
+            )
+        )
         user.dialog_context.update(
             {
                 "waiting_choices": choices,
@@ -2407,7 +2546,7 @@ class ConversationEngine:
     @staticmethod
     def _statistics_cursor(direction: str, event: Event) -> str:
         micros = int(event.created_at.timestamp() * 1_000_000)
-        return f"stats:page:{direction}:{micros}:{event.event_id}"
+        return f"stats:p:{direction}:{micros}:{event.event_id}"
 
     async def _statistics_menu(self, user: User) -> BotResponse:
         if not await self._is_admin(user):
@@ -2436,12 +2575,14 @@ class ConversationEngine:
                 before=before,
                 archived=False,
                 newest_first=True,
-                limit=10,
+                limit=PAGE_SIZE,
             )
         )
-        back = Button(label=BACK, value=MANAGE_STATISTICS)
         if not events:
-            return BotResponse(text="Нет неархивированных игр для добавления в статистику.", buttons=[back])
+            return BotResponse(
+                text="Нет неархивированных игр для добавления в статистику.",
+                buttons=_pagination_buttons(previous=None, following=None, cancel=MANAGE_STATISTICS),
+            )
         first, last = events[0], events[-1]
         previous, following = await asyncio.gather(
             self.events.list_page(
@@ -2458,18 +2599,20 @@ class ConversationEngine:
             ),
         )
         buttons = [Button(label=event.name, value=f"stats:game:{event.event_id}") for event in events]
-        if previous:
-            buttons.append(Button(label="⬅️ Предыдущая", value=self._statistics_cursor("p", first)))
-        if following:
-            buttons.append(Button(label="➡️ Следующая", value=self._statistics_cursor("n", last)))
-        buttons.append(back)
+        buttons.extend(
+            _pagination_buttons(
+                previous=self._statistics_cursor("p", first) if previous else None,
+                following=self._statistics_cursor("n", last) if following else None,
+                cancel=MANAGE_STATISTICS,
+            )
+        )
         return BotResponse(text="Выберите неархивированную игру для добавления в статистику:", buttons=buttons)
 
     async def _statistics_action(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if not await self._is_admin(user):
             return BotResponse(text="Недостаточно прав.")
         parts = value.split(":", 4)
-        if len(parts) == 5 and parts[:2] == ["stats", "page"]:
+        if len(parts) == 5 and parts[:2] in (["stats", "p"], ["stats", "page"]):
             if parts[2] not in {"n", "p"} or not parts[3].isdigit():
                 return BotResponse(text="Некорректная страница.")
             cursor = (datetime.fromtimestamp(int(parts[3]) / 1_000_000, UTC), parts[4])
@@ -2497,45 +2640,63 @@ class ConversationEngine:
         *,
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
+        archived: bool = False,
     ) -> BotResponse:
-        archive_filter = None if await self._is_admin(user) else False
+        is_admin = await self._is_admin(user)
+        if archived and not is_admin:
+            return BotResponse(text="Недостаточно прав.")
         events = list(
             await self.events.list_page(
                 after=after,
                 before=before,
-                archived=archive_filter,
+                archived=archived,
                 newest_first=True,
-                limit=10,
+                limit=PAGE_SIZE,
             )
         )
         if not events:
+            buttons = []
+            if not archived and is_admin:
+                buttons.append(Button(label=ARCHIVED_GAMES, value=ARCHIVED_GAMES))
+            buttons.extend(
+                _pagination_buttons(
+                    previous=None,
+                    following=None,
+                    cancel=MANAGE_GAMES if archived else ADMIN_MENU,
+                )
+            )
             return BotResponse(
-                text="Игр для управления нет.",
-                buttons=[Button(label=BACK, value=ADMIN_MENU)],
+                text="Архив игр пуст." if archived else "Игр для управления нет.",
+                buttons=buttons,
             )
 
         first, last = events[0], events[-1]
         previous, following = await asyncio.gather(
             self.events.list_page(
                 before=(first.created_at, first.event_id),
-                archived=archive_filter,
+                archived=archived,
                 newest_first=True,
                 limit=1,
             ),
             self.events.list_page(
                 after=(last.created_at, last.event_id),
-                archived=archive_filter,
+                archived=archived,
                 newest_first=True,
                 limit=1,
             ),
         )
         buttons = [Button(label=event.name, value=f"ag:manage:{event.event_id}") for event in events]
-        if previous:
-            buttons.append(Button(label="⬅️ Предыдущая", value=self._admin_game_cursor("p", first)))
-        if following:
-            buttons.append(Button(label="➡️ Следующая", value=self._admin_game_cursor("n", last)))
-        buttons.append(Button(label=BACK, value=ADMIN_MENU))
-        return BotResponse(text="Управление играми\n\nВыберите игру:", buttons=buttons)
+        if not archived and is_admin:
+            buttons.append(Button(label=ARCHIVED_GAMES, value=ARCHIVED_GAMES))
+        buttons.extend(
+            _pagination_buttons(
+                previous=self._admin_game_cursor("p", first, archived=archived) if previous else None,
+                following=self._admin_game_cursor("n", last, archived=archived) if following else None,
+                cancel=MANAGE_GAMES if archived else ADMIN_MENU,
+            )
+        )
+        title = ARCHIVED_GAMES if archived else MANAGE_GAMES
+        return BotResponse(text=f"{title}\n\nВыберите игру:", buttons=buttons)
 
     async def _game_management(self, user: User, event: Event) -> BotResponse:
         if event.archived_at is not None:
@@ -2551,7 +2712,7 @@ class ConversationEngine:
                     "Статус: Архивирована\n\n"
                     "Архивная игра доступна только для просмотра."
                 ),
-                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                buttons=[Button(label=BACK, value=ARCHIVED_GAMES)],
             )
         is_leader, is_admin = await asyncio.gather(
             self._is_event_leader(user, event.event_id),
@@ -2762,6 +2923,8 @@ class ConversationEngine:
             )
         if value == STATS_ADD_GAME:
             return await self._show_statistics_games(user)
+        if value == ARCHIVED_GAMES:
+            return await self._show_admin_games(user, archived=True)
         if value == MANAGE_MODERATORS:
             return await self._moderator_management_menu(user)
         if value == "➕ Создать игру":
