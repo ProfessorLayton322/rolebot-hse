@@ -410,7 +410,7 @@ class ConversationEngine:
         current_button_values = {button.value for button in user.last_bot_buttons}
         if value == "/start":
             await self._clear(user)
-            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на LARP-игры.")
+            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры.")
         elif message.has_unsupported_content:
             await self._save(user, message)
             return BotResponse(
@@ -433,7 +433,7 @@ class ConversationEngine:
             )
         elif value in {"/menu", MAIN_MENU, BACK}:
             await self._clear(user)
-            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на LARP-игры.")
+            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры.")
         elif value == CANCEL_DIALOG:
             await self._clear(user)
             response = await self._main(user, "Действие отменено.")
@@ -584,7 +584,10 @@ class ConversationEngine:
             else:
                 context["contact"] = _normalize_vk_telegram_contact(value)
             user.dialog_state = "PROFILE_CROSSPLAY"
-            return BotResponse(text="Готовы ли вы кроссполу?", buttons=yes_no_buttons())
+            return BotResponse(
+                text="Готовы ли вы играть за персонажа противоположного пола?",
+                buttons=yes_no_buttons(),
+            )
         if state == "PROFILE_CROSSPLAY":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
