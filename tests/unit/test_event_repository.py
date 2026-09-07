@@ -101,6 +101,20 @@ def test_participant_removal_delivery_state_is_loaded_from_event_json() -> None:
     assert event.participant_removal_notified_keys == ["a" * 43]
 
 
+def test_confirmed_link_promotion_state_is_loaded() -> None:
+    row = event_row("CONFIRMATION_OPEN") | {
+        "last_confirmed_link_promotion_operation_id": "cancel-operation",
+        "last_confirmed_link_promotion_participant_key": "p" * 43,
+        "last_confirmed_link_promotion_delivered_operation_id": "cancel-operation",
+    }
+
+    event = YdbEventRepository._from_row(row)
+
+    assert event.last_confirmed_link_promotion_operation_id == "cancel-operation"
+    assert event.last_confirmed_link_promotion_participant_key == "p" * 43
+    assert event.last_confirmed_link_promotion_delivered_operation_id == "cancel-operation"
+
+
 def test_archival_timestamp_is_loaded() -> None:
     archived_at = datetime(2026, 2, 1, tzinfo=UTC)
     event = YdbEventRepository._from_row(event_row("CLOSED") | {"archived_at": archived_at})
@@ -157,6 +171,24 @@ async def test_reserve_promotion_operation_and_participant_are_persisted_togethe
     await repository.mark_reserve_promotion_delivered("event-a1", "cancel-operation")
 
     assert "last_reserve_promotion_delivered_operation_id = $operation_id" in executor.query_text
+    assert executor.params["$operation_id"] == "cancel-operation"
+
+
+@pytest.mark.asyncio
+async def test_confirmed_link_promotion_operation_and_participant_are_persisted_together() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    await repository.set_confirmed_link_promotion("event-a1", "cancel-operation", "p" * 43)
+
+    assert "last_confirmed_link_promotion_operation_id = $operation_id" in executor.query_text
+    assert "last_confirmed_link_promotion_participant_key = $participant_key" in executor.query_text
+    assert executor.params["$operation_id"] == "cancel-operation"
+    assert executor.params["$participant_key"] == "p" * 43
+
+    await repository.mark_confirmed_link_promotion_delivered("event-a1", "cancel-operation")
+
+    assert "last_confirmed_link_promotion_delivered_operation_id = $operation_id" in executor.query_text
     assert executor.params["$operation_id"] == "cancel-operation"
 
 

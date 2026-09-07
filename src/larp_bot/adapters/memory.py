@@ -224,6 +224,22 @@ class MemoryEventRepository:
         event.last_reserve_promotion_delivered_operation_id = operation_id
         event.updated_at = datetime.now(event.updated_at.tzinfo)
 
+    async def set_confirmed_link_promotion(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_key: str | None,
+    ) -> None:
+        event = self.rows[event_id]
+        event.last_confirmed_link_promotion_operation_id = operation_id
+        event.last_confirmed_link_promotion_participant_key = participant_key
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+
+    async def mark_confirmed_link_promotion_delivered(self, event_id: str, operation_id: str) -> None:
+        event = self.rows[event_id]
+        event.last_confirmed_link_promotion_delivered_operation_id = operation_id
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+
     async def set_participant_removal(
         self,
         event_id: str,

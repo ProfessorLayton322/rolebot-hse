@@ -572,6 +572,7 @@ async def test_unchanged_game_status_sends_no_notifications(
         "https://telegram.me/joinchat/GameChat-123",
         "https://t.me/public_game_chat",
         "https://vk.me/join/GameChat_123-=",
+        "https://vk.me/join/AJQ1d4V/FAtt9xoXEwCAfx1q",
     ],
 )
 def test_plain_chat_links_get_game_invitation(value: str) -> None:
@@ -594,16 +595,22 @@ def test_plain_chat_links_get_game_invitation(value: str) -> None:
         "https://vk.me/join//GameChat_123",
     ],
 )
-def test_arbitrary_or_non_chat_messages_stay_unchanged(value: str) -> None:
+def test_arbitrary_or_non_chat_messages_get_broadcast_disclaimer(value: str) -> None:
     assert not is_plain_chat_link(value)
-    assert confirmed_notification_text("Лесной предел", value) == value
+    assert confirmed_notification_text("Лесной предел", value) == (
+        "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\n" + value
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("message", "expected_text"),
     [
-        ("Сбор игроков в 18:30 у главного входа.", "Сбор игроков в 18:30 у главного входа."),
+        (
+            "Сбор игроков в 18:30 у главного входа.",
+            "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\n"
+            "Сбор игроков в 18:30 у главного входа.",
+        ),
         (
             "https://vk.me/join/GameChat_123-=",
             "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
@@ -618,6 +625,7 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
     event: Event,
 ) -> None:
     secret = "participant-secret"
+    event.player_amount = 1
     events = MemoryEventRepository([event])
     await add_command_author_as_leader(events, event)
     tables = MemoryRegistrationRepository()
@@ -669,10 +677,10 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
     )
 
     assert await worker.run() == 1
-    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == {
-        (Platform.TELEGRAM, 3, expected_text),
-        (Platform.VK, 4, expected_text),
-    }
+    expected_recipients = {(Platform.TELEGRAM, 3, expected_text)}
+    if not is_plain_chat_link(message):
+        expected_recipients.add((Platform.VK, 4, expected_text))
+    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == expected_recipients
     assert all(
         [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)] for sent in transport.sent
     )
@@ -754,7 +762,10 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
     assert await worker.run() == 3
     assert [(sent[1], sent[3]) for sent in transport.sent] == [
         (player.tg_id, "✅ Участие подтверждено."),
-        (player.tg_id, "Сбор в 18:30"),
+        (
+            player.tg_id,
+            "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\nСбор в 18:30",
+        ),
         (
             player.tg_id,
             "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
@@ -772,3 +783,92 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
     assert saved_player.last_delivery_operation_id == confirm_operation_id
     assert saved_player.last_bot_buttons == [Button(label=MAIN_MENU, value=MAIN_MENU)]
     assert consumer.deleted == ["receipt-1", "receipt-2", "receipt-3"]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_reserve_gets_information_then_chat_link_after_cancellation(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.player_amount = 2
+    event.confirmed_notifications = ["Сбор в 18:30", "https://t.me/+GameChat_123"]
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    catalog = RegistrationCatalog(events, tables, showcase)
+    users = MemoryUserRepository()
+    keys: dict[int, str] = {}
+    for user_id in (2, 3, 4):
+        await users.save(TelegramUser(tg_id=user_id))
+        key = participant_key(secret, Platform.TELEGRAM, user_id, event.event_id)
+        keys[user_id] = key
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{user_id}",
+            participant_key=key,
+            display_name=f"Player {user_id}",
+            wish_play="A",
+        )
+        if user_id < 4:
+            await tables.confirm(
+                event.event_id,
+                operation_id=f"confirm-{user_id}",
+                participant_key=key,
+                character_wish="Doctor",
+            )
+
+    confirm = QueueEnvelope(
+        command=OrderedRegistrationCommand(
+            operation_id=str(uuid4()),
+            event_id=event.event_id,
+            operation=Operation.CONFIRM,
+            platform=Platform.TELEGRAM,
+            platform_user_id=4,
+            participant_key=keys[4],
+            payload=CharacterWishPayload(character_wish="Doctor"),
+            reply_context=ReplyContext(text_success="✅ Участие подтверждено."),
+        ),
+        receipt_handle="receipt-confirm-reserve",
+    )
+    cancel = QueueEnvelope(
+        command=OrderedRegistrationCommand(
+            operation_id=str(uuid4()),
+            event_id=event.event_id,
+            operation=Operation.CANCEL,
+            platform=Platform.TELEGRAM,
+            platform_user_id=2,
+            participant_key=keys[2],
+            payload=EmptyPayload(),
+            reply_context=ReplyContext(text_success="✅ Участие отменено."),
+        ),
+        receipt_handle="receipt-cancel-main",
+    )
+    consumer = FakeConsumer([confirm, cancel])
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog),
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 2
+    reserve_messages = [sent[3] for sent in transport.sent if sent[1] == 4]
+    assert reserve_messages[:2] == [
+        "✅ Участие подтверждено.",
+        "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\nСбор в 18:30",
+    ]
+    assert not any("добавьтесь в чат" in text for text in reserve_messages[:2])
+    assert reserve_messages[-1] == (
+        "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
+        "мы вас очень ждём: https://t.me/+GameChat_123"
+    )
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.last_confirmed_link_promotion_participant_key == keys[4]
+    assert stored_event.last_confirmed_link_promotion_delivered_operation_id == cancel.command.operation_id
