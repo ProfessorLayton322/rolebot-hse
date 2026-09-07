@@ -472,6 +472,34 @@ async def test_game_archived_during_cancellation_is_not_enqueued(disk_store: Mem
 
 
 @pytest.mark.asyncio
+async def test_closed_game_neither_offers_nor_accepts_cancellation(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+
+    games = await engine.handle(inbound(1, CANCEL))
+    assert any(button.value == f"select:cancel:{event.event_id}" for button in games.buttons)
+    await engine.handle(inbound(2, f"select:cancel:{event.event_id}", callback=True))
+    await engine.events.set_status(event.event_id, EventStatus.CLOSED)
+
+    rejected = await engine.handle(inbound(3, "cancel:yes", callback=True))
+    hidden = await engine.handle(inbound(4, CANCEL))
+    stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
+
+    assert "Состав игроков зафиксирован" in rejected.text
+    assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
+    assert "Состав игроков зафиксирован" in hidden.text
+    assert "Состав игроков зафиксирован" in stale.text
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
 async def test_archived_game_does_not_offer_or_open_character_wish_editing(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
