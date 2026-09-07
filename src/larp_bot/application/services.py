@@ -25,6 +25,7 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     PassDetails,
     Platform,
+    PlayerAmountPayload,
     Registration,
     ReplyContext,
     TelegramUser,
@@ -289,6 +290,7 @@ class RegistrationService:
         | CharacterWishPayload
         | ConfirmationDeadlinePayload
         | NotificationPayload
+        | PlayerAmountPayload
         | EmptyPayload,
         reply_context: ReplyContext,
         idempotency_key: str | None = None,
@@ -302,6 +304,7 @@ class RegistrationService:
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.CLOSE_EVENT,
@@ -975,6 +978,7 @@ class OrderedMutationService:
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.CLOSE_EVENT,
@@ -1010,6 +1014,13 @@ class OrderedMutationService:
                 command.operation_id,
             )
             return MutationResult("Уведомление подтвердившим участие отправлено")
+        if command.operation is Operation.UPDATE_PLAYER_AMOUNT:
+            assert isinstance(command.payload, PlayerAmountPayload)
+            event = await self.catalog.ensure_migrated(event)
+            await self.events.set_player_amount(event.event_id, command.payload.player_amount)
+            event.player_amount = command.payload.player_amount
+            await self.catalog.refresh(event)
+            return MutationResult(f"Количество игроков изменено: {event.player_amount}")
         if command.operation in status_operations:
             status, message = status_operations[command.operation]
             status_changed = await self.events.set_status(event.event_id, status)

@@ -25,6 +25,7 @@ from larp_bot.application.conversation import (
     ARCHIVE_GAME,
     ARCHIVED_GAMES,
     CANCEL,
+    CHANGE_PLAYER_AMOUNT,
     CHANGE_STATUS,
     CHARACTER,
     CONFIRM,
@@ -78,6 +79,7 @@ from larp_bot.domain.models import (
     Operation,
     PassDetails,
     Platform,
+    PlayerAmountPayload,
     Registration,
     TelegramUser,
     VkUser,
@@ -1465,6 +1467,33 @@ async def test_admin_controls_existing_game_without_becoming_its_master(
     assert f"Количество игроков: {event.player_amount}" in selected.text
     assert CHANGE_STATUS in {button.label for button in selected.buttons}
     assert await engine.events.list_leaders(event.event_id) == []
+
+
+@pytest.mark.asyncio
+async def test_game_master_can_change_player_amount(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    amount_button = next(button for button in management.buttons if button.label == CHANGE_PLAYER_AMOUNT)
+    prompt = await engine.handle(inbound(2, amount_button.value, callback=True))
+    invalid = await engine.handle(inbound(3, "0"))
+    accepted = await engine.handle(inbound(4, "24"))
+
+    assert prompt.text == (
+        f"Текущее количество игроков: {event.player_amount}.\n\nВведите новое количество игроков (от 1 до 10000):"
+    )
+    assert invalid.text == "Введите целое количество игроков от 1 до 10000:"
+    assert accepted.text == "⏳ Изменение количества игроков принято в обработку."
+    assert accepted.deferred and accepted.command_enqueued
+    queued = publisher.commands[-1]
+    assert queued.operation is Operation.UPDATE_PLAYER_AMOUNT
+    assert queued.participant_key is None
+    assert queued.payload == PlayerAmountPayload(player_amount=24)
+    assert queued.reply_context.text_success == f"Количество игроков игры «{event.name}» изменено: 24."
 
 
 @pytest.mark.asyncio

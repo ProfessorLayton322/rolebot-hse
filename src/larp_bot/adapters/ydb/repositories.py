@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from larp_bot.domain.models import (
     DEFAULT_PLAYER_AMOUNT,
+    MAX_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
     Button,
@@ -694,6 +695,27 @@ class YdbEventRepository:
             {
                 "$event_id": event_id,
                 "$status": status.value,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def set_player_amount(self, event_id: str, player_amount: int) -> bool:
+        if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
+            raise ValueError(f"player_amount must be between 1 and {MAX_PLAYER_AMOUNT}")
+        event = await self.get(event_id)
+        if event is None or event.player_amount == player_amount:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $player_amount AS Uint64;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events` SET player_amount = $player_amount, updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$player_amount": player_amount,
                 "$updated_at": datetime.now(UTC),
             },
         )
