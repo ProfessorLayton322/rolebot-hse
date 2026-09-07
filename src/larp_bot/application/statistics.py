@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -7,10 +8,18 @@ from zoneinfo import ZoneInfo
 
 from larp_bot.adapters.google_drive.statistics import ATTENDANCE_FILE_NAME, GoogleDriveStatisticsRepository
 from larp_bot.adapters.google_drive.statistics_workbook import StatisticsWorkbook
-from larp_bot.domain.models import AttendanceStatus, OrderedRegistrationCommand, StatisticsPayload
+from larp_bot.domain.models import (
+    AttendanceStatus,
+    OrderedRegistrationCommand,
+    Platform,
+    StatisticsPayload,
+    TelegramUser,
+    User,
+)
+from larp_bot.domain.security import participant_key
 
 from .ports import AdminConfigProvider
-from .services import DomainError, EventAdministrationService
+from .services import DomainError, EventAdministrationService, RegistrationService
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
@@ -26,12 +35,44 @@ class StatisticsService:
         repository: GoogleDriveStatisticsRepository,
         admins: AdminConfigProvider,
         administration: EventAdministrationService,
+        registrations: RegistrationService,
         season_year: Callable[[], int] = current_season_year,
     ) -> None:
         self.repository = repository
         self.admins = admins
         self.administration = administration
+        self.registrations = registrations
         self.season_year = season_year
+
+    @staticmethod
+    def _identity(user: User) -> tuple[Platform, int]:
+        if isinstance(user, TelegramUser):
+            return Platform.TELEGRAM, user.tg_id
+        return Platform.VK, user.vk_id
+
+    async def _grant_experience(
+        self,
+        event_id: str,
+        confirmed_participant_keys: set[str],
+        operation_id: str,
+    ) -> None:
+        users = await self.administration.users.list_all()
+        experienced = []
+        for user in users:
+            platform, user_id = self._identity(user)
+            key = participant_key(self.administration.participant_secret, platform, user_id, event_id)
+            if key in confirmed_participant_keys:
+                experienced.append((platform, user_id))
+
+        async def grant(platform: Platform, user_id: int) -> None:
+            await self.administration.users.grant_larp_experience(platform, user_id)
+            await self.registrations.enqueue_profile_updates(
+                platform,
+                user_id,
+                idempotency_key=f"{operation_id}:statistics-experience",
+            )
+
+        await asyncio.gather(*(grant(platform, user_id) for platform, user_id in experienced))
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         if not await self.admins.is_admin(command.platform, command.platform_user_id):
@@ -67,6 +108,11 @@ class StatisticsService:
             return book.add_game(season_year, event.name, players)
 
         changed = await self.repository.edit(transform)
+        await self._grant_experience(
+            event.event_id,
+            {r.participant_key for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED},
+            command.operation_id,
+        )
         if not changed:
             return f"Игра «{event.name}» уже есть в статистике. Таблица не изменена."
         return f"Игра «{event.name}» внесена в статистику сезона {season_year}-{season_year + 1}."

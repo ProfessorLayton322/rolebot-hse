@@ -51,6 +51,7 @@ from .ports import (
     AdminConfigProvider,
     DeferredTransport,
     EventRepository,
+    PlayerStatisticsReader,
     UserRepository,
     VkUserIdResolver,
     new_user,
@@ -201,7 +202,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
     }
 )
 
-PROFILE_FORMAT = "combined-full-name-v1"
+PROFILE_FORMAT = "combined-full-name-v2-statistics-experience"
 CYRILLIC_FULL_NAME_PROMPT = "Введите ФИО кириллицей (фамилию имя, если отчества нету):"
 LATIN_FULL_NAME_PROMPT = "Введите ФИО латиницей (фамилию имя, если отчества нету):"
 FULL_NAME_RETRY_PROMPT = "Введите ФИО, либо фамилию имя, если отчества нету"
@@ -362,6 +363,7 @@ class ConversationEngine:
         registrations: RegistrationService,
         administration: EventAdministrationService,
         admins: AdminConfigProvider,
+        player_statistics: PlayerStatisticsReader,
         transport: DeferredTransport | None = None,
         vk_user_ids: VkUserIdResolver | None = None,
     ) -> None:
@@ -370,6 +372,7 @@ class ConversationEngine:
         self.registrations = registrations
         self.administration = administration
         self.admins = admins
+        self.player_statistics = player_statistics
         self.transport = transport
         self.vk_user_ids = vk_user_ids
 
@@ -466,7 +469,6 @@ class ConversationEngine:
                     text=(
                         f"Профиль\n\nИмя: {user.full_name}\n{contact_label}: {contact or 'не указан'}\n"
                         f"Кроссплей: {_bool_text(user.crossplay)}\n"
-                        f"Опыт LARP: {_bool_text(user.larp_experience)}\n"
                         f"Нужен пропуск: {_bool_text(user.needs_pass)}"
                     ),
                     buttons=[
@@ -583,13 +585,10 @@ class ConversationEngine:
                 context["contact"] = _normalize_vk_telegram_contact(value)
             user.dialog_state = "PROFILE_CROSSPLAY"
             return BotResponse(text="Готовы ли вы кроссполу?", buttons=yes_no_buttons())
-        if state in {"PROFILE_CROSSPLAY", "PROFILE_EXPERIENCE"}:
+        if state == "PROFILE_CROSSPLAY":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
-            context["crossplay" if state == "PROFILE_CROSSPLAY" else "larp_experience"] = value == "Да"
-            if state == "PROFILE_CROSSPLAY":
-                user.dialog_state = "PROFILE_EXPERIENCE"
-                return BotResponse(text="Играли ли вы в LARP до этого?", buttons=yes_no_buttons())
+            context["crossplay"] = value == "Да"
             return await self._finish_profile(user, message)
         if state == "PROFILE_PASS_FOREIGNER":
             if value not in {"Да", "Нет"}:
@@ -639,9 +638,13 @@ class ConversationEngine:
 
     async def _finish_profile(self, user: User, message: InboundMessage) -> BotResponse:
         context = user.dialog_context
-        user.full_name = str(context["full_name"])
+        full_name = str(context["full_name"])
+        profile_names = {full_name}
+        if user.full_name is not None:
+            profile_names.add(user.full_name)
+        user.larp_experience = await self.player_statistics.has_any_player(profile_names)
+        user.full_name = full_name
         user.crossplay = bool(context["crossplay"])
-        user.larp_experience = bool(context["larp_experience"])
         needs_pass = bool(context["needs_pass"])
         if needs_pass:
             details = PassDetails(

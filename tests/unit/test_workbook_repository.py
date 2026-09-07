@@ -110,16 +110,15 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
     try:
         values = tuple(cell.value for row in workbook.active.iter_rows() for cell in row)
         assert tuple(cell.value for cell in workbook.active[1]) == PUBLIC_HEADERS
-        assert tuple(workbook.active.cell(2, column).value for column in range(1, 8)) == (
+        assert tuple(workbook.active.cell(2, column).value for column in range(1, 7)) == (
             1,
             "Player",
-            "Да",
             "Нет",
             "Anyone",
             "Doctor",
             AttendanceStatus.CONFIRMED.value,
         )
-        assert workbook.active.max_column == 7
+        assert workbook.active.max_column == 6
         assert not any("vk.com" in str(value) or "t.me" in str(value) for value in values)
     finally:
         workbook.close()
@@ -314,7 +313,7 @@ async def test_legacy_state_is_imported_once_then_removed_from_xlsx(
     public_rendered = load_workbook(BytesIO(disk_store.files[stored_event.public_table_resource_path]))
     try:
         assert tuple(cell.value for cell in public_rendered.active[1]) == PUBLIC_HEADERS
-        assert public_rendered.active.max_column == 7
+        assert public_rendered.active.max_column == 6
     finally:
         public_rendered.close()
 

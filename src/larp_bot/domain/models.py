@@ -267,12 +267,7 @@ class UserBase(StrictModel):
 
     @property
     def common_profile_complete(self) -> bool:
-        basics = (
-            self.full_name is not None
-            and self.crossplay is not None
-            and self.larp_experience is not None
-            and self.needs_pass is not None
-        )
+        basics = self.full_name is not None and self.crossplay is not None and self.needs_pass is not None
         return basics and (not self.needs_pass or self.pass_details is not None)
 
 

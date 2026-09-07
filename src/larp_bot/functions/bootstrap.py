@@ -79,6 +79,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     registrations = YdbRegistrationRepository(db)
     disk = YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"])
     google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    player_statistics = GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id)
     showcase = YandexDiskShowcaseRepository(disk)
     sqs = boto3.client(
         "sqs",
@@ -107,6 +108,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         registration_service,
         administration,
         config,
+        player_statistics,
         transport=transport,
         vk_user_ids=vk,
     )
@@ -132,7 +134,10 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         notifications,
         max_seconds=settings.worker_max_seconds,
         statistics=StatisticsService(
-            GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id), config, administration
+            player_statistics,
+            config,
+            administration,
+            registration_service,
         ),
     )
     return AppContainer(

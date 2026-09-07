@@ -169,6 +169,12 @@ class StatisticsWorkbook:
             for c in range(14, self.last_column + 1)
         )
 
+    def has_any_player(self, names: Sequence[str]) -> bool:
+        candidates = {normalized_name(name) for name in names}
+        return any(
+            normalized_name(str(self.value(f"A{row}") or "")) in candidates for row in range(2, self.last_player + 1)
+        )
+
     @property
     def season_name(self) -> str:
         return self.season.attrib["name"]

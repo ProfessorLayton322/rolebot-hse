@@ -43,6 +43,7 @@ from larp_bot.domain.models import (
     Platform,
     Registration,
     StatisticsPayload,
+    VkUser,
 )
 from tests.conftest import MemoryDiskStore
 from tests.unit.test_conversation import engine_setup, inbound
@@ -268,6 +269,13 @@ async def test_repository_keeps_the_file_id_name_and_link_while_updating_content
     assert len(drive.replacements) == 1
 
 
+async def test_repository_finds_existing_player_with_normalized_name() -> None:
+    repository = GoogleDriveStatisticsRepository(MemoryGoogleDrive(template()), "stats-folder")
+
+    assert await repository.has_any_player({"  ИВАНОВ  Петр "})
+    assert not await repository.has_any_player({"Новый Игрок"})
+
+
 async def test_statistics_admin_menu_picker_and_global_fifo_only_show_active_games(event: Event) -> None:
     archived = event.model_copy(
         update={
@@ -346,17 +354,39 @@ async def test_statistics_actions_are_denied_to_moderators_even_with_forged_call
 
 
 async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(event: Event) -> None:
-    engine, _users, _publisher, registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
-    for status, name in (
-        (AttendanceStatus.CONFIRMED, "Новый Игрок"),
-        (AttendanceStatus.WAITING, "Ждущий Игрок"),
-        (AttendanceStatus.CANCELLED, "Бывший Игрок"),
+    engine, users, publisher, registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    admin = await users.get(Platform.TELEGRAM, 1)
+    assert admin is not None
+    admin.larp_experience = False
+    await users.save(admin)
+    await users.save(
+        VkUser(
+            vk_id=7,
+            full_name="Второй Игрок",
+            crossplay=False,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+    for status, name, key in (
+        (
+            AttendanceStatus.CONFIRMED,
+            "Новый Игрок",
+            engine.registrations.key(Platform.TELEGRAM, 1, event.event_id),
+        ),
+        (
+            AttendanceStatus.CONFIRMED,
+            "Второй Игрок",
+            engine.registrations.key(Platform.VK, 7, event.event_id),
+        ),
+        (AttendanceStatus.WAITING, "Ждущий Игрок", uuid4().hex * 2),
+        (AttendanceStatus.CANCELLED, "Бывший Игрок", uuid4().hex * 2),
     ):
         await registrations.import_missing(
             [
                 Registration(
                     event_id=event.event_id,
-                    participant_key=uuid4().hex * 2,
+                    participant_key=key,
                     display_name=name,
                     attendance_status=status,
                     wish_play="Без пожеланий",
@@ -368,6 +398,7 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
         GoogleDriveStatisticsRepository(drive, "stats-folder"),
         engine.admins,
         engine.administration,
+        engine.registrations,
         season_year=lambda: 2026,
     )
     command = OrderedRegistrationCommand(
@@ -381,8 +412,16 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
     assert "2026-2027" in await service.apply(command)
     current = sheet(drive.content)
     assert current["A4"].value == "Новый Игрок"
-    assert current["A5"].value == "Всего"
+    assert current["A5"].value == "Второй Игрок"
+    assert current["A6"].value == "Всего"
     assert current["N4"].value == 1
+    assert current["N5"].value == 1
+    experienced_admin = await users.get(Platform.TELEGRAM, 1)
+    experienced_vk = await users.get(Platform.VK, 7)
+    assert experienced_admin is not None and experienced_admin.larp_experience is True
+    assert experienced_vk is not None and experienced_vk.larp_experience is True
+    profile_updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
+    assert [command.event_id for command in profile_updates] == [event.event_id, event.event_id]
     retry = command.model_copy(update={"operation_id": str(uuid4())})
     assert "уже есть" in await service.apply(retry)
     assert len(drive.replacements) == 1
@@ -396,7 +435,10 @@ async def test_statistics_worker_delivers_permanent_link_and_rechecks_admin(even
     await engine.handle(inbound(1, STATS_LINKS))
     drive = MemoryGoogleDrive(template())
     service = StatisticsService(
-        GoogleDriveStatisticsRepository(drive, "stats-folder"), engine.admins, engine.administration
+        GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        engine.admins,
+        engine.administration,
+        engine.registrations,
     )
     command = publisher.commands[0]
     transport = MemoryDeferredTransport()

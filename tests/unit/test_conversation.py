@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
@@ -133,6 +133,18 @@ class FailOnceTransport(MemoryDeferredTransport):
         )
 
 
+class MemoryPlayerStatistics:
+    def __init__(self, players: set[str] | None = None) -> None:
+        self.players = {self._normalize(name) for name in players or set()}
+
+    @staticmethod
+    def _normalize(name: str) -> str:
+        return " ".join(name.split()).casefold().replace("ё", "е")
+
+    async def has_any_player(self, names: Collection[str]) -> bool:
+        return any(self._normalize(name) in self.players for name in names)
+
+
 async def engine_setup(
     store: MemoryDiskStore,
     event: Event,
@@ -142,6 +154,7 @@ async def engine_setup(
     tg_admin_ids: set[int] | None = None,
     vk_admin_ids: set[int] | None = None,
     vk_profile_ids: dict[str, int] | None = None,
+    statistics_players: set[str] | None = None,
 ) -> tuple[
     ConversationEngine,
     MemoryUserRepository,
@@ -177,6 +190,7 @@ async def engine_setup(
             vk_ids=vk_admin_ids,
             tg_gamemaster_ids={1} if gamemaster else set(),
         ),
+        MemoryPlayerStatistics({"Иван Иванов"} if statistics_players is None else statistics_players),
         transport=transport,
         vk_user_ids=MemoryVkUserIdResolver(vk_profile_ids),
     )
@@ -596,6 +610,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         RegistrationService(events, catalog, publisher, "secret"),
         EventAdministrationService(events, showcase, catalog, users, "secret"),
         StaticAdminProvider(vk_ids={7}),
+        MemoryPlayerStatistics(),
     )
 
     def vk(update: int, value: str, *, callback: bool = False) -> InboundMessage:
@@ -607,7 +622,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
             peer_id=7,
         )
 
-    for update, value in enumerate((PROFILE, "Иванов Иван", "Нет", "Пропустить", "Да", "Нет"), start=1):
+    for update, value in enumerate((PROFILE, "Иванов Иван", "Нет", "Пропустить", "Да"), start=1):
         await engine.handle(vk(update, value))
     profile = await users.get(Platform.VK, 7)
     assert isinstance(profile, VkUser)
@@ -691,7 +706,7 @@ async def test_vk_profile_parses_telegram_reference_or_treats_it_as_missing(
 
     responses = []
     for update, value in enumerate(
-        (PROFILE, "Иванов Иван", "Нет", telegram_profile, "Да", "Нет"),
+        (PROFILE, "Иванов Иван", "Нет", telegram_profile, "Да"),
         start=1,
     ):
         responses.append(await engine.handle(vk(update, value)))
@@ -746,6 +761,7 @@ async def test_incomplete_profile_cannot_enlist(disk_store: MemoryDiskStore, eve
         RegistrationService(events, catalog, publisher, "secret"),
         EventAdministrationService(events, showcase, catalog, users, "secret"),
         StaticAdminProvider(),
+        MemoryPlayerStatistics(),
     )
     response = await engine.handle(inbound(1, ENLIST))
     assert "Сначала зарегистрируйте профиль" in response.text
@@ -782,8 +798,7 @@ async def test_profile_validates_email_before_advancing_to_next_question(
 
     contact_prompt = await engine.handle(inbound(7, "player@example.com", user_id=user_id))
     await engine.handle(inbound(8, "https://vk.com/id2", user_id=user_id))
-    await engine.handle(inbound(9, "Да", user_id=user_id))
-    saved = await engine.handle(inbound(10, "Нет", user_id=user_id))
+    saved = await engine.handle(inbound(9, "Да", user_id=user_id))
     profile = await users.get(Platform.TELEGRAM, user_id)
     assert "страницу VK" in contact_prompt.text
     assert "Профиль сохранён" in saved.text
@@ -805,7 +820,7 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     invalid_full_name = await engine.handle(inbound(2, "Smith John", user_id=2))
     pass_prompt = await engine.handle(inbound(3, "  Семёнова-Звенигородская   Ева-Лотта Ильинична ", user_id=2))
     contact_prompt = await engine.handle(inbound(4, "Нет", user_id=2))
-    for update, answer in enumerate(("https://vk.com/id2", "Нет", "Нет"), start=5):
+    for update, answer in enumerate(("https://vk.com/id2", "Нет"), start=5):
         saved = await engine.handle(inbound(update, answer, user_id=2))
 
     profile = await users.get(Platform.TELEGRAM, 2)
@@ -818,7 +833,34 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert "Профиль сохранён" in saved.text
     assert profile is not None
     assert profile.full_name == "Семёнова-Звенигородская Ева-Лотта Ильинична"
+    assert profile.larp_experience is False
     assert profile.needs_pass is False and profile.pass_details is None
+
+
+@pytest.mark.asyncio
+async def test_profile_derives_experience_from_statistics_without_asking_the_player(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, _ = await engine_setup(
+        disk_store,
+        event,
+        statistics_players={"Иванов Иван"},
+    )
+    responses = []
+    for update, answer in enumerate(
+        (PROFILE, "Иванов Иван", "Нет", "https://vk.com/id2", "Нет"),
+        start=1,
+    ):
+        responses.append(await engine.handle(inbound(update, answer, user_id=2)))
+
+    profile = await users.get(Platform.TELEGRAM, 2)
+    shown = await engine.handle(inbound(6, PROFILE, user_id=2))
+
+    assert "Профиль сохранён" in responses[-1].text
+    assert all("Играли ли вы" not in response.text for response in responses)
+    assert profile is not None and profile.larp_experience is True
+    assert "Опыт LARP" not in shown.text
 
 
 @pytest.mark.asyncio
@@ -871,7 +913,6 @@ async def test_profile_save_queues_projection_updates_for_all_unarchived_partici
         "Нет",
         "https://vk.com/new-profile",
         "Нет",
-        "Да",
     )
     for update, answer in enumerate(answers, start=1):
         response = await engine.handle(inbound(update, answer, user_id=1, telegram_username="new_profile"))
@@ -879,7 +920,8 @@ async def test_profile_save_queues_projection_updates_for_all_unarchived_partici
     profile = await users.get(Platform.TELEGRAM, 1)
     assert "Профиль сохранён" in response.text
     assert profile is not None and profile.full_name == "Новиков Новый Нович"
-    assert profile.last_update_id == "6"
+    assert profile.larp_experience is True
+    assert profile.last_update_id == "5"
     updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
     assert {command.event_id for command in updates} == {event.event_id, second.event_id, leader_only.event_id}
     assert all(
@@ -903,7 +945,6 @@ async def test_foreign_profile_collects_combined_latin_full_name(disk_store: Mem
         "anna@example.com",
         "https://vk.com/anna-li",
         "Нет",
-        "Да",
     )
     responses = []
     for update, answer in enumerate(answers, start=1):
@@ -2261,6 +2302,7 @@ async def test_admin_pagination_uses_shared_page_size(count: int, disk_store: Me
         RegistrationService(event_repository, catalog, MemoryCommandPublisher(), "secret"),
         EventAdministrationService(event_repository, showcase, catalog, users, "secret"),
         StaticAdminProvider(tg_ids={1}),
+        MemoryPlayerStatistics(),
     )
     page = await engine.handle(inbound(1, MANAGE_GAMES))
     game_buttons = [button for button in page.buttons if button.value.startswith("ag:manage:")]
