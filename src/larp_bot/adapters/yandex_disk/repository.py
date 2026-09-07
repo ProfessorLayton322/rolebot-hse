@@ -36,7 +36,6 @@ VISIBLE_HEADERS = (
 PUBLIC_HEADERS = (
     "№",
     "Имя",
-    "Предыдущий опыт в LARP",
     "Готовность к кроссполу",
     "С кем хочу играть",
     "Пожелания по персонажу",
@@ -222,7 +221,6 @@ def public_showcase_workbook_bytes(
             (
                 number,
                 safe_cell(registration.display_name),
-                _bool_cell(registration.larp_experience),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 safe_cell(registration.character_wish),
@@ -237,14 +235,13 @@ def public_showcase_workbook_bytes(
             (
                 number,
                 safe_cell(registration.display_name),
-                _bool_cell(registration.larp_experience),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 safe_cell(registration.character_wish),
                 registration.attendance_status.value,
             )
         )
-    _format_sheet(sheet, (8, 30, 25, 26, 35, 45, 18))
+    _format_sheet(sheet, (8, 30, 26, 35, 45, 18))
     output = BytesIO()
     workbook.save(output)
     workbook.close()

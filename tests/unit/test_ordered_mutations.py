@@ -243,7 +243,7 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
     public_workbook = load_workbook(BytesIO(disk_store.files[stored_event.public_table_resource_path]))
     try:
         assert tuple(cell.value for cell in public_workbook.active[1]) == PUBLIC_HEADERS
-        assert public_workbook.active.max_column == 7
+        assert public_workbook.active.max_column == 6
         assert "https://vk.com/player" not in {cell.value for row in public_workbook.active.iter_rows() for cell in row}
     finally:
         public_workbook.close()
@@ -350,8 +350,7 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
         assert master.active["E2"].value == "Нет"
         assert master.active["F2"].value == "Да"
         assert public.active["B2"].value == "Новиков Новый Нович"
-        assert public.active["C2"].value == "Нет"
-        assert public.active["D2"].value == "Да"
+        assert public.active["C2"].value == "Да"
         assert passes.active["A2"].value == "Новиков"
         assert passes.active["H2"].value == "+7 999 111-22-33"
         assert passes.active["I2"].value == "new@example.com"

@@ -253,6 +253,19 @@ async def test_user_repository_backfills_telegram_handle_without_overwriting_pro
 
 
 @pytest.mark.asyncio
+async def test_user_repository_grants_larp_experience_without_rewriting_profile() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+
+    await YdbUserRepository(executor).grant_larp_experience(Platform.TELEGRAM, 42)
+
+    query, params = executor.query.await_args.args
+    assert "UPDATE `tg_users`" in query
+    assert "SET larp_experience = TRUE" in query
+    assert params["$user_id"] == 42
+    assert set(params) == {"$user_id", "$updated_at"}
+
+
+@pytest.mark.asyncio
 async def test_user_repository_grants_gamemaster_in_selected_platform_table() -> None:
     executor = SimpleNamespace(query=AsyncMock(return_value=[]))
 

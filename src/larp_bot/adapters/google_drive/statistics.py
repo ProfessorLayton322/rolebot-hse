@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from typing import Any, Protocol, cast
 from urllib.parse import quote
 
@@ -148,6 +148,11 @@ class GoogleDriveStatisticsRepository:
     async def link(self) -> str:
         file = await self._file()
         return file.web_view_link or f"https://drive.google.com/file/d/{quote(file.file_id, safe='')}/view"
+
+    async def has_any_player(self, names: Collection[str]) -> bool:
+        file = await self._file()
+        content = await self.drive.download(file.file_id)
+        return await asyncio.to_thread(lambda: StatisticsWorkbook(content).has_any_player(tuple(names)))
 
     async def edit(self, transform: Callable[[StatisticsWorkbook], bytes | None]) -> bool:
         file = await self._file()

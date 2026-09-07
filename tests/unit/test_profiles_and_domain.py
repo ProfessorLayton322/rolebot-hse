@@ -50,6 +50,25 @@ def test_vk_handle_is_normalized() -> None:
     assert VkUser(vk_id=1, telegram_handle="@some_user").telegram_handle == "@some_user"
 
 
+def test_larp_experience_is_not_required_to_complete_a_profile() -> None:
+    telegram = TelegramUser(
+        tg_id=1,
+        full_name="Иванов Иван",
+        vk_url="https://vk.com/id1",
+        crossplay=False,
+        needs_pass=False,
+    )
+    vk = VkUser(
+        vk_id=2,
+        full_name="Петров Пётр",
+        crossplay=True,
+        needs_pass=False,
+    )
+
+    assert telegram.profile_complete and telegram.larp_experience is None
+    assert vk.profile_complete and vk.larp_experience is None
+
+
 @pytest.mark.parametrize(
     ("raw", "normalized"),
     [
