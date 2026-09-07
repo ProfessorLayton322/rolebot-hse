@@ -64,6 +64,11 @@ class OperationNotAllowed(DomainError):
     pass
 
 
+CLOSED_GAME_CANCELLATION_MESSAGE = (
+    "Подтверждение участия в этой игре закрыто. Состав игроков зафиксирован, отменить участие нельзя."
+)
+
+
 @dataclass(frozen=True)
 class MutationResult:
     text: str
@@ -349,6 +354,8 @@ class RegistrationService:
         event = await self._event(event_id)
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
+        if operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
+            raise OperationNotAllowed(CLOSED_GAME_CANCELLATION_MESSAGE)
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
@@ -1133,6 +1140,9 @@ class OrderedMutationService:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
                 return MutationResult("Игра уже архивирована")
             raise OperationNotAllowed("Игра уже архивирована")
+
+        if command.operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
+            raise OperationNotAllowed(CLOSED_GAME_CANCELLATION_MESSAGE)
 
         administrative_operations = {
             Operation.OPEN_REGISTRATION,

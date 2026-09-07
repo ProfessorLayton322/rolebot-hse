@@ -56,6 +56,7 @@ from .ports import (
     new_user,
 )
 from .services import (
+    CLOSED_GAME_CANCELLATION_MESSAGE,
     EventAdministrationService,
     RegistrationService,
     confirmed_notification_text,
@@ -856,7 +857,11 @@ class ConversationEngine:
         actionable_matches = matches
         if flow == "confirm":
             actionable_matches = [item for item in matches if item[0].status is EventStatus.CONFIRMATION_OPEN]
-        elif flow in {"cancel", "character"}:
+        elif flow == "cancel":
+            actionable_matches = [
+                item for item in matches if item[0].archived_at is None and item[0].status is not EventStatus.CLOSED
+            ]
+        elif flow == "character":
             actionable_matches = [item for item in matches if item[0].archived_at is None]
         buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
         buttons.extend(
@@ -891,6 +896,8 @@ class ConversationEngine:
                 text=unavailable_text,
                 buttons=buttons,
             )
+        if flow == "cancel" and not actionable_matches:
+            return BotResponse(text=CLOSED_GAME_CANCELLATION_MESSAGE, buttons=buttons)
         return BotResponse(text="🎭 Выберите игру:", buttons=buttons)
 
     async def _select_event(self, user: User, message: InboundMessage, value: str) -> BotResponse:
@@ -944,6 +951,8 @@ class ConversationEngine:
                 return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
             if flow == "character":
                 return BotResponse(text="Эта игра архивирована. Изменение пожеланий недоступно.")
+        if flow == "cancel" and event.status is EventStatus.CLOSED:
+            return BotResponse(text=CLOSED_GAME_CANCELLATION_MESSAGE)
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
                 return BotResponse(
@@ -1131,6 +1140,8 @@ class ConversationEngine:
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
             return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
+        if event.status is EventStatus.CLOSED:
+            return BotResponse(text=CLOSED_GAME_CANCELLATION_MESSAGE)
         await self.registrations.enqueue(
             operation=Operation.CANCEL,
             event_id=str(context["event_id"]),

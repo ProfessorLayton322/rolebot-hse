@@ -530,7 +530,9 @@ async def test_created_game_allows_enlist_but_rejects_confirmation_until_admin_o
 
 
 @pytest.mark.asyncio
-async def test_close_orders_both_enlist_and_confirmation_rejection(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_close_orders_enlist_confirmation_and_cancellation_rejection(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)
@@ -551,6 +553,8 @@ async def test_close_orders_both_enlist_and_confirmation_rejection(disk_store: M
         )
     with pytest.raises(OperationNotAllowed, match="закрыто"):
         await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Changed")))
+    with pytest.raises(OperationNotAllowed, match="Состав игроков зафиксирован"):
+        await mutations.apply(command(event, Operation.CANCEL, EmptyPayload()))
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
     assert registration.attendance_status is AttendanceStatus.CONFIRMED
