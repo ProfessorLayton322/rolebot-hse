@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -64,9 +64,8 @@ class OperationNotAllowed(DomainError):
     pass
 
 
-CLOSED_GAME_CANCELLATION_MESSAGE = (
-    "Подтверждение участия в этой игре закрыто. Состав игроков зафиксирован, отменить участие нельзя."
-)
+def closed_game_cancellation_message(event_name: str) -> str:
+    return f"Игра «{event_name}» закрыта. Состав игроков зафиксирован, отменить участие нельзя."
 
 
 @dataclass(frozen=True)
@@ -250,32 +249,81 @@ class RegistrationService:
         platform: Platform,
         user_id: int,
         *,
+        statuses: Collection[EventStatus] | None = None,
+        archived: bool | None = None,
+        registration_statuses: Collection[AttendanceStatus] | None = None,
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         event_limit: int = 10,
         concurrency: int = 3,
     ) -> RegisteredGamesPage:
-        candidates = list(await self.events.list_page(after=after, before=before, limit=event_limit))
+        if event_limit < 1:
+            raise ValueError("event page size must be positive")
+        if concurrency < 1:
+            raise ValueError("concurrency must be positive")
+        accepted_registration_statuses = None if registration_statuses is None else set(registration_statuses)
         semaphore = asyncio.Semaphore(concurrency)
 
         async def inspect(event: Event) -> tuple[Event, Registration] | None:
             async with semaphore:
                 found = await self.catalog.get(event, self.key(platform, user_id, event.event_id))
-                return (event, found) if found is not None else None
+                if found is None or (
+                    accepted_registration_statuses is not None
+                    and found.attendance_status not in accepted_registration_statuses
+                ):
+                    return None
+                return event, found
 
-        matches = [item for item in await asyncio.gather(*(inspect(e) for e in candidates)) if item]
-        if not candidates:
+        async def scan(
+            *,
+            after_cursor: tuple[datetime, str] | None = None,
+            before_cursor: tuple[datetime, str] | None = None,
+            match_limit: int,
+        ) -> list[tuple[Event, Registration]]:
+            matches: list[tuple[Event, Registration]] = []
+            scan_limit = min(event_limit, 10)
+            while True:
+                candidates = list(
+                    await self.events.list_page(
+                        statuses=statuses,
+                        archived=archived,
+                        after=after_cursor,
+                        before=before_cursor,
+                        limit=scan_limit,
+                    )
+                )
+                if not candidates:
+                    break
+                inspected = [item for item in await asyncio.gather(*(inspect(event) for event in candidates)) if item]
+                if before_cursor is not None:
+                    matches = inspected + matches
+                    if len(matches) >= match_limit:
+                        return matches[-match_limit:]
+                    first = candidates[0]
+                    before_cursor = (first.created_at, first.event_id)
+                else:
+                    matches.extend(inspected)
+                    if len(matches) >= match_limit:
+                        return matches[:match_limit]
+                    last = candidates[-1]
+                    after_cursor = (last.created_at, last.event_id)
+                if len(candidates) < scan_limit:
+                    break
+            return matches
+
+        matches = await scan(after_cursor=after, before_cursor=before, match_limit=event_limit)
+        if not matches:
             return RegisteredGamesPage(
-                rows=matches,
+                rows=[],
                 first_event=None,
                 last_event=None,
                 has_previous=False,
                 has_next=False,
             )
-        first, last = candidates[0], candidates[-1]
+        first, last = matches[0][0], matches[-1][0]
         previous, following = await asyncio.gather(
-            self.events.list_page(before=(first.created_at, first.event_id), limit=1),
-            self.events.list_page(after=(last.created_at, last.event_id), limit=1),
+            scan(before_cursor=(first.created_at, first.event_id), match_limit=1),
+            scan(after_cursor=(last.created_at, last.event_id), match_limit=1),
         )
         return RegisteredGamesPage(
             rows=matches,
@@ -355,7 +403,7 @@ class RegistrationService:
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
         if operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed(CLOSED_GAME_CANCELLATION_MESSAGE)
+            raise OperationNotAllowed(closed_game_cancellation_message(event.name))
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
@@ -1146,7 +1194,7 @@ class OrderedMutationService:
             raise OperationNotAllowed("Игра уже архивирована")
 
         if command.operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed(CLOSED_GAME_CANCELLATION_MESSAGE)
+            raise OperationNotAllowed(closed_game_cancellation_message(event.name))
 
         administrative_operations = {
             Operation.OPEN_REGISTRATION,

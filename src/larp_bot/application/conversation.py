@@ -57,9 +57,9 @@ from .ports import (
     new_user,
 )
 from .services import (
-    CLOSED_GAME_CANCELLATION_MESSAGE,
     EventAdministrationService,
     RegistrationService,
+    closed_game_cancellation_message,
     confirmed_notification_text,
     is_plain_chat_link,
 )
@@ -852,9 +852,17 @@ class ConversationEngine:
                 buttons=[Button(label=PROFILE, value=PROFILE)],
             )
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        event_statuses = REGISTRATION_OPEN_STATUSES if flow == "cancel" else None
+        archived = False if flow == "cancel" else None
+        registration_statuses = (
+            frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}) if flow == "cancel" else None
+        )
         page = await self.registrations.registered_games_page(
             platform,
             user_id(user),
+            statuses=event_statuses,
+            archived=archived,
+            registration_statuses=registration_statuses,
             after=after,
             before=before,
             event_limit=PAGE_SIZE,
@@ -886,7 +894,12 @@ class ConversationEngine:
             )
         )
         if not matches and not page.has_previous and not page.has_next:
-            return BotResponse(text="У вас пока нет записей на игры.", buttons=buttons)
+            empty_text = (
+                "Сейчас нет игр, участие в которых можно отменить."
+                if flow == "cancel"
+                else "У вас пока нет записей на игры."
+            )
+            return BotResponse(text=empty_text, buttons=buttons)
         if flow == "confirm" and not actionable_matches:
             created = any(event.status is EventStatus.CREATED for event, _ in matches)
             closed = any(event.status is EventStatus.CLOSED for event, _ in matches)
@@ -903,7 +916,7 @@ class ConversationEngine:
                 buttons=buttons,
             )
         if flow == "cancel" and not actionable_matches:
-            return BotResponse(text=CLOSED_GAME_CANCELLATION_MESSAGE, buttons=buttons)
+            return BotResponse(text="Сейчас нет игр, участие в которых можно отменить.", buttons=buttons)
         return BotResponse(text="🎭 Выберите игру:", buttons=buttons)
 
     async def _select_event(self, user: User, message: InboundMessage, value: str) -> BotResponse:
@@ -954,11 +967,11 @@ class ConversationEngine:
             return BotResponse(text="Сначала запишитесь на эту игру.")
         if event.archived_at is not None:
             if flow == "cancel":
-                return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
+                return BotResponse(text=f"Игра «{event.name}» архивирована. Отмена участия недоступна.")
             if flow == "character":
                 return BotResponse(text="Эта игра архивирована. Изменение пожеланий недоступно.")
         if flow == "cancel" and event.status is EventStatus.CLOSED:
-            return BotResponse(text=CLOSED_GAME_CANCELLATION_MESSAGE)
+            return BotResponse(text=closed_game_cancellation_message(event.name))
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
                 return BotResponse(
@@ -1145,9 +1158,9 @@ class ConversationEngine:
         if event is None:
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
-            return BotResponse(text="Эта игра архивирована. Отмена участия недоступна.")
+            return BotResponse(text=f"Игра «{event.name}» архивирована. Отмена участия недоступна.")
         if event.status is EventStatus.CLOSED:
-            return BotResponse(text=CLOSED_GAME_CANCELLATION_MESSAGE)
+            return BotResponse(text=closed_game_cancellation_message(event.name))
         await self.registrations.enqueue(
             operation=Operation.CANCEL,
             event_id=str(context["event_id"]),
