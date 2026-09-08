@@ -1138,6 +1138,7 @@ class ConversationEngine:
                 peer_id=message.peer_id,
                 text_success=(
                     f"✅ Участие в игре «{context['event_name']}» подтверждено.\n\n"
+                    "Мастера скоро отправят вам ссылку на чат игры!\n\n"
                     f"Пожелания по персонажу:\n{wish}\n\n"
                     "Позже их можно изменить через «🎭 Пожелания по персонажу»."
                     if operation is Operation.CONFIRM
