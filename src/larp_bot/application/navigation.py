@@ -3,12 +3,13 @@ from __future__ import annotations
 from larp_bot.domain.models import Button
 
 MAIN_MENU = "Главное меню"
+MAIN_MENU_LABEL = "В главное меню"
 ADMIN_MENU = "Администрирование"
 CONFIRM_PARTICIPATION = "✅ Подтвердить участие"
 
 
 def main_menu_button() -> Button:
-    return Button(label=MAIN_MENU, value=MAIN_MENU)
+    return Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)
 
 
 def admin_menu_button() -> Button:

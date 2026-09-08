@@ -65,7 +65,7 @@ class OperationNotAllowed(DomainError):
 
 
 def closed_game_cancellation_message(event_name: str) -> str:
-    return f"Игра «{event_name}» закрыта. Состав игроков зафиксирован, отменить участие нельзя."
+    return f"Регистрация на игру «{event_name}» закрыта, и состав зафиксирован. Отменить участие через бота уже нельзя."
 
 
 @dataclass(frozen=True)
@@ -610,11 +610,10 @@ class EventAdministrationService:
         if event is None:
             raise EventNotFound("Игра не найдена")
         await self.catalog.ensure_migrated(event)
-        count = sum(
-            registration.attendance_status is AttendanceStatus.CONFIRMED
-            for registration in await self.catalog.registrations.list_for_event(event_id)
-        )
-        return min(count, event.player_amount) if main_roster_only else count
+        registrations = list(await self.catalog.registrations.list_for_event(event_id))
+        if main_roster_only:
+            registrations = _active_main_roster(registrations, event.player_amount)
+        return sum(registration.attendance_status is AttendanceStatus.CONFIRMED for registration in registrations)
 
     async def registration_user(self, event_id: str, registration_key: str) -> User | None:
         if await self.events.get(event_id) is None:
@@ -732,10 +731,27 @@ def is_plain_chat_link(value: str) -> bool:
 def confirmed_notification_text(event_name: str, message: str) -> str:
     clean_message = message.strip()
     if not is_plain_chat_link(clean_message):
-        return f"Мастера разослали это сообщение всем подтвердившимся на игру {event_name}:\n\n{clean_message}"
+        return f"Сообщение от мастеров игры «{event_name}»:\n\n{clean_message}"
+    return f"Вы в основном составе игры «{event_name}». Вступите в чат: {clean_message}"
+
+
+def _active_main_roster(registrations: Sequence[Registration], player_amount: int) -> list[Registration]:
+    active = [
+        registration
+        for registration in registrations
+        if registration.attendance_status is not AttendanceStatus.CANCELLED
+    ]
+    active.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+    return active[:player_amount]
+
+
+def confirmation_success_text(event: Event, character_wish: str, *, in_main_roster: bool) -> str:
+    link_text = "Мастера скоро отправят вам ссылку на чат игры!\n\n" if in_main_roster else ""
     return (
-        f"Вы подтвердили своё участие в игре {event_name}! "
-        f"Пожалуйста, добавьтесь в чат игры, мы вас очень ждём: {clean_message}"
+        f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
+        f"{link_text}"
+        f"Пожелания по персонажу:\n{character_wish}\n\n"
+        "Позже их можно изменить через «🎭 Пожелания по персонажу»."
     )
 
 
@@ -744,25 +760,31 @@ def enlistment_success_text(event: Event, queue_position: int) -> str:
         raise RuntimeError("public game table is not initialized")
     if queue_position <= event.player_amount:
         position_text = (
-            f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
-            "Посмотрите, кто ещё зарегистрирован вместе с вами: "
+            f"Вы записались на игру «{event.name}»!\n\n"
+            "Сейчас вы в основном составе.\n\n"
+            "Актуальный список записавшихся и состав можно посмотреть здесь: "
             f"{event.public_table_public_url}"
         )
     else:
         cancellations_needed = queue_position - event.player_amount
         position_text = (
-            f"Вы записались на игру {event.name}! Прямо сейчас вы находитесь в запасе, "
-            "но сможете попасть в основную игровую сессию, если "
-            f"{cancellations_needed} человек до вас отменят своё участие.\n\n"
-            f"Подробнее можете посмотреть в таблице игроков: {event.public_table_public_url}"
+            f"Вы записались на игру «{event.name}»!\n\n"
+            f"Сейчас вы в запасе. Перед вами: {cancellations_needed}.\n\n"
+            "Если вы перейдёте в основной состав, бот сообщит об этом отдельным сообщением.\n\n"
+            "Актуальный список записавшихся и состав можно посмотреть здесь: "
+            f"{event.public_table_public_url}"
         )
     if event.status is EventStatus.CONFIRMATION_OPEN:
-        confirmation_text = "Когда вы будете уверены, что сможете прийти на нашу игру - подтвердите своё участие"
+        deadline_text = (
+            f" до {format_confirmation_deadline(event.confirmation_deadline)} (мск)"
+            if event.confirmation_deadline is not None
+            else ""
+        )
+        confirmation_text = f"Когда будете уверены, что сможете прийти на игру, подтвердите участие{deadline_text}."
     else:
         confirmation_text = (
-            "Игра пока закрыта для подтверждения участия. Мы обязательно пришлём вам уведомление, "
-            "когда можно будет подтвердиться - пожалуйста, не забудьте это сделать, когда будете "
-            "уверены, что сможете прийти на нашу игру"
+            "Подтверждение участия пока не открыто. Мы обязательно пришлём вам уведомление, "
+            "когда можно будет подтвердиться."
         )
     return f"{position_text}\n\n{confirmation_text}"
 
@@ -806,14 +828,22 @@ class ConfirmationNotificationService:
         main_roster_only: bool = False,
     ) -> list[NotificationRecipient]:
         await self.catalog.ensure_migrated(event)
+        all_registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
+        main_roster_keys = (
+            {
+                registration.participant_key
+                for registration in _active_main_roster(all_registrations, event.player_amount)
+            }
+            if main_roster_only
+            else None
+        )
         registrations = [
             registration
-            for registration in await self.catalog.registrations.list_for_event(event.event_id)
+            for registration in all_registrations
             if registration.attendance_status is attendance_status
+            and (main_roster_keys is None or registration.participant_key in main_roster_keys)
         ]
         registrations.sort(key=lambda registration: (registration.created_at, registration.participant_key))
-        if main_roster_only:
-            registrations = registrations[: event.player_amount]
         participant_keys = {registration.participant_key for registration in registrations}
         recipients: list[NotificationRecipient] = []
         for user in await self.users.list_all():
@@ -840,9 +870,9 @@ class ConfirmationNotificationService:
                 raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
             deadline = format_confirmation_deadline(event.confirmation_deadline)
             if command.operation is Operation.OPEN_CONFIRMATION:
-                text = f"Подтверждение на игру {event.name} открыто! Дедлайн подтверждения - {deadline}"
+                text = f"Подтверждение участия в игре «{event.name}» открыто! Подтвердите участие до {deadline} (мск)."
             else:
-                text = f"Напоминаем о необходимости подтвердить или отменить участие в игре {event.name} до {deadline}!"
+                text = f"Напоминаем: подтвердите участие в игре «{event.name}» до {deadline} (мск)."
             attendance_status = AttendanceStatus.WAITING
             main_roster_only = False
             buttons = [confirmation_button(event.event_id)]
@@ -893,13 +923,12 @@ class ConfirmationNotificationService:
             text=confirmation_text,
             buttons=confirmation_buttons,
         )
-        confirmed = [
-            registration
-            for registration in await self.catalog.registrations.list_for_event(event.event_id)
+        registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
+        link_recipients = {
+            registration.participant_key
+            for registration in _active_main_roster(registrations, event.player_amount)
             if registration.attendance_status is AttendanceStatus.CONFIRMED
-        ]
-        confirmed.sort(key=lambda registration: (registration.created_at, registration.participant_key))
-        link_recipients = {registration.participant_key for registration in confirmed[: event.player_amount]}
+        }
         delivered_notifications = [
             (index, stored_text)
             for index, stored_text in enumerate(event.confirmed_notifications)
@@ -961,7 +990,8 @@ class ConfirmationNotificationService:
             user_id=recipient.user_id,
             request_id=request_id,
             text=(
-                f"Вы попали в основной состав игровой сессии игры {event.name}!\n\n"
+                f"Место освободилось: вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+                "После подтверждения участия мастера отправят вам ссылку на чат игры отдельным сообщением.\n\n"
                 "Посмотрите актуальный состав игроков: "
                 f"{event.public_table_public_url}"
             ),
@@ -1047,11 +1077,11 @@ class ConfirmationNotificationService:
                 recipients[key] = NotificationRecipient(platform, uid, user)
 
         if command.operation is Operation.REMOVE_PARTICIPANT:
-            text = f"Ваша заявка на игру {event.name} была удалена"
+            text = f"Ваша запись на игру «{event.name}» удалена."
         else:
             text = (
-                f"Ваша завяка на игру {event.name} была аннулирована, поскольку вы не успели "
-                "подтвердить или отменить участие до дедлайна"
+                f"Ваша запись на игру «{event.name}» удалена, потому что вы не подтвердили "
+                "и не отменили участие до указанного срока."
             )
 
         delivered = 0
@@ -1164,19 +1194,21 @@ class OrderedMutationService:
         if event.last_confirmed_link_promotion_operation_id == command.operation_id:
             return
         promoted_key: str | None = None
-        if registration is not None and registration.attendance_status is AttendanceStatus.CONFIRMED:
-            confirmed = [
+        if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
+            active = [
                 row
                 for row in await self.catalog.registrations.list_for_event(event.event_id)
-                if row.attendance_status is AttendanceStatus.CONFIRMED
+                if row.attendance_status is not AttendanceStatus.CANCELLED
             ]
-            confirmed.sort(key=lambda row: (row.created_at, row.participant_key))
+            active.sort(key=lambda row: (row.created_at, row.participant_key))
             target_index = next(
-                (index for index, row in enumerate(confirmed) if row.participant_key == registration.participant_key),
+                (index for index, row in enumerate(active) if row.participant_key == registration.participant_key),
                 None,
             )
-            if target_index is not None and target_index < event.player_amount < len(confirmed):
-                promoted_key = confirmed[event.player_amount].participant_key
+            if target_index is not None and target_index < event.player_amount < len(active):
+                promoted = active[event.player_amount]
+                if promoted.attendance_status is AttendanceStatus.CONFIRMED:
+                    promoted_key = promoted.participant_key
         await self.events.set_confirmed_link_promotion(event.event_id, command.operation_id, promoted_key)
         event.last_confirmed_link_promotion_operation_id = command.operation_id
         event.last_confirmed_link_promotion_participant_key = promoted_key
@@ -1191,6 +1223,13 @@ class OrderedMutationService:
         if event.archived_at is not None:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
                 return MutationResult("Игра уже архивирована")
+            if command.operation in {
+                Operation.ENLIST,
+                Operation.CONFIRM,
+                Operation.UPDATE_CHARACTER_WISH,
+                Operation.CANCEL,
+            }:
+                raise OperationNotAllowed("Игра больше не активна; запись и изменение данных недоступны.")
             raise OperationNotAllowed("Игра уже архивирована")
 
         if command.operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
@@ -1330,6 +1369,13 @@ class OrderedMutationService:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")
             assert isinstance(command.payload, EnlistPayload)
+            existing = await self.catalog.registrations.get(event.event_id, command.participant_key)
+            if (
+                existing is not None
+                and existing.attendance_status is not AttendanceStatus.CANCELLED
+                and existing.last_operation_id != command.operation_id
+            ):
+                raise OperationNotAllowed(f"Вы уже записаны на игру «{event.name}»")
             larp_experience = command.payload.larp_experience
             crossplay = command.payload.crossplay
             vk_profile = command.payload.vk_profile
@@ -1401,6 +1447,8 @@ class OrderedMutationService:
         if registration is None:
             raise RegistrationNotFound("Сначала запишитесь на эту игру")
         if command.operation is Operation.CONFIRM:
+            if registration.attendance_status is AttendanceStatus.CANCELLED:
+                raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
             assert isinstance(command.payload, CharacterWishPayload)
             await self.catalog.registrations.confirm(
                 event.event_id,
@@ -1408,12 +1456,25 @@ class OrderedMutationService:
                 participant_key=command.participant_key,
                 character_wish=command.payload.character_wish,
             )
-            await self.catalog.refresh(event)
+            event = await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
-            return MutationResult("Участие подтверждено")
+            main_roster_keys = {
+                row.participant_key
+                for row in _active_main_roster(
+                    list(await self.catalog.registrations.list_for_event(event.event_id)),
+                    event.player_amount,
+                )
+            }
+            return MutationResult(
+                confirmation_success_text(
+                    event,
+                    command.payload.character_wish,
+                    in_main_roster=command.participant_key in main_roster_keys,
+                )
+            )
         if command.operation is Operation.UPDATE_CHARACTER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
-                raise OperationNotAllowed("Сначала снова подтвердите участие")
+                raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
             if registration.attendance_status is AttendanceStatus.WAITING and not registration.character_wish:
                 raise OperationNotAllowed("Впервые укажите пожелания при подтверждении участия")
             assert isinstance(command.payload, CharacterWishPayload)

@@ -35,11 +35,12 @@ from larp_bot.application.conversation import (
     GAMEMASTER_NOTIFICATION,
     GAMEMASTER_REVOKED_NOTIFICATION,
     GRANT_GAMEMASTER,
-    KEEP,
+    INVALID_INPUT_RESPONSE,
     LIST_EVENT_LEADERS,
     LIST_GAMEMASTERS,
     LIST_WAITING_PLAYERS,
     MAIN_MENU,
+    MAIN_MENU_LABEL,
     MANAGE_GAMES,
     MANAGE_MASTERS,
     MANAGE_MODERATORS,
@@ -246,8 +247,8 @@ async def test_enlist_finishes_without_confirmation_or_character_wishes(
     assert queued.payload.crossplay is True
     assert queued.payload.vk_profile == "https://vk.com/id1"
     assert queued.payload.telegram_profile == "https://t.me/ivan_player"
-    assert [(button.label, button.value) for button in queued.reply_context.buttons] == [(MAIN_MENU, MAIN_MENU)]
-    assert [(button.label, button.value) for button in responses[-1].buttons] == [(MAIN_MENU, MAIN_MENU)]
+    assert [(button.label, button.value) for button in queued.reply_context.buttons] == [(MAIN_MENU_LABEL, MAIN_MENU)]
+    assert [(button.label, button.value) for button in responses[-1].buttons] == [(MAIN_MENU_LABEL, MAIN_MENU)]
     assert responses[-1].deferred
 
 
@@ -270,8 +271,9 @@ async def test_cancel_confirmation_warns_about_losing_queue_position(disk_store:
     assert response.text == (
         f"Вы уверены, что хотите отменить участие в игре «{event.name}»? "
         "Если вы отмените участие, то сможете записаться снова, но попадёте "
-        "в конец очереди подтверждения"
+        "в конец очереди на основной состав."
     )
+    assert [button.label for button in response.buttons] == ["Да, отменить", "Нет, оставить участие"]
 
 
 @pytest.mark.asyncio
@@ -284,7 +286,7 @@ async def test_only_idle_buttonless_user_responses_get_main_menu_navigation(
     terminal = await engine.handle(inbound(2, "select:character:missing-game", callback=True))
 
     assert all(button.value != MAIN_MENU for button in prompt.buttons)
-    assert [(button.label, button.value) for button in terminal.buttons] == [(MAIN_MENU, MAIN_MENU)]
+    assert [(button.label, button.value) for button in terminal.buttons] == [(MAIN_MENU_LABEL, MAIN_MENU)]
 
 
 @pytest.mark.asyncio
@@ -315,11 +317,12 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     await engine.handle(inbound(1, ENLIST))
     prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
     assert prompt.text == (
-        "С кем из других игроков вы бы хотели попасть в одну игровую сессию? "
-        "Напишите через запятую в именительном падеже имена и фамилии.\n\n"
-        "Если у вас нет пожеланий по соигрокам, нажмите пропустить"
+        "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
+        "Укажите каждого как «Фамилия Имя», через запятую. "
+        "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
+        "Ответ должен быть не длиннее 2000 символов. Если пожеланий нет, нажмите «Пропустить»."
     )
-    assert "нажмите пропустить" in prompt.text.casefold()
+    assert "нажмите «пропустить»" in prompt.text.casefold()
     assert any(button.value == "enlist:wish-play:skip" for button in prompt.buttons)
 
     stale = await engine.handle(inbound(3, f"select:enlist:{event.event_id}", callback=True))
@@ -331,6 +334,55 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     assert response.deferred
     assert isinstance(publisher.commands[-1].payload, EnlistPayload)
     assert publisher.commands[-1].payload.wish_play == "Без пожеланий"
+
+
+@pytest.mark.asyncio
+async def test_overlong_co_player_wish_is_rejected_without_leaving_the_prompt(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+    await engine.handle(inbound(1, ENLIST))
+    prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
+
+    rejected = await engine.handle(inbound(3, "А" * 2001))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert rejected.text == INVALID_INPUT_RESPONSE
+    assert rejected.buttons == prompt.buttons
+    assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_active_registration_cannot_enlist_again(
+    confirmed: bool,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+    )
+    if confirmed:
+        await tables.confirm(
+            event.event_id,
+            operation_id="existing-confirm",
+            participant_key=key,
+            character_wish="Doctor",
+        )
+
+    await engine.handle(inbound(1, ENLIST))
+    rejected = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
+
+    assert rejected.text == f"Вы уже записаны на игру «{event.name}»."
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio
@@ -367,12 +419,33 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     await engine.handle(inbound(4, "Doctor"))
     command = publisher.commands[-1]
     assert command.operation is Operation.CONFIRM
-    assert command.reply_context.text_success == (
-        f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
-        "Мастера скоро отправят вам ссылку на чат игры!\n\n"
-        "Пожелания по персонажу:\nDoctor\n\n"
-        "Позже их можно изменить через «🎭 Пожелания по персонажу»."
+    assert command.reply_context.text_success == ""
+
+
+@pytest.mark.asyncio
+async def test_overlong_character_wish_is_rejected_without_confirming(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
     )
+    await engine.handle(inbound(1, CONFIRM))
+    prompt = await engine.handle(inbound(2, f"select:confirm:{event.event_id}", callback=True))
+
+    rejected = await engine.handle(inbound(3, "А" * 3001))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert rejected.text == INVALID_INPUT_RESPONSE
+    assert rejected.buttons == prompt.buttons
+    assert saved is not None and saved.dialog_state == "CONFIRM_WISH"
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio
@@ -392,7 +465,11 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
         response = await engine.handle(message)
         saved = await users.get(Platform.TELEGRAM, 1)
 
-        assert response.text == "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры."
+        assert response.text == (
+            "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры.\n\n"
+            "Сначала заполните профиль и запишитесь на игру. Мы сообщим вам, когда будет открыто "
+            "подтверждение на игру — вы сможете подтвердиться, когда будете уверены, что сможете прийти на игру."
+        )
         assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
         assert saved is not None and saved.dialog_state == "IDLE"
         assert saved.dialog_context == {}
@@ -445,7 +522,7 @@ async def test_created_game_accepts_signup_but_does_not_offer_confirmation(
     )
 
     confirmation_games = await engine.handle(inbound(2, CONFIRM))
-    assert "ещё не открыто" in confirmation_games.text
+    assert confirmation_games.text == "Сейчас нет игр, доступных для подтверждения участия."
     assert not any(button.value == f"select:confirm:{event.event_id}" for button in confirmation_games.buttons)
     assert not publisher.commands
 
@@ -464,9 +541,9 @@ async def test_game_archived_during_signup_is_not_enqueued(disk_store: MemoryDis
     hidden = await engine.handle(inbound(4, ENLIST))
     stale = await engine.handle(inbound(5, f"select:enlist:{event.event_id}", callback=True))
 
-    assert "архивирована" in rejected.text
+    assert rejected.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert not any(button.value == f"select:enlist:{event.event_id}" for button in hidden.buttons)
-    assert "архивирована" in stale.text
+    assert stale.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert publisher.commands == []
 
 
@@ -491,11 +568,11 @@ async def test_game_archived_during_cancellation_is_not_enqueued(disk_store: Mem
     hidden = await engine.handle(inbound(4, CANCEL))
     stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
 
-    assert rejected.text == f"Игра «{event.name}» архивирована. Отмена участия недоступна."
+    assert rejected.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
-    assert hidden.text == "Сейчас нет игр, участие в которых можно отменить."
-    assert hidden.buttons == [Button(label="Отмена", value="Отмена")]
-    assert stale.text == f"Игра «{event.name}» архивирована. Отмена участия недоступна."
+    assert hidden.text == "Сейчас нет игр, доступных для отмены участия."
+    assert hidden.buttons == [Button(label=MAIN_MENU_LABEL, value="Отмена")]
+    assert stale.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert publisher.commands == []
 
 
@@ -520,11 +597,13 @@ async def test_closed_game_neither_offers_nor_accepts_cancellation(disk_store: M
     hidden = await engine.handle(inbound(4, CANCEL))
     stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
 
-    closed_text = f"Игра «{event.name}» закрыта. Состав игроков зафиксирован, отменить участие нельзя."
+    closed_text = (
+        f"Регистрация на игру «{event.name}» закрыта, и состав зафиксирован. Отменить участие через бота уже нельзя."
+    )
     assert rejected.text == closed_text
     assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
-    assert hidden.text == "Сейчас нет игр, участие в которых можно отменить."
-    assert hidden.buttons == [Button(label="Отмена", value="Отмена")]
+    assert hidden.text == "Сейчас нет игр, доступных для отмены участия."
+    assert hidden.buttons == [Button(label=MAIN_MENU_LABEL, value="Отмена")]
     assert stale.text == closed_text
     assert publisher.commands == []
 
@@ -565,8 +644,8 @@ async def test_cancellation_picker_has_no_pagination_when_only_registered_game_i
 
     response = await engine.handle(inbound(1, CANCEL))
 
-    assert response.text == "Сейчас нет игр, участие в которых можно отменить."
-    assert response.buttons == [Button(label="Отмена", value="Отмена")]
+    assert response.text == "Сейчас нет игр, доступных для отмены участия."
+    assert response.buttons == [Button(label=MAIN_MENU_LABEL, value="Отмена")]
 
 
 @pytest.mark.asyncio
@@ -594,7 +673,8 @@ async def test_archived_game_does_not_offer_or_open_character_wish_editing(
     stale = await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
 
     assert not any(button.value == f"select:character:{event.event_id}" for button in games.buttons)
-    assert "архивирована" in stale.text
+    assert games.text == "Сейчас нет игр, доступных для изменения пожеланий."
+    assert stale.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert publisher.commands == []
 
 
@@ -624,12 +704,12 @@ async def test_game_archived_during_character_wish_edit_is_not_enqueued(
 
     rejected = await engine.handle(inbound(3, "Medic"))
 
-    assert "архивирована" in rejected.text
+    assert rejected.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert publisher.commands == []
 
 
 @pytest.mark.asyncio
-async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
+async def test_cancelled_registration_must_reenlist_before_confirmation(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, _, publisher, tables = await engine_setup(disk_store, event)
@@ -643,12 +723,13 @@ async def test_reconfirm_cancelled_registration_can_keep_old_character_wish(
     )
     await tables.confirm(event.event_id, operation_id="confirm", participant_key=key, character_wish="Doctor")
     await tables.cancel(event.event_id, operation_id="cancel", participant_key=key)
-    await engine.handle(inbound(1, CONFIRM))
+    listing = await engine.handle(inbound(1, CONFIRM))
     selected = await engine.handle(inbound(2, f"select:confirm:{event.event_id}", callback=True))
-    assert any(button.value == KEEP for button in selected.buttons)
-    await engine.handle(inbound(3, KEEP, callback=True))
-    payload = publisher.commands[-1].payload
-    assert hasattr(payload, "character_wish") and payload.character_wish == "Doctor"
+
+    assert not any(button.value == f"select:confirm:{event.event_id}" for button in listing.buttons)
+    assert "сначала запишитесь на игру снова" in listing.text.casefold()
+    assert selected.text == "Сначала снова запишитесь на эту игру."
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio
@@ -739,12 +820,10 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         ("moscowkudesnik", "@moscowkudesnik"),
         ("t.me/moscowkudesnik", "@moscowkudesnik"),
         ("https://t.me/moscowkudesnik", "@moscowkudesnik"),
-        ("not a telegram profile", None),
-        ("https://example.com/moscowkudesnik", None),
     ],
 )
 @pytest.mark.asyncio
-async def test_vk_profile_parses_telegram_reference_or_treats_it_as_missing(
+async def test_vk_profile_parses_telegram_reference(
     disk_store: MemoryDiskStore,
     event: Event,
     telegram_profile: str,
@@ -772,6 +851,39 @@ async def test_vk_profile_parses_telegram_reference_or_treats_it_as_missing(
     assert isinstance(profile, VkUser)
     assert profile.profile_complete
     assert profile.telegram_handle == expected_handle
+
+
+@pytest.mark.asyncio
+async def test_vk_profile_retries_malformed_telegram_reference_with_skip_option(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+
+    def vk(update: int, value: str, *, callback: bool = False) -> InboundMessage:
+        return InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id=str(update),
+            text="" if callback else value,
+            callback=value if callback else None,
+            peer_id=7,
+        )
+
+    await engine.handle(vk(1, PROFILE))
+    await engine.handle(vk(2, "Иванов Иван"))
+    await engine.handle(vk(3, "Нет"))
+    rejected = await engine.handle(vk(4, "not a telegram profile"))
+    pending = await users.get(Platform.VK, 7)
+
+    assert rejected.text == "Не удалось разобрать профиль Telegram. Попробуйте ещё раз"
+    assert [button.label for button in rejected.buttons] == ["Пропустить", MAIN_MENU_LABEL]
+    assert pending is not None and pending.dialog_state == "PROFILE_CONTACT"
+
+    await engine.handle(vk(5, "Пропустить", callback=True))
+    await engine.handle(vk(6, "Да"))
+    profile = await users.get(Platform.VK, 7)
+    assert isinstance(profile, VkUser) and profile.profile_complete
+    assert profile.telegram_handle is None
 
 
 @pytest.mark.asyncio
@@ -820,7 +932,7 @@ async def test_incomplete_profile_cannot_enlist(disk_store: MemoryDiskStore, eve
         MemoryPlayerStatistics(),
     )
     response = await engine.handle(inbound(1, ENLIST))
-    assert "Сначала зарегистрируйте профиль" in response.text
+    assert "Сначала заполните профиль" in response.text
     assert response.buttons[0].value == PROFILE
 
     forged = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
@@ -838,7 +950,7 @@ async def test_profile_validates_email_before_advancing_to_next_question(
         PROFILE,
         "Иванов Иван Иванович",
         "Да",
-        "Нет",
+        "Да",
         "+7 999 123-45-67",
     )
     for update, answer in enumerate(answers, start=1):
@@ -882,9 +994,9 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     profile = await users.get(Platform.TELEGRAM, 2)
     assert full_name_prompt.text == "Введите ФИО кириллицей (фамилию имя, если отчества нету):"
     assert [button.value for button in full_name_prompt.buttons] == ["Отмена"]
-    assert invalid_full_name.text == "Введите ФИО, либо фамилию имя, если отчества нету"
+    assert invalid_full_name.text == "Введите ФИО кириллицей, либо фамилию имя, если отчества нету"
     assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
-    assert pass_prompt.text == "Нужен ли вам пропуск на место проведения?"
+    assert pass_prompt.text == "Нужен ли вам пропуск для входа на место проведения игры?"
     assert "страницу VK" in contact_prompt.text
     assert "Профиль сохранён" in saved.text
     assert profile is not None
@@ -996,7 +1108,7 @@ async def test_foreign_profile_collects_combined_latin_full_name(disk_store: Mem
         PROFILE,
         "Ли Анна",
         "Да",
-        "Да",
+        "Нет",
         "Li Анна",
         "Li Anna",
         "+44 7700 900123",
@@ -1010,7 +1122,7 @@ async def test_foreign_profile_collects_combined_latin_full_name(disk_store: Mem
 
     profile = await users.get(Platform.TELEGRAM, 2)
     assert responses[3].text == "Введите ФИО латиницей (фамилию имя, если отчества нету):"
-    assert responses[4].text == "Введите ФИО, либо фамилию имя, если отчества нету"
+    assert responses[4].text == "Введите ФИО латиницей, либо фамилию имя, если отчества нету"
     assert [button.value for button in responses[4].buttons] == ["Отмена"]
     assert "Профиль сохранён" in responses[-1].text
     assert profile is not None and profile.profile_complete and profile.pass_details is not None
@@ -1242,7 +1354,7 @@ async def test_event_leader_pages_profile_names_and_confirms_player_removal(
     first = await engine.handle(inbound(3, f"ag:remove:{event.event_id}", callback=True))
     first_players = [button for button in first.buttons if button.value.startswith("admin:remove:pick:")]
     assert len(first_players) == PAGE_SIZE
-    assert first_players[0].label == "Фамилия0 Имя0 — Ожидается"
+    assert first_players[0].label == "Фамилия0 Имя0 — Ожидает подтверждения"
     assert "Отменённый Игрок" not in [button.label for button in first_players]
     assert "имена из их профилей" in first.text
 
@@ -1251,9 +1363,9 @@ async def test_event_leader_pages_profile_names_and_confirms_player_removal(
     second_players = [button for button in second.buttons if button.value.startswith("admin:remove:pick:")]
     assert [button.label for button in second_players] == [
         "Фамилия5 Имя5 — Подтверждено",
-        "Фамилия6 Имя6 — Ожидается",
+        "Фамилия6 Имя6 — Ожидает подтверждения",
         "Фамилия7 Имя7 — Подтверждено",
-        "Фамилия8 Имя8 — Ожидается",
+        "Фамилия8 Имя8 — Ожидает подтверждения",
         "Фамилия9 Имя9 — Подтверждено",
     ]
 
@@ -2220,7 +2332,7 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
 
     preview = await engine.handle(inbound(6, "Сбор в 18:30"))
     assert "Получателей: 0" in preview.text
-    assert f"Мастера разослали это сообщение всем подтвердившимся на игру {event.name}:\n\nСбор в 18:30" in preview.text
+    assert f"Сообщение от мастеров игры «{event.name}»:\n\nСбор в 18:30" in preview.text
     queued = await engine.handle(inbound(7, "admin:notification:confirm", callback=True))
     assert queued.deferred
     command = publisher.commands[-1]
@@ -2263,10 +2375,7 @@ async def test_admin_link_notification_requires_a_chat_link_and_previews_main_ro
     link = "https://vk.me/join/AJQ1d4V/FAtt9xoXEwCAfx1q"
     preview = await engine.handle(inbound(4, link))
     assert "Получателей: 1" in preview.text
-    assert (
-        f"Вы подтвердили своё участие в игре {event.name}! Пожалуйста, добавьтесь в чат игры, "
-        f"мы вас очень ждём: {link}" in preview.text
-    )
+    assert f"Вы в основном составе игры «{event.name}». Вступите в чат: {link}" in preview.text
 
     queued = await engine.handle(inbound(5, "admin:notification:confirm", callback=True))
     assert queued.deferred
@@ -2415,7 +2524,7 @@ async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_stor
     assert len([button for button in enlist_second.buttons if button.value.startswith("select:enlist:")]) == 1
     assert PAGE_BACK in {button.label for button in enlist_second.buttons}
     assert PAGE_FORWARD not in {button.label for button in enlist_second.buttons}
-    assert enlist_second.buttons[-1] == Button(label="Отмена", value="Отмена")
+    assert enlist_second.buttons[-1] == Button(label=MAIN_MENU_LABEL, value="Отмена")
 
     registered_first = await engine.handle(inbound(3, CONFIRM))
     registered_second = await engine.handle(
