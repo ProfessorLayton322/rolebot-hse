@@ -746,7 +746,10 @@ class ConversationEngine:
             idempotency_key=message.update_id,
         )
         await self._clear(user)
-        return await self._main(user, "✅ Профиль сохранён.")
+        return BotResponse(
+            text="✅ Профиль успешно заполнен.",
+            buttons=[main_menu_button()],
+        )
 
     async def _show_events(
         self,
