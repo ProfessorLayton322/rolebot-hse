@@ -316,10 +316,10 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
     assert prompt.text == (
         "С кем из других игроков вы бы хотели попасть в одну игровую сессию? "
-        "(Напишите через запятую в именительном падеже имена и фамилии)\n\n"
-        "Нажмите «Пропустить» на клавиатуре или отправьте сообщением, с кем вы хотите играть."
+        "Напишите через запятую в именительном падеже имена и фамилии.\n\n"
+        "Если у вас нет пожеланий по соигрокам, нажмите пропустить"
     )
-    assert "нажмите «пропустить»" in prompt.text.casefold()
+    assert "нажмите пропустить" in prompt.text.casefold()
     assert any(button.value == "enlist:wish-play:skip" for button in prompt.buttons)
 
     stale = await engine.handle(inbound(3, f"select:enlist:{event.event_id}", callback=True))
