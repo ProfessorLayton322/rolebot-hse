@@ -969,7 +969,7 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     saved = await engine.handle(inbound(9, "Да", user_id=user_id))
     profile = await users.get(Platform.TELEGRAM, user_id)
     assert "страницу VK" in contact_prompt.text
-    assert "Профиль сохранён" in saved.text
+    assert "Профиль успешно заполнен" in saved.text
     assert profile is not None and profile.pass_details is not None
     assert profile.pass_details.email == "player@example.com"
     assert profile.pass_details.mobile_phone == "+7 999 123-45-67"
@@ -998,11 +998,31 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
     assert pass_prompt.text == "Нужен ли вам пропуск для входа на место проведения игры?"
     assert "страницу VK" in contact_prompt.text
-    assert "Профиль сохранён" in saved.text
+    assert "Профиль успешно заполнен" in saved.text
     assert profile is not None
     assert profile.full_name == "Семёнова-Звенигородская Ева-Лотта Ильинична"
     assert profile.larp_experience is False
     assert profile.needs_pass is False and profile.pass_details is None
+
+
+@pytest.mark.asyncio
+async def test_profile_completion_shows_confirmation_before_main_menu(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event)
+    responses = []
+    for update, answer in enumerate(
+        (PROFILE, "Иванов Иван", "Нет", "https://vk.com/id2", "Нет"),
+        start=1,
+    ):
+        responses.append(await engine.handle(inbound(update, answer, user_id=2)))
+
+    completed = responses[-1]
+    assert completed.text == "✅ Профиль успешно заполнен."
+    assert completed.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
+
+    menu = await engine.handle(inbound(6, MAIN_MENU, callback=True, user_id=2))
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
 
 
 @pytest.mark.asyncio
@@ -1025,7 +1045,7 @@ async def test_profile_derives_experience_from_statistics_without_asking_the_pla
     profile = await users.get(Platform.TELEGRAM, 2)
     shown = await engine.handle(inbound(6, PROFILE, user_id=2))
 
-    assert "Профиль сохранён" in responses[-1].text
+    assert "Профиль успешно заполнен" in responses[-1].text
     assert all("Играли ли вы" not in response.text for response in responses)
     assert profile is not None and profile.larp_experience is True
     assert "Опыт LARP" not in shown.text
@@ -1088,7 +1108,7 @@ async def test_profile_save_queues_projection_updates_for_all_unarchived_partici
         response = await engine.handle(inbound(update, answer, user_id=1, telegram_username="new_profile"))
 
     profile = await users.get(Platform.TELEGRAM, 1)
-    assert "Профиль сохранён" in response.text
+    assert "Профиль успешно заполнен" in response.text
     assert profile is not None and profile.full_name == "Новиков Новый Нович"
     assert profile.larp_experience is True
     assert profile.last_update_id == "5"
@@ -1124,7 +1144,7 @@ async def test_foreign_profile_collects_combined_latin_full_name(disk_store: Mem
     assert responses[3].text == "Введите ФИО латиницей (фамилию имя, если отчества нету):"
     assert responses[4].text == "Введите ФИО латиницей, либо фамилию имя, если отчества нету"
     assert [button.value for button in responses[4].buttons] == ["Отмена"]
-    assert "Профиль сохранён" in responses[-1].text
+    assert "Профиль успешно заполнен" in responses[-1].text
     assert profile is not None and profile.profile_complete and profile.pass_details is not None
     assert profile.pass_details.model_dump() == {
         "surname_cyrillic": "Ли",
