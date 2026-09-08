@@ -2169,9 +2169,7 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
 
     preview = await engine.handle(inbound(6, "Сбор в 18:30"))
     assert "Получателей: 0" in preview.text
-    assert (
-        f"Это сообщение было разослано всем подтвердившимся на игру {event.name}: ***\n\nСбор в 18:30" in preview.text
-    )
+    assert f"Мастера разослали это сообщение всем подтвердившимся на игру {event.name}:\n\nСбор в 18:30" in preview.text
     queued = await engine.handle(inbound(7, "admin:notification:confirm", callback=True))
     assert queued.deferred
     command = publisher.commands[-1]

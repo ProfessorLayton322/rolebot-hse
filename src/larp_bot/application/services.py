@@ -684,7 +684,7 @@ def is_plain_chat_link(value: str) -> bool:
 def confirmed_notification_text(event_name: str, message: str) -> str:
     clean_message = message.strip()
     if not is_plain_chat_link(clean_message):
-        return f"Это сообщение было разослано всем подтвердившимся на игру {event_name}: ***\n\n{clean_message}"
+        return f"Мастера разослали это сообщение всем подтвердившимся на игру {event_name}:\n\n{clean_message}"
     return (
         f"Вы подтвердили своё участие в игре {event_name}! "
         f"Пожалуйста, добавьтесь в чат игры, мы вас очень ждём: {clean_message}"

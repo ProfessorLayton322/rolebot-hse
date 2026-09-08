@@ -674,7 +674,7 @@ def test_plain_chat_links_get_game_invitation(value: str) -> None:
 def test_arbitrary_or_non_chat_messages_get_broadcast_disclaimer(value: str) -> None:
     assert not is_plain_chat_link(value)
     assert confirmed_notification_text("Лесной предел", value) == (
-        "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\n" + value
+        "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\n" + value
     )
 
 
@@ -684,7 +684,7 @@ def test_arbitrary_or_non_chat_messages_get_broadcast_disclaimer(value: str) -> 
     [
         (
             "Сбор игроков в 18:30 у главного входа.",
-            "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\n"
+            "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\n"
             "Сбор игроков в 18:30 у главного входа.",
         ),
         (
@@ -840,7 +840,7 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
         (player.tg_id, "✅ Участие подтверждено."),
         (
             player.tg_id,
-            "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\nСбор в 18:30",
+            "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\nСбор в 18:30",
         ),
         (
             player.tg_id,
@@ -937,7 +937,7 @@ async def test_confirmed_reserve_gets_information_then_chat_link_after_cancellat
     reserve_messages = [sent[3] for sent in transport.sent if sent[1] == 4]
     assert reserve_messages[:2] == [
         "✅ Участие подтверждено.",
-        "Это сообщение было разослано всем подтвердившимся на игру Лесной предел: ***\n\nСбор в 18:30",
+        "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\nСбор в 18:30",
     ]
     assert not any("добавьтесь в чат" in text for text in reserve_messages[:2])
     assert reserve_messages[-1] == (
