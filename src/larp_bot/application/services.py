@@ -708,11 +708,15 @@ def enlistment_success_text(event: Event, queue_position: int) -> str:
             f"{cancellations_needed} человек до вас отменят своё участие.\n\n"
             f"Подробнее можете посмотреть в таблице игроков: {event.public_table_public_url}"
         )
-    return (
-        f"{position_text}\n\n"
-        "Когда придёт время окончательно подтвердить участие, выберите "
-        "«✅ Подтвердить участие». Тогда бот попросит пожелания по персонажу."
-    )
+    if event.status is EventStatus.CONFIRMATION_OPEN:
+        confirmation_text = "Когда вы будете уверены, что сможете прийти на нашу игру - подтвердите своё участие"
+    else:
+        confirmation_text = (
+            "Игра пока закрыта для подтверждения участия. Мы обязательно пришлём вам уведомление, "
+            "когда можно будет подтвердиться - пожалуйста, не забудьте это сделать, когда будете "
+            "уверены, что сможете прийти на нашу игру"
+        )
+    return f"{position_text}\n\n{confirmation_text}"
 
 
 class ConfirmationNotificationService:
