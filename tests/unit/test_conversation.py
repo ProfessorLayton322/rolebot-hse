@@ -365,7 +365,14 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     assert stale.buttons == selection.buttons
     assert not publisher.commands
     await engine.handle(inbound(4, "Doctor"))
-    assert publisher.commands[-1].operation is Operation.CONFIRM
+    command = publisher.commands[-1]
+    assert command.operation is Operation.CONFIRM
+    assert command.reply_context.text_success == (
+        f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
+        "Мастера скоро отправят вам ссылку на чат игры!\n\n"
+        "Пожелания по персонажу:\nDoctor\n\n"
+        "Позже их можно изменить через «🎭 Пожелания по персонажу»."
+    )
 
 
 @pytest.mark.asyncio
