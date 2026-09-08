@@ -460,6 +460,55 @@ async def test_enlist_persists_both_profiles_in_showcase(disk_store: MemoryDiskS
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [False, True])
+async def test_active_registration_rejects_a_new_enlist_operation(
+    confirmed: bool,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A")))
+    if confirmed:
+        await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
+
+    with pytest.raises(OperationNotAllowed, match="Вы уже записаны"):
+        await mutations.apply(
+            command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="Changed"))
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_player_must_reenlist_before_confirmation_and_gets_a_new_timestamp(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    enlist_payload = EnlistPayload(display_name="Player", wish_play="A")
+    await mutations.apply(command(event, Operation.ENLIST, enlist_payload))
+    original = await tables.get(event.event_id, "a" * 43)
+    assert original is not None
+
+    await mutations.apply(command(event, Operation.CANCEL, EmptyPayload()))
+    with pytest.raises(OperationNotAllowed, match="снова запишитесь"):
+        await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
+
+    await mutations.apply(command(event, Operation.ENLIST, enlist_payload))
+    reenlisted = await tables.get(event.event_id, "a" * 43)
+
+    assert reenlisted is not None
+    assert reenlisted.attendance_status is AttendanceStatus.WAITING
+    assert reenlisted.created_at > original.created_at
+
+
+@pytest.mark.asyncio
 async def test_fifo_sequence_has_required_final_state(disk_store: MemoryDiskStore, event: Event) -> None:
     tables = MemoryRegistrationRepository()
     showcase = YandexDiskShowcaseRepository(disk_store)
@@ -552,7 +601,7 @@ async def test_close_orders_enlist_confirmation_and_cancellation_rejection(
         )
     with pytest.raises(OperationNotAllowed, match="закрыто"):
         await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Changed")))
-    with pytest.raises(OperationNotAllowed, match="Состав игроков зафиксирован"):
+    with pytest.raises(OperationNotAllowed, match="состав зафиксирован"):
         await mutations.apply(command(event, Operation.CANCEL, EmptyPayload()))
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
@@ -642,7 +691,7 @@ async def test_archived_game_rejects_participant_mutations(
         await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
     await events.archive(event.event_id, datetime.now(UTC))
 
-    with pytest.raises(OperationNotAllowed, match="архивирована"):
+    with pytest.raises(OperationNotAllowed, match="больше не активна"):
         await mutations.apply(command(event, operation, payload))
 
 

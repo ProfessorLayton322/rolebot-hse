@@ -85,11 +85,12 @@ class OrderedWorker:
                         notifications_enabled = result.notifications_enabled
                         if result.buttons is not None:
                             buttons = result.buttons
-                    # ENLIST position is decided only after its ordered write;
-                    # ignore text embedded by workers from an older rollout.
+                    # ENLIST position and CONFIRM roster membership are decided only
+                    # after their ordered writes; ignore text embedded by gateways
+                    # from an older rollout.
                     text = (
                         default_text
-                        if command.operation is Operation.ENLIST
+                        if command.operation in {Operation.ENLIST, Operation.CONFIRM}
                         else command.reply_context.text_success or default_text
                     )
                     if (

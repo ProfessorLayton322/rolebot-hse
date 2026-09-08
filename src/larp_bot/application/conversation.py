@@ -46,7 +46,7 @@ from .deadlines import (
     format_confirmation_deadline,
     parse_confirmation_deadline,
 )
-from .navigation import ADMIN_MENU, MAIN_MENU, admin_menu_button, main_menu_button
+from .navigation import ADMIN_MENU, MAIN_MENU, MAIN_MENU_LABEL, admin_menu_button, main_menu_button
 from .ports import (
     AdminConfigProvider,
     DeferredTransport,
@@ -72,7 +72,7 @@ CANCEL = "❌ Отменить участие"
 ADMIN = "🛠 Администрирование"
 BACK = "⬅️ Назад"
 CANCEL_DIALOG = "Отмена"
-PAGE_BACK = "Назад"
+PAGE_BACK = "Предыдущая страница"
 PAGE_FORWARD = "Вперёд"
 PAGE_SIZE = 5
 NO_WISHES = "Без пожеланий"
@@ -114,7 +114,16 @@ STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
 GAMEMASTER_NOTIFICATION = "Вы назначены модератором! 🎉"
 GAMEMASTER_REVOKED_NOTIFICATION = "Вы больше не являетесь модератором."
-UNSUPPORTED_CONTENT_RESPONSE = "Я не буду на это отвечать"
+UNSUPPORTED_CONTENT_RESPONSE = "Пока я понимаю только текст и кнопки. Отправьте ответ текстовым сообщением."
+INACTIVE_GAME_RESPONSE = "Игра больше не активна; запись и изменение данных недоступны."
+INVALID_INPUT_RESPONSE = "Не удалось обработать ввод. Проверьте ответ и попробуйте ещё раз."
+MAX_CO_PLAYER_WISH_LENGTH = 2_000
+MAX_CHARACTER_WISH_LENGTH = 3_000
+WELCOME_TEXT = (
+    "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры.\n\n"
+    "Сначала заполните профиль и запишитесь на игру. Мы сообщим вам, когда будет открыто "
+    "подтверждение на игру — вы сможете подтвердиться, когда будете уверены, что сможете прийти на игру."
+)
 
 REGISTRATION_OPEN_STATUSES = frozenset({EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN})
 EVENT_STATUS_LABELS = {
@@ -205,11 +214,18 @@ FREE_TEXT_DIALOG_STATES = frozenset(
 PROFILE_FORMAT = "combined-full-name-v2-statistics-experience"
 CYRILLIC_FULL_NAME_PROMPT = "Введите ФИО кириллицей (фамилию имя, если отчества нету):"
 LATIN_FULL_NAME_PROMPT = "Введите ФИО латиницей (фамилию имя, если отчества нету):"
-FULL_NAME_RETRY_PROMPT = "Введите ФИО, либо фамилию имя, если отчества нету"
+CYRILLIC_FULL_NAME_RETRY_PROMPT = "Введите ФИО кириллицей, либо фамилию имя, если отчества нету"
+LATIN_FULL_NAME_RETRY_PROMPT = "Введите ФИО латиницей, либо фамилию имя, если отчества нету"
+PHONE_PROMPT = "Введите ваш номер телефона. Он необходим для оформления пропуска."
+EMAIL_PROMPT = "Введите ваш email. Он необходим для оформления пропуска."
+
+
+def dialog_exit_button(*, label: str = MAIN_MENU_LABEL) -> Button:
+    return Button(label=label, value=CANCEL_DIALOG)
 
 
 def yes_no_buttons() -> list[Button]:
-    return [Button(label="Да", value="Да"), Button(label="Нет", value="Нет")]
+    return [Button(label="Да", value="Да"), Button(label="Нет", value="Нет"), dialog_exit_button()]
 
 
 def main_buttons(has_admin_access: bool) -> list[Button]:
@@ -243,6 +259,30 @@ def _bool_text(value: bool | None) -> str:
     return "Да" if value else "Нет"
 
 
+def _attendance_status_text(status: AttendanceStatus) -> str:
+    if status is AttendanceStatus.WAITING:
+        return "Ожидает подтверждения"
+    return status.value
+
+
+def _player_game_picker_text(flow: str) -> str:
+    return {
+        "enlist": "🎮 Выберите игру, на которую хотите записаться:",
+        "confirm": "✅ Выберите игру, участие в которой хотите подтвердить:",
+        "character": "🎭 Выберите игру, для которой хотите изменить пожелания:",
+        "cancel": "❌ Выберите игру, участие в которой хотите отменить:",
+    }[flow]
+
+
+def _no_games_for_action_text(flow: str) -> str:
+    return {
+        "enlist": "Сейчас нет игр, доступных для записи.",
+        "confirm": "Сейчас нет игр, доступных для подтверждения участия.",
+        "character": "Сейчас нет игр, доступных для изменения пожеланий.",
+        "cancel": "Сейчас нет игр, доступных для отмены участия.",
+    }[flow]
+
+
 def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
 
@@ -258,7 +298,7 @@ def _pagination_buttons(
         buttons.append(Button(label=PAGE_BACK, value=previous))
     if following is not None:
         buttons.append(Button(label=PAGE_FORWARD, value=following))
-    buttons.append(Button(label=CANCEL_DIALOG, value=cancel))
+    buttons.append(Button(label=MAIN_MENU_LABEL if cancel == CANCEL_DIALOG else CANCEL_DIALOG, value=cancel))
     return buttons
 
 
@@ -410,7 +450,7 @@ class ConversationEngine:
         current_button_values = {button.value for button in user.last_bot_buttons}
         if value == "/start":
             await self._clear(user)
-            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры.")
+            response = await self._main(user, WELCOME_TEXT)
         elif message.has_unsupported_content:
             await self._save(user, message)
             return BotResponse(
@@ -433,7 +473,7 @@ class ConversationEngine:
             )
         elif value in {"/menu", MAIN_MENU, BACK}:
             await self._clear(user)
-            response = await self._main(user, "Привет! Этот бот поможет зарегистрироваться на кабинетные ролевые игры.")
+            response = await self._main(user, WELCOME_TEXT)
         elif value == CANCEL_DIALOG:
             await self._clear(user)
             response = await self._main(user, "Действие отменено.")
@@ -472,8 +512,8 @@ class ConversationEngine:
                         f"Нужен пропуск: {_bool_text(user.needs_pass)}"
                     ),
                     buttons=[
-                        Button(label="Изменить профиль", value="profile:edit"),
-                        Button(label=BACK, value=BACK),
+                        Button(label="Заполнить профиль заново", value="profile:edit"),
+                        main_menu_button(),
                     ],
                 )
             return await self._begin_profile(user)
@@ -482,7 +522,7 @@ class ConversationEngine:
         if value == ENLIST:
             if not is_profile_complete(user):
                 return BotResponse(
-                    text="Сначала зарегистрируйте профиль.",
+                    text="Сначала заполните профиль.",
                     buttons=[Button(label=PROFILE, value=PROFILE)],
                 )
             return await self._show_open_events("enlist")
@@ -509,24 +549,30 @@ class ConversationEngine:
         admin_response = await self.dispatch_idle_admin(user, message, value)
         if admin_response is not None:
             return admin_response
-        return await self._main(user)
+        return await self._main(user, "Не удалось распознать команду. Выберите действие кнопкой.")
 
     async def _begin_profile(self, user: User) -> BotResponse:
         user.dialog_state = "PROFILE_FULL_NAME_CYRILLIC"
         user.dialog_context = {"profile_format": PROFILE_FORMAT}
         return BotResponse(
             text=CYRILLIC_FULL_NAME_PROMPT,
-            buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+            buttons=[dialog_exit_button()],
         )
 
     @staticmethod
     def _profile_contact_prompt(user: User) -> BotResponse:
         user.dialog_state = "PROFILE_CONTACT"
         if isinstance(user, TelegramUser):
-            return BotResponse(text="Введите обязательную ссылку на вашу страницу VK:")
+            return BotResponse(
+                text="Введите обязательную ссылку на вашу страницу VK:",
+                buttons=[dialog_exit_button()],
+            )
         return BotResponse(
-            text="Ваш Telegram username или ссылка на профиль, если есть:",
-            buttons=[Button(label="Пропустить", value="Пропустить")],
+            text=(
+                "Укажите имя пользователя Telegram в формате @username или ссылку https://t.me/username. "
+                "Если Telegram нет, нажмите «Пропустить»."
+            ),
+            buttons=[Button(label=SKIP, value=SKIP), dialog_exit_button()],
         )
 
     async def _continue(self, user: User, message: InboundMessage, value: str) -> BotResponse:
@@ -544,7 +590,7 @@ class ConversationEngine:
         if state.startswith("ADMIN_"):
             return await self._admin_step(user, message, value)
         await self._clear(user)
-        return await self._main(user, "Диалог сброшен. Выберите действие:")
+        return await self._main(user, "Предыдущее действие прервано. Выберите действие:")
 
     async def _profile_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         context = user.dialog_context
@@ -558,31 +604,43 @@ class ConversationEngine:
                 surname, name, patronym = parse_full_name(value, alphabet="cyrillic")
             except ValueError:
                 return BotResponse(
-                    text=FULL_NAME_RETRY_PROMPT,
-                    buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                    text=CYRILLIC_FULL_NAME_RETRY_PROMPT,
+                    buttons=[dialog_exit_button()],
                 )
             context["surname_cyrillic"] = surname
             context["name_cyrillic"] = name
             context["patronym_cyrillic"] = patronym
             context["full_name"] = " ".join(part for part in (surname, name, patronym) if part != "-")
             user.dialog_state = "PROFILE_NEEDS_PASS"
-            return BotResponse(text="Нужен ли вам пропуск на место проведения?", buttons=yes_no_buttons())
+            return BotResponse(
+                text="Нужен ли вам пропуск для входа на место проведения игры?",
+                buttons=yes_no_buttons(),
+            )
         if state == "PROFILE_NEEDS_PASS":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
             context["needs_pass"] = value == "Да"
             if value == "Да":
                 user.dialog_state = "PROFILE_PASS_FOREIGNER"
-                return BotResponse(text="Вы иностранный гражданин?", buttons=yes_no_buttons())
+                return BotResponse(text="Есть ли у вас российское гражданство?", buttons=yes_no_buttons())
             return self._profile_contact_prompt(user)
         if state == "PROFILE_CONTACT":
             if isinstance(user, TelegramUser):
                 try:
                     context["contact"] = normalize_vk_url(value)
                 except ValueError as exc:
-                    return BotResponse(text=f"❌ {exc}. Попробуйте ещё раз:")
+                    return BotResponse(text=f"❌ {exc}. Попробуйте ещё раз:", buttons=[dialog_exit_button()])
             else:
-                context["contact"] = _normalize_vk_telegram_contact(value)
+                if value == SKIP:
+                    context["contact"] = None
+                else:
+                    contact = _normalize_vk_telegram_contact(value)
+                    if contact is None:
+                        return BotResponse(
+                            text="Не удалось разобрать профиль Telegram. Попробуйте ещё раз",
+                            buttons=[Button(label=SKIP, value=SKIP), dialog_exit_button()],
+                        )
+                    context["contact"] = contact
             user.dialog_state = "PROFILE_CROSSPLAY"
             return BotResponse(
                 text="Готовы ли вы играть за персонажа противоположного пола?",
@@ -596,45 +654,51 @@ class ConversationEngine:
         if state == "PROFILE_PASS_FOREIGNER":
             if value not in {"Да", "Нет"}:
                 return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
-            context["foreigner"] = value == "Да"
+            context["foreigner"] = value == "Нет"
             if context["foreigner"]:
                 user.dialog_state = "PROFILE_PASS_FULL_NAME_LATIN"
                 return BotResponse(
                     text=LATIN_FULL_NAME_PROMPT,
-                    buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                    buttons=[dialog_exit_button()],
                 )
             user.dialog_state = "PROFILE_PASS_PHONE"
-            return BotResponse(text="Введите мобильный телефон:")
+            return BotResponse(text=PHONE_PROMPT, buttons=[dialog_exit_button()])
         if state == "PROFILE_PASS_FULL_NAME_LATIN":
             try:
                 surname, name, patronym = parse_full_name(value, alphabet="latin")
             except ValueError:
                 return BotResponse(
-                    text=FULL_NAME_RETRY_PROMPT,
-                    buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                    text=LATIN_FULL_NAME_RETRY_PROMPT,
+                    buttons=[dialog_exit_button()],
                 )
             if (context["patronym_cyrillic"] == "-") != (patronym == "-"):
                 return BotResponse(
-                    text=FULL_NAME_RETRY_PROMPT,
-                    buttons=[Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                    text=LATIN_FULL_NAME_RETRY_PROMPT,
+                    buttons=[dialog_exit_button()],
                 )
             context["surname_latin"] = surname
             context["name_latin"] = name
             context["patronym_latin"] = patronym
             user.dialog_state = "PROFILE_PASS_PHONE"
-            return BotResponse(text="Введите мобильный телефон:")
+            return BotResponse(text=PHONE_PROMPT, buttons=[dialog_exit_button()])
         if state == "PROFILE_PASS_PHONE":
             try:
                 context["mobile_phone"] = normalize_mobile_phone(value)
             except ValueError:
-                return BotResponse(text="Некорректный номер. Введите мобильный телефон ещё раз:")
+                return BotResponse(
+                    text=f"Некорректный номер. {PHONE_PROMPT}",
+                    buttons=[dialog_exit_button()],
+                )
             user.dialog_state = "PROFILE_PASS_EMAIL_ADDRESS"
-            return BotResponse(text="Введите email:")
+            return BotResponse(text=EMAIL_PROMPT, buttons=[dialog_exit_button()])
         if state == "PROFILE_PASS_EMAIL_ADDRESS":
             try:
                 email = validate_pass_email(value)
             except ValidationError:
-                return BotResponse(text="Некорректный email. Введите email ещё раз:")
+                return BotResponse(
+                    text=f"Некорректный email. {EMAIL_PROMPT}",
+                    buttons=[dialog_exit_button()],
+                )
             context["email"] = email
             return self._profile_contact_prompt(user)
         raise AssertionError(f"unknown profile state: {state}")
@@ -731,13 +795,14 @@ class ConversationEngine:
                 cancel=cancel,
             )
         )
-        return BotResponse(text="🎮 Выберите игру:", buttons=buttons)
+        text = _player_game_picker_text(flow) if flow == "enlist" else "🎮 Выберите игру:"
+        return BotResponse(text=text, buttons=buttons)
 
     async def _show_open_events(self, flow: str) -> BotResponse:
         return await self._show_events(
             flow,
             REGISTRATION_OPEN_STATUSES,
-            empty_text="Сейчас нет игр с открытой регистрацией.",
+            empty_text=_no_games_for_action_text(flow),
         )
 
     @staticmethod
@@ -848,7 +913,7 @@ class ConversationEngine:
     ) -> BotResponse:
         if not is_profile_complete(user):
             return BotResponse(
-                text="Сначала зарегистрируйте профиль.",
+                text="Сначала заполните профиль.",
                 buttons=[Button(label=PROFILE, value=PROFILE)],
             )
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
@@ -870,13 +935,22 @@ class ConversationEngine:
         matches = page.rows
         actionable_matches = matches
         if flow == "confirm":
-            actionable_matches = [item for item in matches if item[0].status is EventStatus.CONFIRMATION_OPEN]
+            actionable_matches = [
+                item
+                for item in matches
+                if item[0].status is EventStatus.CONFIRMATION_OPEN
+                and item[1].attendance_status is not AttendanceStatus.CANCELLED
+            ]
         elif flow == "cancel":
             actionable_matches = [
                 item for item in matches if item[0].archived_at is None and item[0].status is not EventStatus.CLOSED
             ]
         elif flow == "character":
-            actionable_matches = [item for item in matches if item[0].archived_at is None]
+            actionable_matches = [
+                item
+                for item in matches
+                if item[0].archived_at is None and item[1].attendance_status is not AttendanceStatus.CANCELLED
+            ]
         buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
         buttons.extend(
             _pagination_buttons(
@@ -894,30 +968,18 @@ class ConversationEngine:
             )
         )
         if not matches and not page.has_previous and not page.has_next:
-            empty_text = (
-                "Сейчас нет игр, участие в которых можно отменить."
-                if flow == "cancel"
-                else "У вас пока нет записей на игры."
-            )
-            return BotResponse(text=empty_text, buttons=buttons)
+            return BotResponse(text=_no_games_for_action_text(flow), buttons=buttons)
         if flow == "confirm" and not actionable_matches:
-            created = any(event.status is EventStatus.CREATED for event, _ in matches)
-            closed = any(event.status is EventStatus.CLOSED for event, _ in matches)
-            if created and not closed:
-                unavailable_text = "Подтверждение участия для ваших игр ещё не открыто. Организаторы откроют его позже."
-            elif closed and not created:
-                unavailable_text = "Регистрация и подтверждение участия для ваших игр уже закрыты."
-            else:
-                unavailable_text = (
-                    "Для одних ваших игр подтверждение участия ещё не открыто, а для закрытых игр оно уже недоступно."
-                )
+            unavailable_text = _no_games_for_action_text(flow)
+            if any(registration.attendance_status is AttendanceStatus.CANCELLED for _, registration in matches):
+                unavailable_text += " Если вы отменили участие, сначала запишитесь на игру снова."
             return BotResponse(
                 text=unavailable_text,
                 buttons=buttons,
             )
-        if flow == "cancel" and not actionable_matches:
-            return BotResponse(text="Сейчас нет игр, участие в которых можно отменить.", buttons=buttons)
-        return BotResponse(text="🎭 Выберите игру:", buttons=buttons)
+        if flow in {"cancel", "character"} and not actionable_matches:
+            return BotResponse(text=_no_games_for_action_text(flow), buttons=buttons)
+        return BotResponse(text=_player_game_picker_text(flow), buttons=buttons)
 
     async def _select_event(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         try:
@@ -936,20 +998,25 @@ class ConversationEngine:
                     buttons=[Button(label=PROFILE, value=PROFILE)],
                 )
             if event.archived_at is not None:
-                return BotResponse(text="Эта игра архивирована. Запись на неё недоступна.")
+                return BotResponse(text=INACTIVE_GAME_RESPONSE)
             if event.status is EventStatus.CLOSED:
                 return BotResponse(text="Регистрация на эту игру уже закрыта.")
+            registration = await self.registrations.get_registration(event_id, platform, uid)
+            if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
+                return BotResponse(text=f"Вы уже записаны на игру «{event.name}».")
             user.dialog_context = {"event_id": event_id, "event_name": event.name}
             user.dialog_state = "ENLIST_WISH_PLAY"
             return BotResponse(
                 text=(
-                    "С кем из других игроков вы бы хотели попасть в одну игровую сессию? "
-                    "Напишите через запятую в именительном падеже имена и фамилии.\n\n"
-                    "Если у вас нет пожеланий по соигрокам, нажмите пропустить"
+                    "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
+                    "Укажите каждого как «Фамилия Имя», через запятую. "
+                    "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
+                    f"Ответ должен быть не длиннее {MAX_CO_PLAYER_WISH_LENGTH} символов. "
+                    "Если пожеланий нет, нажмите «Пропустить»."
                 ),
                 buttons=[
                     Button(label=SKIP, value="enlist:wish-play:skip"),
-                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                    dialog_exit_button(),
                 ],
             )
         if flow in {
@@ -966,10 +1033,9 @@ class ConversationEngine:
         if registration is None:
             return BotResponse(text="Сначала запишитесь на эту игру.")
         if event.archived_at is not None:
-            if flow == "cancel":
-                return BotResponse(text=f"Игра «{event.name}» архивирована. Отмена участия недоступна.")
-            if flow == "character":
-                return BotResponse(text="Эта игра архивирована. Изменение пожеланий недоступно.")
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        if registration.attendance_status is AttendanceStatus.CANCELLED and flow in {"confirm", "character"}:
+            return BotResponse(text="Сначала снова запишитесь на эту игру.")
         if flow == "cancel" and event.status is EventStatus.CLOSED:
             return BotResponse(text=closed_game_cancellation_message(event.name))
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
@@ -994,16 +1060,20 @@ class ConversationEngine:
                 buttons.insert(0, Button(label=KEEP, value=KEEP))
             return BotResponse(
                 text=(
-                    f"Игра: «{event.name}»\nСтатус: {registration.attendance_status.value}\n\n"
+                    f"Игра: «{event.name}»\nСтатус: {_attendance_status_text(registration.attendance_status)}\n\n"
                     f"Текущие пожелания: {current}\n\n"
-                    "Отправьте пожелания по персонажу для этой игры."
+                    f"Отправьте пожелания по персонажу для этой игры — до {MAX_CHARACTER_WISH_LENGTH} символов.\n\n"
+                    "После отправки ответа ваше участие будет подтверждено."
                 ),
-                buttons=buttons,
+                buttons=[
+                    *buttons[:-1],
+                    dialog_exit_button(label="Не подтверждать сейчас"),
+                ],
             )
         if flow == "character":
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 await self._clear(user)
-                return BotResponse(text="Запись отменена. Сначала снова подтвердите участие.")
+                return BotResponse(text="Сначала снова запишитесь на эту игру.")
             if registration.attendance_status is AttendanceStatus.WAITING and not registration.character_wish:
                 await self._clear(user)
                 return BotResponse(
@@ -1012,11 +1082,11 @@ class ConversationEngine:
             user.dialog_state = "CHARACTER_EDIT"
             return BotResponse(
                 text=(
-                    f"Игра: «{event.name}»\nСтатус: {registration.attendance_status.value}\n\n"
+                    f"Игра: «{event.name}»\nСтатус: {_attendance_status_text(registration.attendance_status)}\n\n"
                     f"Текущие пожелания:\n{registration.character_wish}\n\n"
-                    "Отправьте новый вариант."
+                    f"Отправьте новый вариант — до {MAX_CHARACTER_WISH_LENGTH} символов."
                 ),
-                buttons=[Button(label=NO_WISHES, value=NO_WISHES), Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)],
+                buttons=[Button(label=NO_WISHES, value=NO_WISHES), dialog_exit_button()],
             )
         if flow == "cancel":
             user.dialog_state = "CANCEL_CONFIRM"
@@ -1024,11 +1094,11 @@ class ConversationEngine:
                 text=(
                     f"Вы уверены, что хотите отменить участие в игре «{event.name}»? "
                     "Если вы отмените участие, то сможете записаться снова, но попадёте "
-                    "в конец очереди подтверждения"
+                    "в конец очереди на основной состав."
                 ),
                 buttons=[
                     Button(label="Да, отменить", value="cancel:yes"),
-                    Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                    dialog_exit_button(label="Нет, оставить участие"),
                 ],
             )
         return BotResponse(text="Некорректное действие.")
@@ -1051,26 +1121,41 @@ class ConversationEngine:
                     ),
                     buttons=[
                         Button(label=SKIP, value="enlist:wish-play:skip"),
-                        Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+                        dialog_exit_button(),
                     ],
                 )
-            user.dialog_context["wish_play"] = NO_CO_PLAYER_WISH if value == "enlist:wish-play:skip" else value[:2000]
+            if value != "enlist:wish-play:skip" and len(value) > MAX_CO_PLAYER_WISH_LENGTH:
+                return BotResponse(
+                    text=INVALID_INPUT_RESPONSE,
+                    buttons=[Button(label=SKIP, value="enlist:wish-play:skip"), dialog_exit_button()],
+                )
+            user.dialog_context["wish_play"] = NO_CO_PLAYER_WISH if value == "enlist:wish-play:skip" else value
             return await self._enqueue_enlist(user, message)
         if user.dialog_state == "ENLIST_CONFIRM":
             # Complete signups started before the confirmation step was removed.
             if value != "enlist:confirm":
-                return BotResponse(text="Нажмите «Подтвердить» или «Отмена».")
+                return BotResponse(text="Нажмите «Подтвердить» или «В главное меню».")
             return await self._enqueue_enlist(user, message)
         raise AssertionError("unknown enlist state")
 
     async def _enqueue_enlist(self, user: User, message: InboundMessage) -> BotResponse:
         context = user.dialog_context.copy()
-        await self._clear(user)
         event = await self.events.get(str(context["event_id"]))
         if event is None:
+            await self._clear(user)
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
-            return BotResponse(text="Эта игра архивирована. Запись на неё недоступна.")
+            await self._clear(user)
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        registration = await self.registrations.get_registration(
+            event.event_id,
+            message.identity.platform,
+            message.identity.platform_user_id,
+        )
+        if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
+            await self._clear(user)
+            return BotResponse(text=f"Вы уже записаны на игру «{event.name}».")
+        await self._clear(user)
         if isinstance(user, TelegramUser):
             vk_profile = user.vk_url or ""
             telegram_handle = normalize_telegram_handle(message.telegram_username)
@@ -1119,14 +1204,30 @@ class ConversationEngine:
             wish = value.strip()
             if not wish:
                 return BotResponse(text="Введите текст или выберите «Без пожеланий».")
+        if len(wish) > MAX_CHARACTER_WISH_LENGTH:
+            return BotResponse(
+                text=INVALID_INPUT_RESPONSE,
+                buttons=(
+                    [
+                        Button(label=KEEP, value=KEEP),
+                        Button(label=NO_WISHES, value=NO_WISHES),
+                        dialog_exit_button(label="Не подтверждать сейчас"),
+                    ]
+                    if operation is Operation.CONFIRM and context.get("existing_character_wish")
+                    else [
+                        Button(label=NO_WISHES, value=NO_WISHES),
+                        dialog_exit_button(
+                            label="Не подтверждать сейчас" if operation is Operation.CONFIRM else MAIN_MENU_LABEL
+                        ),
+                    ]
+                ),
+            )
         await self._clear(user)
         event = await self.events.get(str(context["event_id"]))
         if event is None:
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
-            if operation is Operation.CONFIRM:
-                return BotResponse(text="Эта игра архивирована. Подтверждение участия недоступно.")
-            return BotResponse(text="Эта игра архивирована. Изменение пожеланий недоступно.")
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
         await self.registrations.enqueue(
             operation=operation,
             event_id=str(context["event_id"]),
@@ -1137,10 +1238,7 @@ class ConversationEngine:
                 chat_id=message.chat_id,
                 peer_id=message.peer_id,
                 text_success=(
-                    f"✅ Участие в игре «{context['event_name']}» подтверждено.\n\n"
-                    "Мастера скоро отправят вам ссылку на чат игры!\n\n"
-                    f"Пожелания по персонажу:\n{wish}\n\n"
-                    "Позже их можно изменить через «🎭 Пожелания по персонажу»."
+                    ""
                     if operation is Operation.CONFIRM
                     else f"🎭 Пожелания для игры «{context['event_name']}» обновлены."
                 ),
@@ -1152,14 +1250,14 @@ class ConversationEngine:
 
     async def _cancel_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if value != "cancel:yes":
-            return BotResponse(text="Подтвердите отмену кнопкой или выберите «Отмена».")
+            return BotResponse(text="Нажмите «Да, отменить» или «Нет, оставить участие».")
         context = user.dialog_context.copy()
         await self._clear(user)
         event = await self.events.get(str(context["event_id"]))
         if event is None:
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
-            return BotResponse(text=f"Игра «{event.name}» архивирована. Отмена участия недоступна.")
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
         if event.status is EventStatus.CLOSED:
             return BotResponse(text=closed_game_cancellation_message(event.name))
         await self.registrations.enqueue(
@@ -2304,7 +2402,7 @@ class ConversationEngine:
             choices[token] = registration.participant_key
             buttons.append(
                 Button(
-                    label=f"{registration.display_name} — {registration.attendance_status.value}",
+                    label=f"{registration.display_name} — {_attendance_status_text(registration.attendance_status)}",
                     value=f"admin:remove:pick:{token}",
                 )
             )
@@ -2538,7 +2636,7 @@ class ConversationEngine:
                 "remove_selected_key": participant_key,
                 "remove_selected_token": token,
                 "remove_selected_name": registration.display_name,
-                "remove_selected_status": registration.attendance_status.value,
+                "remove_selected_status": _attendance_status_text(registration.attendance_status),
             }
         )
         return self._remove_confirmation_response(user)

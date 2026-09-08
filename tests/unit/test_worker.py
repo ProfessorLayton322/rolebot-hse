@@ -16,7 +16,7 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.application.navigation import CONFIRM_PARTICIPATION, MAIN_MENU
+from larp_bot.application.navigation import CONFIRM_PARTICIPATION, MAIN_MENU, MAIN_MENU_LABEL
 from larp_bot.application.services import (
     ConfirmationNotificationService,
     OrderedMutationService,
@@ -122,7 +122,7 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
             Operation.ENLIST,
             EnlistPayload(display_name="Player", wish_play="A"),
             1,
-            [Button(label=MAIN_MENU, value=MAIN_MENU)],
+            [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)],
         ),
         queued(event, Operation.CONFIRM, CharacterWishPayload(character_wish="A"), 2),
         queued(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="B"), 3),
@@ -131,7 +131,7 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
             Operation.CANCEL,
             EmptyPayload(),
             4,
-            [Button(label=MAIN_MENU, value=MAIN_MENU)],
+            [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)],
         ),
     ]
     consumer = FakeConsumer(envelopes)
@@ -155,7 +155,7 @@ async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     ]
     saved_user = await users.get(Platform.TELEGRAM, 1)
     assert saved_user is not None
-    assert saved_user.last_bot_buttons == [Button(label=MAIN_MENU, value=MAIN_MENU)]
+    assert saved_user.last_bot_buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
 
 
 @pytest.mark.asyncio
@@ -215,6 +215,7 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
     event: Event,
 ) -> None:
     event.player_amount = 1
+    event.confirmation_deadline = datetime(2026, 9, 10, 16, tzinfo=UTC)
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
     events = MemoryEventRepository([event])
@@ -252,15 +253,17 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
     assert stored_event is not None and stored_event.public_table_public_url is not None
     link = stored_event.public_table_public_url
     assert transport.sent[0][3] == (
-        f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
-        f"Посмотрите, кто ещё зарегистрирован вместе с вами: {link}\n\n"
-        "Когда вы будете уверены, что сможете прийти на нашу игру - подтвердите своё участие"
+        f"Вы записались на игру «{event.name}»!\n\n"
+        "Сейчас вы в основном составе.\n\n"
+        f"Актуальный список записавшихся и состав можно посмотреть здесь: {link}\n\n"
+        "Когда будете уверены, что сможете прийти на игру, подтвердите участие до 10.09.26 19:00 (мск)."
     )
     assert transport.sent[1][3] == (
-        f"Вы записались на игру {event.name}! Прямо сейчас вы находитесь в запасе, но сможете попасть "
-        "в основную игровую сессию, если 1 человек до вас отменят своё участие.\n\n"
-        f"Подробнее можете посмотреть в таблице игроков: {link}\n\n"
-        "Когда вы будете уверены, что сможете прийти на нашу игру - подтвердите своё участие"
+        f"Вы записались на игру «{event.name}»!\n\n"
+        "Сейчас вы в запасе. Перед вами: 1.\n\n"
+        "Если вы перейдёте в основной состав, бот сообщит об этом отдельным сообщением.\n\n"
+        f"Актуальный список записавшихся и состав можно посмотреть здесь: {link}\n\n"
+        "Когда будете уверены, что сможете прийти на игру, подтвердите участие до 10.09.26 19:00 (мск)."
     )
     assert all(
         [(button.label, button.value) for button in sent[4]]
@@ -288,7 +291,7 @@ async def test_enlist_delivery_uses_closed_confirmation_text_and_keeps_default_b
                 Operation.ENLIST,
                 EnlistPayload(display_name="Player", wish_play="A"),
                 1,
-                [Button(label=MAIN_MENU, value=MAIN_MENU)],
+                [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)],
             )
         ]
     )
@@ -305,14 +308,14 @@ async def test_enlist_delivery_uses_closed_confirmation_text_and_keeps_default_b
     stored_event = await events.get(event.event_id)
     assert stored_event is not None and stored_event.public_table_public_url is not None
     assert transport.sent[0][3] == (
-        f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
-        "Посмотрите, кто ещё зарегистрирован вместе с вами: "
+        f"Вы записались на игру «{event.name}»!\n\n"
+        "Сейчас вы в основном составе.\n\n"
+        "Актуальный список записавшихся и состав можно посмотреть здесь: "
         f"{stored_event.public_table_public_url}\n\n"
-        "Игра пока закрыта для подтверждения участия. Мы обязательно пришлём вам уведомление, "
-        "когда можно будет подтвердиться - пожалуйста, не забудьте это сделать, когда будете "
-        "уверены, что сможете прийти на нашу игру"
+        "Подтверждение участия пока не открыто. Мы обязательно пришлём вам уведомление, "
+        "когда можно будет подтвердиться."
     )
-    assert transport.sent[0][4] == (Button(label=MAIN_MENU, value=MAIN_MENU),)
+    assert transport.sent[0][4] == (Button(label=MAIN_MENU_LABEL, value=MAIN_MENU),)
 
 
 @pytest.mark.asyncio
@@ -387,12 +390,13 @@ async def test_reserve_promotion_is_notified_exactly_once_after_cancel_or_remova
     assert await first_worker.run() == 1
     expected = []
     if operation is Operation.REMOVE_PARTICIPANT:
-        expected.append((1, f"Ваша заявка на игру {event.name} была удалена"))
+        expected.append((1, f"Ваша запись на игру «{event.name}» удалена."))
     expected.extend(
         [
             (
                 2,
-                f"Вы попали в основной состав игровой сессии игры {event.name}!\n\n"
+                f"Место освободилось: вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+                "После подтверждения участия мастера отправят вам ссылку на чат игры отдельным сообщением.\n\n"
                 "Посмотрите актуальный состав игроков: https://disk.example/public/2",
             ),
             (actor_id, "Операция завершена"),
@@ -481,8 +485,8 @@ async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
     assert await worker.run() == 1
 
     notification = (
-        f"Ваша завяка на игру {event.name} была аннулирована, поскольку вы не успели "
-        "подтвердить или отменить участие до дедлайна"
+        f"Ваша запись на игру «{event.name}» удалена, потому что вы не подтвердили "
+        "и не отменили участие до указанного срока."
     )
     assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
         (Platform.TELEGRAM, 2, notification),
@@ -506,11 +510,11 @@ async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
     [
         (
             Operation.OPEN_CONFIRMATION,
-            "Подтверждение на игру Лесной предел открыто! Дедлайн подтверждения - 10.09.26 19:00",
+            "Подтверждение участия в игре «Лесной предел» открыто! Подтвердите участие до 10.09.26 19:00 (мск).",
         ),
         (
             Operation.SEND_CONFIRMATION_REMINDER,
-            "Напоминаем о необходимости подтвердить или отменить участие в игре Лесной предел до 10.09.26 19:00!",
+            "Напоминаем: подтвердите участие в игре «Лесной предел» до 10.09.26 19:00 (мск).",
         ),
     ],
 )
@@ -662,8 +666,7 @@ async def test_unchanged_game_status_sends_no_notifications(
 def test_plain_chat_links_get_game_invitation(value: str) -> None:
     assert is_plain_chat_link(value)
     assert confirmed_notification_text("Лесной предел", value) == (
-        "Вы подтвердили своё участие в игре Лесной предел! "
-        f"Пожалуйста, добавьтесь в чат игры, мы вас очень ждём: {value}"
+        f"Вы в основном составе игры «Лесной предел». Вступите в чат: {value}"
     )
 
 
@@ -681,8 +684,8 @@ def test_plain_chat_links_get_game_invitation(value: str) -> None:
 )
 def test_arbitrary_or_non_chat_messages_get_broadcast_disclaimer(value: str) -> None:
     assert not is_plain_chat_link(value)
-    assert confirmed_notification_text("Лесной предел", value) == (
-        "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\n" + value
+    assert (
+        confirmed_notification_text("Лесной предел", value) == f"Сообщение от мастеров игры «Лесной предел»:\n\n{value}"
     )
 
 
@@ -692,13 +695,11 @@ def test_arbitrary_or_non_chat_messages_get_broadcast_disclaimer(value: str) -> 
     [
         (
             "Сбор игроков в 18:30 у главного входа.",
-            "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\n"
-            "Сбор игроков в 18:30 у главного входа.",
+            "Сообщение от мастеров игры «Лесной предел»:\n\nСбор игроков в 18:30 у главного входа.",
         ),
         (
             "https://vk.me/join/GameChat_123-=",
-            "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
-            "мы вас очень ждём: https://vk.me/join/GameChat_123-=",
+            "Вы в основном составе игры «Лесной предел». Вступите в чат: https://vk.me/join/GameChat_123-=",
         ),
     ],
 )
@@ -761,12 +762,16 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
     )
 
     assert await worker.run() == 1
-    expected_recipients = {(Platform.TELEGRAM, 3, expected_text)}
+    expected_recipients: set[tuple[Platform, int, str]] = set()
     if not is_plain_chat_link(message):
-        expected_recipients.add((Platform.VK, 4, expected_text))
+        expected_recipients = {
+            (Platform.TELEGRAM, 3, expected_text),
+            (Platform.VK, 4, expected_text),
+        }
     assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == expected_recipients
     assert all(
-        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU, MAIN_MENU)] for sent in transport.sent
+        [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU_LABEL, MAIN_MENU)]
+        for sent in transport.sent
     )
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
@@ -809,8 +814,7 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
             participant_key=key,
             payload=CharacterWishPayload(character_wish="Doctor"),
             reply_context=ReplyContext(
-                text_success="✅ Участие подтверждено.",
-                buttons=[Button(label=MAIN_MENU, value=MAIN_MENU)],
+                buttons=[Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)],
             ),
         ),
         receipt_handle="receipt-3",
@@ -845,15 +849,20 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
 
     assert await worker.run() == 3
     assert [(sent[1], sent[3]) for sent in transport.sent] == [
-        (player.tg_id, "✅ Участие подтверждено."),
         (
             player.tg_id,
-            "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\nСбор в 18:30",
+            f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
+            "Мастера скоро отправят вам ссылку на чат игры!\n\n"
+            "Пожелания по персонажу:\nDoctor\n\n"
+            "Позже их можно изменить через «🎭 Пожелания по персонажу».",
         ),
         (
             player.tg_id,
-            "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
-            "мы вас очень ждём: https://t.me/+GameChat_123",
+            "Сообщение от мастеров игры «Лесной предел»:\n\nСбор в 18:30",
+        ),
+        (
+            player.tg_id,
+            "Вы в основном составе игры «Лесной предел». Вступите в чат: https://t.me/+GameChat_123",
         ),
     ]
     stored_event = await events.get(event.event_id)
@@ -865,7 +874,7 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
     saved_player = await users.get(Platform.TELEGRAM, player.tg_id)
     assert saved_player is not None
     assert saved_player.last_delivery_operation_id == confirm_operation_id
-    assert saved_player.last_bot_buttons == [Button(label=MAIN_MENU, value=MAIN_MENU)]
+    assert saved_player.last_bot_buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
     assert consumer.deleted == ["receipt-1", "receipt-2", "receipt-3"]
 
 
@@ -912,7 +921,7 @@ async def test_confirmed_reserve_gets_information_then_chat_link_after_cancellat
             platform_user_id=4,
             participant_key=keys[4],
             payload=CharacterWishPayload(character_wish="Doctor"),
-            reply_context=ReplyContext(text_success="✅ Участие подтверждено."),
+            reply_context=ReplyContext(text_success="legacy confirmation with unconditional chat-link promise"),
         ),
         receipt_handle="receipt-confirm-reserve",
     )
@@ -944,13 +953,19 @@ async def test_confirmed_reserve_gets_information_then_chat_link_after_cancellat
     assert await worker.run() == 2
     reserve_messages = [sent[3] for sent in transport.sent if sent[1] == 4]
     assert reserve_messages[:2] == [
-        "✅ Участие подтверждено.",
-        "Мастера разослали это сообщение всем подтвердившимся на игру Лесной предел:\n\nСбор в 18:30",
+        f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
+        "Пожелания по персонажу:\nDoctor\n\n"
+        "Позже их можно изменить через «🎭 Пожелания по персонажу».",
+        "Сообщение от мастеров игры «Лесной предел»:\n\nСбор в 18:30",
     ]
-    assert not any("добавьтесь в чат" in text for text in reserve_messages[:2])
+    assert not any("ссылку на чат" in text for text in reserve_messages[:2])
+    assert reserve_messages[-2] == (
+        f"Место освободилось: вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+        "После подтверждения участия мастера отправят вам ссылку на чат игры отдельным сообщением.\n\n"
+        "Посмотрите актуальный состав игроков: https://disk.example/public/2"
+    )
     assert reserve_messages[-1] == (
-        "Вы подтвердили своё участие в игре Лесной предел! Пожалуйста, добавьтесь в чат игры, "
-        "мы вас очень ждём: https://t.me/+GameChat_123"
+        "Вы в основном составе игры «Лесной предел». Вступите в чат: https://t.me/+GameChat_123"
     )
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
