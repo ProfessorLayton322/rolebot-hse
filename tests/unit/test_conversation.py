@@ -314,6 +314,11 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     engine, _, publisher, _ = await engine_setup(disk_store, event)
     await engine.handle(inbound(1, ENLIST))
     prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
+    assert prompt.text == (
+        "С кем из других игроков вы бы хотели попасть в одну игровую сессию? "
+        "(Напишите через запятую в именительном падеже имена и фамилии)\n\n"
+        "Нажмите «Пропустить» на клавиатуре или отправьте сообщением, с кем вы хотите играть."
+    )
     assert "нажмите «пропустить»" in prompt.text.casefold()
     assert any(button.value == "enlist:wish-play:skip" for button in prompt.buttons)
 
@@ -828,7 +833,7 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert [button.value for button in full_name_prompt.buttons] == ["Отмена"]
     assert invalid_full_name.text == "Введите ФИО, либо фамилию имя, если отчества нету"
     assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
-    assert pass_prompt.text == "Нужен ли вам пропуск на локацию?"
+    assert pass_prompt.text == "Нужен ли вам пропуск на место проведения?"
     assert "страницу VK" in contact_prompt.text
     assert "Профиль сохранён" in saved.text
     assert profile is not None
@@ -861,6 +866,8 @@ async def test_profile_derives_experience_from_statistics_without_asking_the_pla
     assert all("Играли ли вы" not in response.text for response in responses)
     assert profile is not None and profile.larp_experience is True
     assert "Опыт LARP" not in shown.text
+    assert "Кросспол:" in shown.text
+    assert "Кроссплей:" not in shown.text
 
 
 @pytest.mark.asyncio
