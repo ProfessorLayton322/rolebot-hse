@@ -484,9 +484,11 @@ async def test_game_archived_during_cancellation_is_not_enqueued(disk_store: Mem
     hidden = await engine.handle(inbound(4, CANCEL))
     stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
 
-    assert "архивирована" in rejected.text
+    assert rejected.text == f"Игра «{event.name}» архивирована. Отмена участия недоступна."
     assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
-    assert "архивирована" in stale.text
+    assert hidden.text == "Сейчас нет игр, участие в которых можно отменить."
+    assert hidden.buttons == [Button(label="Отмена", value="Отмена")]
+    assert stale.text == f"Игра «{event.name}» архивирована. Отмена участия недоступна."
     assert publisher.commands == []
 
 
@@ -511,11 +513,53 @@ async def test_closed_game_neither_offers_nor_accepts_cancellation(disk_store: M
     hidden = await engine.handle(inbound(4, CANCEL))
     stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
 
-    assert "Состав игроков зафиксирован" in rejected.text
+    closed_text = f"Игра «{event.name}» закрыта. Состав игроков зафиксирован, отменить участие нельзя."
+    assert rejected.text == closed_text
     assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
-    assert "Состав игроков зафиксирован" in hidden.text
-    assert "Состав игроков зафиксирован" in stale.text
+    assert hidden.text == "Сейчас нет игр, участие в которых можно отменить."
+    assert hidden.buttons == [Button(label="Отмена", value="Отмена")]
+    assert stale.text == closed_text
     assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_picker_has_no_pagination_when_only_registered_game_is_closed(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    event.status = EventStatus.CLOSED
+    event.registrations_migrated_at = base
+    event.created_at = base
+    unrelated_open_events = [
+        event.model_copy(
+            update={
+                "event_id": f"unrelated-{index}",
+                "name": f"Unrelated {index}",
+                "status": EventStatus.CREATED,
+                "registrations_migrated_at": base,
+                "created_at": base + timedelta(seconds=index + 1),
+                "updated_at": base + timedelta(seconds=index + 1),
+            }
+        )
+        for index in range(PAGE_SIZE + 1)
+    ]
+    engine, _, _, registrations = await engine_setup(disk_store, event, *unrelated_open_events)
+    await registrations.import_missing(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, 1, event.event_id),
+                display_name="Иван Иванов",
+                wish_play="Без пожеланий",
+            )
+        ]
+    )
+
+    response = await engine.handle(inbound(1, CANCEL))
+
+    assert response.text == "Сейчас нет игр, участие в которых можно отменить."
+    assert response.buttons == [Button(label="Отмена", value="Отмена")]
 
 
 @pytest.mark.asyncio
