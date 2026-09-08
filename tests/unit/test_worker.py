@@ -254,15 +254,13 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
     assert transport.sent[0][3] == (
         f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
         f"Посмотрите, кто ещё зарегистрирован вместе с вами: {link}\n\n"
-        "Когда придёт время окончательно подтвердить участие, выберите «✅ Подтвердить участие». "
-        "Тогда бот попросит пожелания по персонажу."
+        "Когда вы будете уверены, что сможете прийти на нашу игру - подтвердите своё участие"
     )
     assert transport.sent[1][3] == (
         f"Вы записались на игру {event.name}! Прямо сейчас вы находитесь в запасе, но сможете попасть "
         "в основную игровую сессию, если 1 человек до вас отменят своё участие.\n\n"
         f"Подробнее можете посмотреть в таблице игроков: {link}\n\n"
-        "Когда придёт время окончательно подтвердить участие, выберите «✅ Подтвердить участие». "
-        "Тогда бот попросит пожелания по персонажу."
+        "Когда вы будете уверены, что сможете прийти на нашу игру - подтвердите своё участие"
     )
     assert all(
         [(button.label, button.value) for button in sent[4]]
@@ -272,7 +270,7 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
 
 
 @pytest.mark.asyncio
-async def test_enlist_delivery_keeps_default_button_before_confirmation_opens(
+async def test_enlist_delivery_uses_closed_confirmation_text_and_keeps_default_button(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -304,6 +302,16 @@ async def test_enlist_delivery_keeps_default_button_before_confirmation_opens(
     )
 
     assert await worker.run() == 1
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None and stored_event.public_table_public_url is not None
+    assert transport.sent[0][3] == (
+        f"Вы записались на игру {event.name}! Вы попали в основной состав игровой сессии!\n\n"
+        "Посмотрите, кто ещё зарегистрирован вместе с вами: "
+        f"{stored_event.public_table_public_url}\n\n"
+        "Игра пока закрыта для подтверждения участия. Мы обязательно пришлём вам уведомление, "
+        "когда можно будет подтвердиться - пожалуйста, не забудьте это сделать, когда будете "
+        "уверены, что сможете прийти на нашу игру"
+    )
     assert transport.sent[0][4] == (Button(label=MAIN_MENU, value=MAIN_MENU),)
 
 
