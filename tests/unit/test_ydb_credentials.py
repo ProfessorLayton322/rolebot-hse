@@ -265,6 +265,21 @@ async def test_user_repository_grants_larp_experience_without_rewriting_profile(
     assert set(params) == {"$user_id", "$updated_at"}
 
 
+@pytest.mark.parametrize("experienced", [True, False])
+@pytest.mark.asyncio
+async def test_user_repository_sets_larp_experience_without_rewriting_profile(experienced: bool) -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+
+    await YdbUserRepository(executor).set_larp_experience(Platform.VK, 84, experienced)
+
+    query, params = executor.query.await_args.args
+    assert "UPDATE `vk_users`" in query
+    assert "SET larp_experience = $experienced" in query
+    assert params["$user_id"] == 84
+    assert params["$experienced"] is experienced
+    assert set(params) == {"$user_id", "$experienced", "$updated_at"}
+
+
 @pytest.mark.asyncio
 async def test_user_repository_grants_gamemaster_in_selected_platform_table() -> None:
     executor = SimpleNamespace(query=AsyncMock(return_value=[]))

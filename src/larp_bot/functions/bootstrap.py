@@ -109,7 +109,6 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         registration_service,
         administration,
         config,
-        player_statistics,
         transport=transport,
         vk_user_ids=vk,
     )

@@ -387,6 +387,24 @@ class YdbUserRepository:
             {"$user_id": user_id, "$updated_at": datetime.now(UTC)},
         )
 
+    async def set_larp_experience(self, platform: Platform, user_id: int, experienced: bool) -> None:
+        table, id_column, _ = self._location(platform)
+        await self.db.query(
+            f"""
+            DECLARE $user_id AS Uint64;
+            DECLARE $experienced AS Bool;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `{table}`
+            SET larp_experience = $experienced, updated_at = $updated_at
+            WHERE {id_column} = $user_id;
+            """,
+            {
+                "$user_id": user_id,
+                "$experienced": experienced,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
     async def grant_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
         table, id_column, _ = self._location(platform)
         await self.db.query(

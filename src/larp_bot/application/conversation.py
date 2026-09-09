@@ -26,6 +26,7 @@ from larp_bot.domain.models import (
     PassDetails,
     Platform,
     PlayerAmountPayload,
+    ProfileSyncPayload,
     Registration,
     ReplyContext,
     StatisticsPayload,
@@ -51,7 +52,6 @@ from .ports import (
     AdminConfigProvider,
     DeferredTransport,
     EventRepository,
-    PlayerStatisticsReader,
     UserRepository,
     VkUserIdResolver,
     new_user,
@@ -403,7 +403,6 @@ class ConversationEngine:
         registrations: RegistrationService,
         administration: EventAdministrationService,
         admins: AdminConfigProvider,
-        player_statistics: PlayerStatisticsReader,
         transport: DeferredTransport | None = None,
         vk_user_ids: VkUserIdResolver | None = None,
     ) -> None:
@@ -412,7 +411,6 @@ class ConversationEngine:
         self.registrations = registrations
         self.administration = administration
         self.admins = admins
-        self.player_statistics = player_statistics
         self.transport = transport
         self.vk_user_ids = vk_user_ids
 
@@ -709,7 +707,6 @@ class ConversationEngine:
         profile_names = {full_name}
         if user.full_name is not None:
             profile_names.add(user.full_name)
-        user.larp_experience = await self.player_statistics.has_any_player(profile_names)
         user.full_name = full_name
         user.crossplay = bool(context["crossplay"])
         needs_pass = bool(context["needs_pass"])
@@ -735,15 +732,15 @@ class ConversationEngine:
         else:
             contact = context.get("contact")
             user.telegram_handle = None if contact is None else str(contact)
-        # Persist the completed profile before publishing per-game commands so
-        # an ordered worker can always project the new values. Keep the current
-        # profile state until every deterministic command has been published;
-        # a failed request can then safely retry the same final answer.
+        # Persist the completed profile before handing slow external lookups and
+        # per-game projections to the worker. Keep the current profile state until
+        # the durable command is published so a failed request can retry safely.
         await self.users.save(user)
-        await self.registrations.enqueue_profile_updates(
+        await self.registrations.enqueue_profile_sync(
             message.identity.platform,
             message.identity.platform_user_id,
-            idempotency_key=message.update_id,
+            ProfileSyncPayload(names=sorted(profile_names)),
+            idempotency_key=f"{message.update_id}:{Operation.SYNC_PROFILE.value}",
         )
         await self._clear(user)
         return BotResponse(

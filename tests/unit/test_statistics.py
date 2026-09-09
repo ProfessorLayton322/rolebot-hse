@@ -43,8 +43,10 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    ProfileSyncPayload,
     Registration,
     StatisticsPayload,
+    TelegramUser,
     VkUser,
 )
 from tests.conftest import MemoryDiskStore
@@ -383,6 +385,61 @@ async def test_repository_finds_existing_player_with_normalized_name() -> None:
 
     assert await repository.has_any_player({"  ИВАНОВ  Петр "})
     assert not await repository.has_any_player({"Новый Игрок"})
+
+
+async def test_profile_sync_derives_experience_and_fans_out_projection_updates(event: Event) -> None:
+    store = MemoryDiskStore()
+    engine, users, publisher, registrations = await engine_setup(store, event)
+    user = TelegramUser(
+        tg_id=2,
+        full_name="Текущее Имя",
+        vk_url="https://vk.com/id2",
+        crossplay=False,
+        needs_pass=False,
+    )
+    await users.save(user)
+    key = engine.registrations.key(Platform.TELEGRAM, user.tg_id, event.event_id)
+    await registrations.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name=user.full_name,
+        wish_play="Без пожеланий",
+    )
+    drive = MemoryGoogleDrive(template(), master_template())
+    statistics = StatisticsService(
+        GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        GoogleDriveStatisticsRepository.masters(drive, "stats-folder"),
+        engine.admins,
+        engine.administration,
+        engine.registrations,
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id="profile:telegram:2",
+        operation=Operation.SYNC_PROFILE,
+        platform=Platform.TELEGRAM,
+        platform_user_id=user.tg_id,
+        payload=ProfileSyncPayload(names=["Иванов Пётр", user.full_name]),
+    )
+    transport = MemoryDeferredTransport()
+    consumer = FakeConsumer([QueueEnvelope(command, "profile-sync")])
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(engine.events, engine.administration.catalog),
+        users,
+        transport,
+        statistics=statistics,
+    )
+
+    assert await worker.run() == 1
+
+    synced = await users.get(Platform.TELEGRAM, user.tg_id)
+    assert synced is not None and synced.larp_experience is True
+    assert consumer.deleted == ["profile-sync"]
+    assert transport.sent == []
+    assert [queued.operation for queued in publisher.commands] == [Operation.UPDATE_PROFILE]
+    assert publisher.commands[0].event_id == event.event_id
 
 
 async def test_statistics_admin_menu_picker_and_global_fifo_only_show_active_games(event: Event) -> None:

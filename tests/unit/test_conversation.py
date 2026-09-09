@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
@@ -83,6 +83,7 @@ from larp_bot.domain.models import (
     PassDetails,
     Platform,
     PlayerAmountPayload,
+    ProfileSyncPayload,
     Registration,
     TelegramUser,
     VkUser,
@@ -134,18 +135,6 @@ class FailOnceTransport(MemoryDeferredTransport):
         )
 
 
-class MemoryPlayerStatistics:
-    def __init__(self, players: set[str] | None = None) -> None:
-        self.players = {self._normalize(name) for name in players or set()}
-
-    @staticmethod
-    def _normalize(name: str) -> str:
-        return " ".join(name.split()).casefold().replace("ё", "е")
-
-    async def has_any_player(self, names: Collection[str]) -> bool:
-        return any(self._normalize(name) in self.players for name in names)
-
-
 async def engine_setup(
     store: MemoryDiskStore,
     event: Event,
@@ -155,7 +144,6 @@ async def engine_setup(
     tg_admin_ids: set[int] | None = None,
     vk_admin_ids: set[int] | None = None,
     vk_profile_ids: dict[str, int] | None = None,
-    statistics_players: set[str] | None = None,
 ) -> tuple[
     ConversationEngine,
     MemoryUserRepository,
@@ -191,7 +179,6 @@ async def engine_setup(
             vk_ids=vk_admin_ids,
             tg_gamemaster_ids={1} if gamemaster else set(),
         ),
-        MemoryPlayerStatistics({"Иван Иванов"} if statistics_players is None else statistics_players),
         transport=transport,
         vk_user_ids=MemoryVkUserIdResolver(vk_profile_ids),
     )
@@ -747,7 +734,6 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         RegistrationService(events, catalog, publisher, "secret"),
         EventAdministrationService(events, showcase, catalog, users, "secret"),
         StaticAdminProvider(vk_ids={7}),
-        MemoryPlayerStatistics(),
     )
 
     def vk(update: int, value: str, *, callback: bool = False) -> InboundMessage:
@@ -790,7 +776,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     stale = await engine.handle(vk(16, f"select:confirm:{event.event_id}", callback=True))
     assert "кнопка устарела" in stale.text.casefold()
     assert stale.buttons == prompt.buttons
-    assert not publisher.commands[1:]
+    assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE, Operation.ENLIST]
     await engine.handle(vk(17, "Doctor"))
     confirmation = publisher.commands[-1]
     assert confirmation.operation is Operation.CONFIRM
@@ -929,7 +915,6 @@ async def test_incomplete_profile_cannot_enlist(disk_store: MemoryDiskStore, eve
         RegistrationService(events, catalog, publisher, "secret"),
         EventAdministrationService(events, showcase, catalog, users, "secret"),
         StaticAdminProvider(),
-        MemoryPlayerStatistics(),
     )
     response = await engine.handle(inbound(1, ENLIST))
     assert "Сначала заполните профиль" in response.text
@@ -1001,7 +986,7 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert "Профиль успешно заполнен" in saved.text
     assert profile is not None
     assert profile.full_name == "Семёнова-Звенигородская Ева-Лотта Ильинична"
-    assert profile.larp_experience is False
+    assert profile.larp_experience is None
     assert profile.needs_pass is False and profile.pass_details is None
 
 
@@ -1020,21 +1005,18 @@ async def test_profile_completion_shows_confirmation_before_main_menu(
     completed = responses[-1]
     assert completed.text == "✅ Профиль успешно заполнен."
     assert completed.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
+    assert not completed.deferred and not completed.command_enqueued
 
     menu = await engine.handle(inbound(6, MAIN_MENU, callback=True, user_id=2))
     assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
 
 
 @pytest.mark.asyncio
-async def test_profile_derives_experience_from_statistics_without_asking_the_player(
+async def test_profile_completion_queues_experience_lookup_without_asking_the_player(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
-    engine, users, _, _ = await engine_setup(
-        disk_store,
-        event,
-        statistics_players={"Иванов Иван"},
-    )
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
     responses = []
     for update, answer in enumerate(
         (PROFILE, "Иванов Иван", "Нет", "https://vk.com/id2", "Нет"),
@@ -1047,14 +1029,19 @@ async def test_profile_derives_experience_from_statistics_without_asking_the_pla
 
     assert "Профиль успешно заполнен" in responses[-1].text
     assert all("Играли ли вы" not in response.text for response in responses)
-    assert profile is not None and profile.larp_experience is True
+    assert profile is not None and profile.larp_experience is None
+    assert len(publisher.commands) == 1
+    sync = publisher.commands[0]
+    assert sync.operation is Operation.SYNC_PROFILE
+    assert sync.event_id == "profile:telegram:2"
+    assert sync.payload == ProfileSyncPayload(names=["Иванов Иван"])
     assert "Опыт LARP" not in shown.text
     assert "Кросспол:" in shown.text
     assert "Кроссплей:" not in shown.text
 
 
 @pytest.mark.asyncio
-async def test_profile_save_queues_projection_updates_for_all_unarchived_participating_games(
+async def test_profile_save_queues_one_background_sync_instead_of_scanning_games(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -1112,13 +1099,11 @@ async def test_profile_save_queues_projection_updates_for_all_unarchived_partici
     assert profile is not None and profile.full_name == "Новиков Новый Нович"
     assert profile.larp_experience is True
     assert profile.last_update_id == "5"
-    updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
-    assert {command.event_id for command in updates} == {event.event_id, second.event_id, leader_only.event_id}
-    assert all(
-        command.participant_key == engine.registrations.key(Platform.TELEGRAM, 1, command.event_id)
-        for command in updates
-    )
-    assert all(command.reply_context.text_success == "" for command in updates)
+    assert len(publisher.commands) == 1
+    sync = publisher.commands[0]
+    assert sync.operation is Operation.SYNC_PROFILE
+    assert sync.event_id == "profile:telegram:1"
+    assert sync.payload == ProfileSyncPayload(names=["Иван Иванов", "Новиков Новый Нович"])
 
 
 @pytest.mark.asyncio
@@ -2487,7 +2472,6 @@ async def test_admin_pagination_uses_shared_page_size(count: int, disk_store: Me
         RegistrationService(event_repository, catalog, MemoryCommandPublisher(), "secret"),
         EventAdministrationService(event_repository, showcase, catalog, users, "secret"),
         StaticAdminProvider(tg_ids={1}),
-        MemoryPlayerStatistics(),
     )
     page = await engine.handle(inbound(1, MANAGE_GAMES))
     game_buttons = [button for button in page.buttons if button.value.startswith("ag:manage:")]
