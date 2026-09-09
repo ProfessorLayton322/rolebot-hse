@@ -53,7 +53,11 @@ def validate_latin_name(value: str, *, patronym: bool = False) -> str:
     return clean
 
 
-def parse_full_name(value: str, *, alphabet: Literal["cyrillic", "latin"]) -> tuple[str, str, str]:
+def parse_full_name(
+    value: str,
+    *,
+    alphabet: Literal["cyrillic", "latin"],
+) -> tuple[str, str] | tuple[str, str, str]:
     """Split a two- or three-part full name without treating hyphens as separators."""
 
     parts = value.split()
@@ -64,9 +68,15 @@ def parse_full_name(value: str, *, alphabet: Literal["cyrillic", "latin"]) -> tu
         or any(len(part) > 100 or pattern.fullmatch(part) is None for part in parts)
     ):
         raise ValueError(f"Введите ФИО {alphabet}")
-    surname, name = parts[:2]
-    patronym = parts[2] if len(parts) == 3 else "-"
-    return surname, name, patronym
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return parts[0], parts[1], parts[2]
+
+
+def surname_and_name(value: str) -> str:
+    """Return the two name parts allowed outside pass data."""
+
+    return " ".join(value.split()[:2])
 
 
 def normalize_mobile_phone(value: str) -> str:

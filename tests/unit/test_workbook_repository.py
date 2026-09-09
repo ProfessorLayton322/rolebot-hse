@@ -94,7 +94,7 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
     registration = Registration(
         event_id=event.event_id,
         participant_key="a" * 43,
-        display_name="Player",
+        display_name="Иванов Иван Иванович",
         vk_profile="https://vk.com/private-player",
         telegram_profile="https://t.me/private-player",
         wish_play="Anyone",
@@ -112,7 +112,7 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
         assert tuple(cell.value for cell in workbook.active[1]) == PUBLIC_HEADERS
         assert tuple(workbook.active.cell(2, column).value for column in range(1, 7)) == (
             1,
-            "Player",
+            "Иванов Иван",
             "Нет",
             "Anyone",
             "Doctor",
@@ -172,7 +172,7 @@ async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary
         Registration(
             event_id=event.event_id,
             participant_key="a" * 43,
-            display_name="Oldest, recently updated",
+            display_name="Oldest, updated",
             wish_play="Anyone",
             created_at=first_signup,
             updated_at=first_signup + timedelta(days=1),
@@ -192,7 +192,7 @@ async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary
     try:
         rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
         assert rows[:3] == [
-            (1, "Oldest, recently updated"),
+            (1, "Oldest, updated"),
             (2, "Middle"),
             (3, "Newest"),
         ]

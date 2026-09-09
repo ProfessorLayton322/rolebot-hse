@@ -14,6 +14,7 @@ from larp_bot.domain.models import (
     VkUser,
     normalize_telegram_profile,
     parse_full_name,
+    surname_and_name,
 )
 
 
@@ -206,7 +207,7 @@ def test_pass_profile_rejects_invalid_identity_fields(overrides: dict[str, str],
             "cyrillic",
             ("Семёнова-Звенигородская", "Ева-Лотта", "Ильинична"),
         ),
-        ("Li Anna", "latin", ("Li", "Anna", "-")),
+        ("Li Anna", "latin", ("Li", "Anna")),
         ("O'Connor Eva-Lotta Marie", "latin", ("O'Connor", "Eva-Lotta", "Marie")),
     ],
 )
@@ -231,3 +232,7 @@ def test_full_name_uses_only_whitespace_as_the_part_delimiter(
 def test_full_name_requires_two_or_three_parts_in_the_requested_script(raw: str, alphabet: str) -> None:
     with pytest.raises(ValueError):
         parse_full_name(raw, alphabet=alphabet)  # type: ignore[arg-type]
+
+
+def test_surname_and_name_normalizes_whitespace_and_omits_patronym() -> None:
+    assert surname_and_name("  Иванов\t Иван   Иванович ") == "Иванов Иван"

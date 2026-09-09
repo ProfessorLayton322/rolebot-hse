@@ -528,7 +528,7 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
     await users.save(
         VkUser(
             vk_id=7,
-            full_name="Второй Игрок",
+            full_name="Второй Игрок Игрокович",
             crossplay=False,
             larp_experience=False,
             needs_pass=False,
@@ -550,7 +550,7 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
         ),
         (
             AttendanceStatus.CONFIRMED,
-            "Второй Игрок",
+            "Второй Игрок Игрокович",
             engine.registrations.key(Platform.VK, 7, event.event_id),
         ),
         (AttendanceStatus.WAITING, "Ждущий Игрок", uuid4().hex * 2),

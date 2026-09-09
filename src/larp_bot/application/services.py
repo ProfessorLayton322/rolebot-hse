@@ -31,6 +31,7 @@ from larp_bot.domain.models import (
     ReplyContext,
     TelegramUser,
     User,
+    surname_and_name,
 )
 from larp_bot.domain.security import participant_key
 
@@ -1388,7 +1389,7 @@ class OrderedMutationService:
                     event.event_id,
                     operation_id=command.operation_id,
                     participant_key=command.participant_key,
-                    display_name=user.full_name,
+                    display_name=surname_and_name(user.full_name),
                     larp_experience=bool(user.larp_experience),
                     crossplay=bool(user.crossplay),
                     vk_profile=vk_profile,
@@ -1429,7 +1430,7 @@ class OrderedMutationService:
                 event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
-                display_name=command.payload.display_name,
+                display_name=surname_and_name(command.payload.display_name),
                 wish_play=command.payload.wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,
