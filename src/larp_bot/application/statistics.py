@@ -14,8 +14,10 @@ from larp_bot.adapters.google_drive.statistics import (
 from larp_bot.adapters.google_drive.statistics_workbook import StatisticsWorkbook
 from larp_bot.domain.models import (
     AttendanceStatus,
+    Operation,
     OrderedRegistrationCommand,
     Platform,
+    ProfileSyncPayload,
     StatisticsPayload,
     TelegramUser,
     User,
@@ -79,6 +81,25 @@ class StatisticsService:
             )
 
         await asyncio.gather(*(grant(platform, user_id) for platform, user_id in experienced))
+
+    async def sync_profile(self, command: OrderedRegistrationCommand) -> str:
+        payload = command.payload
+        assert isinstance(payload, ProfileSyncPayload)
+        user = await self.administration.users.get(command.platform, command.platform_user_id)
+        if user is None:
+            return "Профиль уже отсутствует"
+        experienced = await self.repository.has_any_player(payload.names)
+        await self.administration.users.set_larp_experience(
+            command.platform,
+            command.platform_user_id,
+            experienced,
+        )
+        await self.registrations.enqueue_profile_updates(
+            command.platform,
+            command.platform_user_id,
+            idempotency_key=f"{command.operation_id}:{Operation.SYNC_PROFILE.value}",
+        )
+        return "Профиль синхронизирован"
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         if not await self.admins.is_admin(command.platform, command.platform_user_id):

@@ -49,6 +49,12 @@ class MemoryUserRepository:
         user_id = user.tg_id if hasattr(user, "tg_id") else user.vk_id
         self.rows[(platform, user_id)] = deepcopy(user)
 
+    async def set_larp_experience(self, platform: Platform, user_id: int, experienced: bool) -> None:
+        user = self.rows.get((platform, user_id))
+        if user is not None:
+            user.larp_experience = experienced
+            user.updated_at = datetime.now(UTC)
+
     async def grant_larp_experience(self, platform: Platform, user_id: int) -> None:
         user = self.rows.get((platform, user_id))
         if user is not None:

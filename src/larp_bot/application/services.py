@@ -26,6 +26,7 @@ from larp_bot.domain.models import (
     PassDetails,
     Platform,
     PlayerAmountPayload,
+    ProfileSyncPayload,
     Registration,
     ReplyContext,
     TelegramUser,
@@ -233,6 +234,37 @@ class RegistrationService:
 
     def key(self, platform: Platform, user_id: int, event_id: str) -> str:
         return participant_key(self.participant_secret, platform, user_id, event_id)
+
+    async def enqueue_profile_sync(
+        self,
+        platform: Platform,
+        user_id: int,
+        payload: ProfileSyncPayload,
+        *,
+        idempotency_key: str,
+    ) -> OrderedRegistrationCommand:
+        """Hand profile enrichment and projection fanout to the ordered worker."""
+
+        command = OrderedRegistrationCommand(
+            operation_id=str(uuid5(NAMESPACE_URL, f"larp-bot:{platform}:{user_id}:{idempotency_key}")),
+            event_id=f"profile:{platform.value}:{user_id}",
+            operation=Operation.SYNC_PROFILE,
+            platform=platform,
+            platform_user_id=user_id,
+            payload=payload,
+        )
+        await self.publisher.publish(command)
+        LOGGER.info(
+            "ordered_command_enqueued",
+            extra={
+                "operation_id": command.operation_id,
+                "event_id": command.event_id,
+                "platform": command.platform.value,
+                "platform_update_id": idempotency_key,
+                "operation": command.operation.value,
+            },
+        )
+        return command
 
     async def _event(self, event_id: str) -> Event:
         event = await self.events.get(event_id)

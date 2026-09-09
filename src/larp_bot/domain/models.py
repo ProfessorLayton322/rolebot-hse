@@ -96,6 +96,7 @@ class AttendanceStatus(StrEnum):
 
 class Operation(StrEnum):
     STATISTICS = "STATISTICS"
+    SYNC_PROFILE = "SYNC_PROFILE"
     ENLIST = "ENLIST"
     UPDATE_PROFILE = "UPDATE_PROFILE"
     CONFIRM = "CONFIRM"
@@ -431,6 +432,18 @@ class PlayerAmountPayload(StrictModel):
     player_amount: int = Field(ge=1, le=MAX_PLAYER_AMOUNT)
 
 
+class ProfileSyncPayload(StrictModel):
+    names: list[str] = Field(min_length=1, max_length=2)
+
+    @field_validator("names")
+    @classmethod
+    def normalize(cls, values: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(name.strip() for name in values if name.strip()))
+        if not normalized:
+            raise ValueError("profile sync requires at least one name")
+        return normalized
+
+
 class StatisticsPayload(StrictModel):
     action: Literal["game", "link"]
     game_id: str | None = None
@@ -448,6 +461,7 @@ CommandPayload = (
     | ConfirmationDeadlinePayload
     | NotificationPayload
     | PlayerAmountPayload
+    | ProfileSyncPayload
     | StatisticsPayload
     | EmptyPayload
 )
@@ -478,6 +492,10 @@ class OrderedRegistrationCommand(StrictModel):
         if self.operation is Operation.STATISTICS:
             if not isinstance(self.payload, StatisticsPayload) or self.event_id != "statistics":
                 raise ValueError("STATISTICS requires StatisticsPayload and the global statistics group")
+        if self.operation is Operation.SYNC_PROFILE:
+            expected_group = f"profile:{self.platform.value}:{self.platform_user_id}"
+            if not isinstance(self.payload, ProfileSyncPayload) or self.event_id != expected_group:
+                raise ValueError("SYNC_PROFILE requires ProfileSyncPayload and the user's profile group")
         participant_ops = {
             Operation.ENLIST,
             Operation.UPDATE_PROFILE,

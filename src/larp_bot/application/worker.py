@@ -72,10 +72,17 @@ class OrderedWorker:
                 # Profile projections are background maintenance. Keep stale
                 # commands (for example, when a game was archived meanwhile)
                 # silent even when worker-time validation rejects them.
-                notifications_enabled = command.operation is not Operation.UPDATE_PROFILE
+                notifications_enabled = command.operation not in {
+                    Operation.SYNC_PROFILE,
+                    Operation.UPDATE_PROFILE,
+                }
                 buttons: Sequence[Button] = command.reply_context.buttons
                 try:
-                    if command.operation is Operation.STATISTICS:
+                    if command.operation is Operation.SYNC_PROFILE:
+                        if self.statistics is None:
+                            raise RuntimeError("statistics service is not configured")
+                        default_text = await self.statistics.sync_profile(command)
+                    elif command.operation is Operation.STATISTICS:
                         if self.statistics is None:
                             raise RuntimeError("statistics service is not configured")
                         default_text = await self.statistics.apply(command)
