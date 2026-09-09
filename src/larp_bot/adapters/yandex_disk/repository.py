@@ -77,6 +77,18 @@ PASS_TABLE_HEADERS = (
     "Телефон",
     "E-mail",
 )
+TABLEAU_10_COLORS = (
+    "4E79A7",
+    "F28E2B",
+    "E15759",
+    "76B7B2",
+    "59A14F",
+    "EDC948",
+    "B07AA1",
+    "FF9DA7",
+    "9C755F",
+    "BAB0AC",
+)
 
 
 class WorkbookIntegrityError(RuntimeError):
@@ -144,6 +156,56 @@ def _ordered_active_registrations(registrations: Sequence[Registration]) -> list
     return sorted(active, key=lambda row: (row.created_at, row.participant_key))
 
 
+def _player_component_colors(registrations: Sequence[Registration]) -> dict[str, str]:
+    names: dict[str, list[int]] = {}
+    for index, registration in enumerate(registrations):
+        names.setdefault(surname_and_name(registration.display_name), []).append(index)
+
+    adjacency = [set[int]() for _ in registrations]
+    for index, registration in enumerate(registrations):
+        for wished_name in (name.strip() for name in registration.wish_play.split(",")):
+            for wished_index in names.get(wished_name, ()):
+                if wished_index == index:
+                    continue
+                adjacency[index].add(wished_index)
+                adjacency[wished_index].add(index)
+
+    components: list[list[int]] = []
+    visited: set[int] = set()
+    for start in range(len(registrations)):
+        if start in visited:
+            continue
+        component: list[int] = []
+        stack = [start]
+        visited.add(start)
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in adjacency[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        if len(component) > 1:
+            components.append(component)
+
+    components.sort(key=lambda component: (-len(component), min(component)))
+    return {
+        registrations[index].participant_key: color
+        for component, color in zip(components, TABLEAU_10_COLORS, strict=False)
+        for index in component
+    }
+
+
+def _paint_player_name(
+    sheet: Worksheet,
+    registration: Registration,
+    component_colors: dict[str, str],
+) -> None:
+    color = component_colors.get(registration.participant_key)
+    if color is not None:
+        sheet.cell(sheet.max_row, 2).fill = PatternFill(fill_type="solid", fgColor=f"FF{color}")
+
+
 def _append_reserve_separator(sheet: Worksheet, *, player_amount: int, column_count: int) -> None:
     if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
         raise ValueError(f"player_amount must be between 1 and {MAX_PLAYER_AMOUNT}")
@@ -167,6 +229,7 @@ def showcase_workbook_bytes(
     # Keep the first player_amount rows fixed as main-roster slots. Padding
     # prevents the green separator from moving while later signups flow below.
     ordered_registrations = _ordered_active_registrations(registrations)
+    component_colors = _player_component_colors(ordered_registrations)
     for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
         sheet.append(
             (
@@ -181,6 +244,7 @@ def showcase_workbook_bytes(
                 registration.attendance_status.value,
             )
         )
+        _paint_player_name(sheet, registration, component_colors)
     for number in range(len(ordered_registrations) + 1, player_amount + 1):
         sheet.append((number,))
     _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(VISIBLE_HEADERS))
@@ -198,6 +262,7 @@ def showcase_workbook_bytes(
                 registration.attendance_status.value,
             )
         )
+        _paint_player_name(sheet, registration, component_colors)
     _format_sheet(sheet, (8, 30, 32, 32, 25, 26, 35, 45, 18))
     output = BytesIO()
     workbook.save(output)
@@ -217,6 +282,7 @@ def public_showcase_workbook_bytes(
     sheet.title = "Регистрация"
     sheet.append(PUBLIC_HEADERS)
     ordered_registrations = _ordered_active_registrations(registrations)
+    component_colors = _player_component_colors(ordered_registrations)
     for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
         sheet.append(
             (
@@ -228,6 +294,7 @@ def public_showcase_workbook_bytes(
                 registration.attendance_status.value,
             )
         )
+        _paint_player_name(sheet, registration, component_colors)
     for number in range(len(ordered_registrations) + 1, player_amount + 1):
         sheet.append((number,))
     _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(PUBLIC_HEADERS))
@@ -242,6 +309,7 @@ def public_showcase_workbook_bytes(
                 registration.attendance_status.value,
             )
         )
+        _paint_player_name(sheet, registration, component_colors)
     _format_sheet(sheet, (8, 30, 26, 35, 45, 18))
     output = BytesIO()
     workbook.save(output)

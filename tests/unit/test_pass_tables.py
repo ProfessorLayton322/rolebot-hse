@@ -154,6 +154,7 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
             sheet.cell(row, 1).value: tuple(sheet.cell(row, column).value for column in range(1, 10))
             for row in range(2, 4)
         }
+        assert all(cell.fill.fill_type is None for row in sheet.iter_rows(min_row=2) for cell in row)
         assert rows["Иванов"] == (
             "Иванов",
             "Иван",

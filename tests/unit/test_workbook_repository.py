@@ -12,9 +12,12 @@ from larp_bot.adapters.yandex_disk.repository import (
     LEGACY_HEADERS,
     PUBLIC_HEADERS,
     STATEFUL_HEADERS,
+    TABLEAU_10_COLORS,
     VISIBLE_HEADERS,
     YandexDiskRestClient,
     YandexDiskShowcaseRepository,
+    public_showcase_workbook_bytes,
+    showcase_workbook_bytes,
 )
 from larp_bot.application.services import RegistrationCatalog
 from larp_bot.domain.models import AttendanceStatus, Event, Registration
@@ -197,6 +200,123 @@ async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary
             (3, "Newest"),
         ]
         assert all(name is None for _, name in rows[3:])
+    finally:
+        workbook.close()
+
+
+def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -> None:
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key="a" * 43,
+            display_name="Иванов Иван Иванович",
+            wish_play="Петров Пётр, Сидоров Семён",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="b" * 43,
+            display_name="Петров Пётр Петрович",
+            wish_play="Без пожеланий",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="c" * 43,
+            display_name="Сидоров Семён Семёнович",
+            wish_play="Без пожеланий",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="d" * 43,
+            display_name="Орлов Олег Олегович",
+            wish_play="фёдоров фёдор",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="e" * 43,
+            display_name="Фёдоров Фёдор Фёдорович",
+            wish_play="Без пожеланий",
+        ),
+    ]
+
+    for content, column_count in (
+        (showcase_workbook_bytes(registrations), len(VISIBLE_HEADERS)),
+        (public_showcase_workbook_bytes(registrations), len(PUBLIC_HEADERS)),
+    ):
+        workbook = load_workbook(BytesIO(content))
+        try:
+            sheet = workbook.active
+            for row in range(2, 5):
+                assert sheet.cell(row, 2).fill.fill_type == "solid"
+                assert sheet.cell(row, 2).fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+                assert all(
+                    sheet.cell(row, column).fill.fill_type is None
+                    for column in range(1, column_count + 1)
+                    if column != 2
+                )
+            assert sheet.cell(5, 2).fill.fill_type is None
+            assert sheet.cell(6, 2).fill.fill_type is None
+        finally:
+            workbook.close()
+
+
+def test_ten_largest_wish_components_receive_tableau_10_colors() -> None:
+    registrations: list[Registration] = []
+    pairs: list[tuple[str, str]] = []
+    for index in range(10):
+        first_name = f"Фамилия{index} Имя{index}А"
+        second_name = f"Фамилия{index} Имя{index}Б"
+        pairs.append((first_name, second_name))
+        registrations.extend(
+            (
+                Registration(
+                    event_id="event-a1",
+                    participant_key=f"{index * 2:043d}",
+                    display_name=first_name,
+                    wish_play=second_name,
+                ),
+                Registration(
+                    event_id="event-a1",
+                    participant_key=f"{index * 2 + 1:043d}",
+                    display_name=second_name,
+                    wish_play="Без пожеланий",
+                ),
+            )
+        )
+    largest_names = ("Большой Один", "Большой Два", "Большой Три")
+    registrations.extend(
+        (
+            Registration(
+                event_id="event-a1",
+                participant_key=f"{20:043d}",
+                display_name=largest_names[0],
+                wish_play=f"{largest_names[1]}, {largest_names[2]}",
+            ),
+            Registration(
+                event_id="event-a1",
+                participant_key=f"{21:043d}",
+                display_name=largest_names[1],
+                wish_play="Без пожеланий",
+            ),
+            Registration(
+                event_id="event-a1",
+                participant_key=f"{22:043d}",
+                display_name=largest_names[2],
+                wish_play="Без пожеланий",
+            ),
+        )
+    )
+
+    workbook = load_workbook(BytesIO(showcase_workbook_bytes(registrations)))
+    try:
+        sheet = workbook.active
+        name_cells = {sheet.cell(row, 2).value: sheet.cell(row, 2) for row in range(2, sheet.max_row + 1)}
+        for name in largest_names:
+            assert name_cells[name].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+        for index, pair in enumerate(pairs[:9], start=1):
+            for name in pair:
+                assert name_cells[name].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[index]}"
+        for name in pairs[9]:
+            assert name_cells[name].fill.fill_type is None
     finally:
         workbook.close()
 
