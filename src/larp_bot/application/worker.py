@@ -60,14 +60,26 @@ class OrderedWorker:
     async def run(self) -> int:
         started = time.monotonic()
         processed = 0
+        failed_groups: set[str] = set()
+        retryable_error: Exception | None = None
         while time.monotonic() - started < self.max_seconds:
             received = await self.consumer.receive(max_messages=5, wait_seconds=1 if processed else 3)
             if not received:
                 break
+            envelopes: list[QueueEnvelope] = []
             for raw in received:
                 if not isinstance(raw, QueueEnvelope):
                     raise TypeError("consumer returned an invalid queue envelope")
+                envelopes.append(raw)
+
+            # SYNC_PROFILE has its own per-user group, so moving it behind
+            # foreground commands cannot violate FIFO ordering. Its external
+            # statistics lookup must not delay signup persistence and delivery.
+            envelopes.sort(key=lambda envelope: envelope.command.operation is Operation.SYNC_PROFILE)
+            for raw in envelopes:
                 command = raw.command
+                if command.event_id in failed_groups:
+                    continue
                 notification_delivered = False
                 # Profile projections are background maintenance. Keep stale
                 # commands (for example, when a game was archived meanwhile)
@@ -135,6 +147,23 @@ class OrderedWorker:
                                 await self.notifications.notify_confirmed_link_promotion(command)
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
+                except Exception as exc:
+                    # Keep this command and every later command in the same FIFO
+                    # group retryable, but continue draining independent groups.
+                    # Re-raise after the drain so the kick itself is retried too.
+                    failed_groups.add(command.event_id)
+                    if retryable_error is None:
+                        retryable_error = exc
+                    LOGGER.exception(
+                        "ordered_command_failed",
+                        extra={
+                            "operation_id": command.operation_id,
+                            "event_id": command.event_id,
+                            "platform": command.platform.value,
+                            "operation": command.operation.value,
+                        },
+                    )
+                    continue
                 if notifications_enabled and not notification_delivered:
                     await self._deliver_once(raw, text, buttons)
                 await self.consumer.delete(raw.receipt_handle)
@@ -148,4 +177,6 @@ class OrderedWorker:
                     },
                 )
                 processed += 1
+        if retryable_error is not None:
+            raise retryable_error
         return processed
