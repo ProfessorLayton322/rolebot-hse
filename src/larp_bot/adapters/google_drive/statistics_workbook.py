@@ -18,6 +18,7 @@ from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from larp_bot.application.services import DomainError
+from larp_bot.domain.models import parse_full_name
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -35,6 +36,16 @@ def normalized_name(value: str) -> str:
     return " ".join(value.split()).casefold().replace("ё", "е")
 
 
+def reversed_name(value: str) -> str | None:
+    try:
+        parts = parse_full_name(value, alphabet="cyrillic")
+    except ValueError:
+        return None
+    if len(parts) != 2:
+        return None
+    return normalized_name(f"{parts[1]} {parts[0]}")
+
+
 class StatisticsWorkbook:
     required_headers: ClassVar[dict[int, str]] = {1: "Игрок", 4: "5 игр", 13: "50 игр"}
     fixed_column = 13
@@ -50,6 +61,7 @@ class StatisticsWorkbook:
     )
     layout_error = "Нужна XLSX-таблица с сезонным листом, колонками Игрок, итоги и 5–50 игр."
     skip_nonblank_game_formatting = True
+    match_reversed_names = True
 
     def __init__(self, content: bytes) -> None:
         self.original = content
@@ -209,9 +221,13 @@ class StatisticsWorkbook:
 
     def has_any_player(self, names: Sequence[str]) -> bool:
         candidates = {normalized_name(name) for name in names}
-        return any(
-            normalized_name(str(self.value(f"A{row}") or "")) in candidates for row in range(2, self.last_player + 1)
-        )
+        for row in range(2, self.last_player + 1):
+            table_name = str(self.value(f"A{row}") or "")
+            if normalized_name(table_name) in candidates:
+                return True
+            if self.match_reversed_names and reversed_name(table_name) in candidates:
+                return True
+        return False
 
     @property
     def season_name(self) -> str:
@@ -330,8 +346,13 @@ class StatisticsWorkbook:
         if self.has_game(name):
             return None
         lookup: dict[str, list[int]] = {}
+        reversed_lookup: dict[str, list[int]] = {}
         for row in range(2, self.last_player + 1):
-            lookup.setdefault(normalized_name(str(self.value(f"A{row}"))), []).append(row)
+            table_name = str(self.value(f"A{row}"))
+            lookup.setdefault(normalized_name(table_name), []).append(row)
+            reversed_key = reversed_name(table_name) if self.match_reversed_names else None
+            if reversed_key is not None:
+                reversed_lookup.setdefault(reversed_key, []).append(row)
         self.last_column += 1
         self.set_cell(1, self.last_column, name, style=self.game_header_style)
         # Rebuild the known summary rows below the extended participant list.
@@ -344,13 +365,16 @@ class StatisticsWorkbook:
                     self.cells.pop(cell.attrib["r"], None)
         for player in players:
             key = normalized_name(player)
-            if key not in lookup:
+            matching_rows = lookup.get(key)
+            if matching_rows is None:
+                matching_rows = reversed_lookup.get(key)
+            if matching_rows is None:
                 self.last_player += 1
                 row = self.last_player
-                lookup[key] = [row]
+                matching_rows = lookup[key] = [row]
                 for col in range(1, self.fixed_column + 1):
                     self.set_cell(row, col, self.new_player_value(col, player), style=self.player_styles[col])
-            for row in lookup[key]:
+            for row in matching_rows:
                 self.set_cell(row, self.last_column, 1, style=self.game_cell_style)
         self.refresh()
         return self.save()
@@ -500,6 +524,7 @@ class MasterStatisticsWorkbook(StatisticsWorkbook):
     footer_titles: ClassVar[tuple[str, ...]] = ("Всего", "Участники сезона", "Новички")
     layout_error = "Нужна XLSX-таблица мастеров с сезонным листом, итогами, отметками 1–35 игр и колонками игр."
     skip_nonblank_game_formatting = False
+    match_reversed_names = False
 
     def carried_header(self, year: int) -> str:
         return "Игр на начало сезона"

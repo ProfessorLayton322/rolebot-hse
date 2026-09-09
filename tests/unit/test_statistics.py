@@ -172,6 +172,53 @@ def test_game_matches_names_appends_before_summary_and_expands_formulas_and_colo
     assert sheet(result)["B4"].value == 33
 
 
+def test_player_game_matches_a_parseable_table_name_with_name_and_surname_reversed() -> None:
+    workbook = load_workbook(BytesIO(template()))
+    workbook.active["A2"] = "  Пётр   Иванов  "
+    output = BytesIO()
+    workbook.save(output)
+
+    statistics = StatisticsWorkbook(output.getvalue())
+    assert statistics.has_any_player(["ИВАНОВ Петр"])
+    result = statistics.mark_game("Новая игра", ["Иванов Петр"])
+
+    assert result is not None
+    current = sheet(result)
+    assert current["O2"].value == 1
+    assert current["O3"].value is None
+    assert current["A4"].value == "Всего"
+
+
+def test_player_game_prefers_an_exact_match_over_a_reversed_name_match() -> None:
+    workbook = load_workbook(BytesIO(template()))
+    workbook.active["A2"] = "Пётр Иванов"
+    workbook.active["A3"] = "Иванов Пётр"
+    output = BytesIO()
+    workbook.save(output)
+
+    result = StatisticsWorkbook(output.getvalue()).mark_game("Новая игра", ["Иванов Петр"])
+
+    assert result is not None
+    current = sheet(result)
+    assert current["O2"].value is None
+    assert current["O3"].value == 1
+
+
+def test_player_game_does_not_reverse_a_table_name_with_more_than_two_parts() -> None:
+    workbook = load_workbook(BytesIO(template()))
+    workbook.active["A2"] = "Пётр Иванов Иванович"
+    output = BytesIO()
+    workbook.save(output)
+
+    result = StatisticsWorkbook(output.getvalue()).mark_game("Новая игра", ["Иванов Петр"])
+
+    assert result is not None
+    current = sheet(result)
+    assert current["O2"].value is None
+    assert current["A4"].value == "Иванов Петр"
+    assert current["O4"].value == 1
+
+
 def test_add_game_automatically_rolls_over_and_is_idempotent_within_current_season() -> None:
     result = StatisticsWorkbook(template()).add_game(2026, "Осенняя игра", ["Новый Игрок"])
     assert result is not None
