@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -24,6 +25,7 @@ from larp_bot.application.services import (
     confirmed_notification_text,
     is_plain_chat_link,
 )
+from larp_bot.application.statistics import StatisticsService
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -39,6 +41,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    ProfileSyncPayload,
     Registration,
     ReplyContext,
     TelegramUser,
@@ -66,6 +69,24 @@ class FailingTransport(MemoryDeferredTransport):
     async def send(self, **kwargs: object) -> None:
         del kwargs
         raise RuntimeError("transport unavailable")
+
+
+class FailingProfileStatistics:
+    def __init__(
+        self,
+        registrations: MemoryRegistrationRepository,
+        event_id: str,
+        participant_key: str,
+    ) -> None:
+        self.registrations = registrations
+        self.event_id = event_id
+        self.participant_key = participant_key
+        self.signup_was_persisted = False
+
+    async def sync_profile(self, command: OrderedRegistrationCommand) -> str:
+        del command
+        self.signup_was_persisted = await self.registrations.get(self.event_id, self.participant_key) is not None
+        raise RuntimeError("statistics unavailable")
 
 
 def queued(
@@ -181,6 +202,55 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     assert consumer.deleted == []
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
+
+
+@pytest.mark.asyncio
+async def test_profile_sync_failure_does_not_block_signup_in_an_independent_fifo_group(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    sync = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id="profile:telegram:1",
+        operation=Operation.SYNC_PROFILE,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=ProfileSyncPayload(names=["Player"]),
+    )
+    enlist = queued(
+        event,
+        Operation.ENLIST,
+        EnlistPayload(display_name="Player", wish_play="A"),
+        2,
+        [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)],
+    )
+    consumer = FakeConsumer([QueueEnvelope(sync, "receipt-sync"), enlist])
+    transport = MemoryDeferredTransport()
+    statistics = FailingProfileStatistics(tables, event.event_id, "a" * 43)
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(
+            events := MemoryEventRepository([event]),
+            RegistrationCatalog(events, tables, showcase),
+        ),
+        users,
+        transport,
+        max_seconds=2,
+        statistics=cast(StatisticsService, statistics),
+    )
+
+    with pytest.raises(RuntimeError, match="statistics unavailable"):
+        await worker.run()
+
+    assert statistics.signup_was_persisted
+    assert consumer.deleted == ["receipt-2"]
+    assert len(transport.sent) == 1
+    assert "Вы записались" in transport.sent[0][3]
 
 
 @pytest.mark.asyncio
