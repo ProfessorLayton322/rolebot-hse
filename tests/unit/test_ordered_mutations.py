@@ -330,7 +330,7 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
     stored = await tables.get(event.event_id, key)
     assert result.notifications_enabled is False
     assert stored is not None
-    assert stored.display_name == "Новиков Новый Нович"
+    assert stored.display_name == "Новиков Новый"
     assert stored.vk_profile == "https://vk.com/new-profile"
     assert stored.telegram_profile == "https://t.me/new_profile"
     assert stored.larp_experience is False
@@ -344,14 +344,15 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
     public = load_workbook(BytesIO(disk_store.files[public_path]))
     passes = load_workbook(BytesIO(disk_store.files[pass_path]))
     try:
-        assert master.active["B2"].value == "Новиков Новый Нович"
+        assert master.active["B2"].value == "Новиков Новый"
         assert master.active["C2"].value == "https://vk.com/new-profile"
         assert master.active["D2"].value == "https://t.me/new_profile"
         assert master.active["E2"].value == "Нет"
         assert master.active["F2"].value == "Да"
-        assert public.active["B2"].value == "Новиков Новый Нович"
+        assert public.active["B2"].value == "Новиков Новый"
         assert public.active["C2"].value == "Да"
         assert passes.active["A2"].value == "Новиков"
+        assert passes.active["C2"].value == "Нович"
         assert passes.active["H2"].value == "+7 999 111-22-33"
         assert passes.active["I2"].value == "new@example.com"
     finally:

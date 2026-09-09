@@ -21,6 +21,7 @@ from larp_bot.domain.models import (
     StatisticsPayload,
     TelegramUser,
     User,
+    surname_and_name,
 )
 from larp_bot.domain.security import participant_key
 
@@ -126,16 +127,18 @@ class StatisticsService:
             self.administration.events.list_leaders(event.event_id),
             self.administration.users.list_all(),
         )
-        # Full names are stored as two or three Cyrillic parts by the shared profile flow.
+        # Keep only surname and name outside the dedicated pass table.
         # Keep the registration snapshot so subsequent profile edits cannot rename history.
-        players = [r.display_name for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED]
+        players = [
+            surname_and_name(r.display_name) for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED
+        ]
         users_by_identity = {self._identity(user): user for user in users}
         masters: list[str] = []
         for leader in leaders:
             user = users_by_identity.get((leader.platform, leader.platform_user_id))
             if user is None or user.full_name is None:
                 raise DomainError("Не удалось найти профили всех мастеров игры.")
-            masters.append(user.full_name)
+            masters.append(surname_and_name(user.full_name))
         season_year = self.season_year()
 
         def validate_names(names: list[str], role: str) -> None:

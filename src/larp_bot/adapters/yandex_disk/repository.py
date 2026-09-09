@@ -20,6 +20,7 @@ from larp_bot.domain.models import (
     Event,
     PassDetails,
     Registration,
+    surname_and_name,
 )
 
 VISIBLE_HEADERS = (
@@ -170,7 +171,7 @@ def showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(registration.display_name),
+                safe_cell(surname_and_name(registration.display_name)),
                 safe_cell(registration.vk_profile),
                 safe_cell(registration.telegram_profile or ""),
                 _bool_cell(registration.larp_experience),
@@ -187,7 +188,7 @@ def showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(registration.display_name),
+                safe_cell(surname_and_name(registration.display_name)),
                 safe_cell(registration.vk_profile),
                 safe_cell(registration.telegram_profile or ""),
                 _bool_cell(registration.larp_experience),
@@ -220,7 +221,7 @@ def public_showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(registration.display_name),
+                safe_cell(surname_and_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 safe_cell(registration.character_wish),
@@ -234,7 +235,7 @@ def public_showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(registration.display_name),
+                safe_cell(surname_and_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 safe_cell(registration.character_wish),

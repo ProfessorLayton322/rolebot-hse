@@ -960,7 +960,7 @@ async def test_profile_validates_email_before_advancing_to_next_question(
     assert profile.pass_details.mobile_phone == "+7 999 123-45-67"
     assert profile.pass_details.foreigner is False
     assert profile.pass_details.surname_latin is None
-    assert profile.full_name == "Иванов Иван Иванович"
+    assert profile.full_name == "Иванов Иван"
 
 
 @pytest.mark.asyncio
@@ -985,7 +985,7 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert "страницу VK" in contact_prompt.text
     assert "Профиль успешно заполнен" in saved.text
     assert profile is not None
-    assert profile.full_name == "Семёнова-Звенигородская Ева-Лотта Ильинична"
+    assert profile.full_name == "Семёнова-Звенигородская Ева-Лотта"
     assert profile.larp_experience is None
     assert profile.needs_pass is False and profile.pass_details is None
 
@@ -1096,14 +1096,14 @@ async def test_profile_save_queues_one_background_sync_instead_of_scanning_games
 
     profile = await users.get(Platform.TELEGRAM, 1)
     assert "Профиль успешно заполнен" in response.text
-    assert profile is not None and profile.full_name == "Новиков Новый Нович"
+    assert profile is not None and profile.full_name == "Новиков Новый"
     assert profile.larp_experience is True
     assert profile.last_update_id == "5"
     assert len(publisher.commands) == 1
     sync = publisher.commands[0]
     assert sync.operation is Operation.SYNC_PROFILE
     assert sync.event_id == "profile:telegram:1"
-    assert sync.payload == ProfileSyncPayload(names=["Иван Иванов", "Новиков Новый Нович"])
+    assert sync.payload == ProfileSyncPayload(names=["Иван Иванов", "Новиков Новый"])
 
 
 @pytest.mark.asyncio

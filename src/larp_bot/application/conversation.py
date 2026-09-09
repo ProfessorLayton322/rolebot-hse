@@ -38,6 +38,7 @@ from larp_bot.domain.models import (
     normalize_telegram_profile,
     normalize_vk_url,
     parse_full_name,
+    surname_and_name,
     validate_pass_email,
 )
 
@@ -599,16 +600,18 @@ class ConversationEngine:
             return response
         if state == "PROFILE_FULL_NAME_CYRILLIC":
             try:
-                surname, name, patronym = parse_full_name(value, alphabet="cyrillic")
+                name_parts = parse_full_name(value, alphabet="cyrillic")
             except ValueError:
                 return BotResponse(
                     text=CYRILLIC_FULL_NAME_RETRY_PROMPT,
                     buttons=[dialog_exit_button()],
                 )
+            surname, name = name_parts[:2]
+            patronym = name_parts[2] if len(name_parts) == 3 else "-"
             context["surname_cyrillic"] = surname
             context["name_cyrillic"] = name
             context["patronym_cyrillic"] = patronym
-            context["full_name"] = " ".join(part for part in (surname, name, patronym) if part != "-")
+            context["full_name"] = surname_and_name(value)
             user.dialog_state = "PROFILE_NEEDS_PASS"
             return BotResponse(
                 text="Нужен ли вам пропуск для входа на место проведения игры?",
@@ -663,12 +666,14 @@ class ConversationEngine:
             return BotResponse(text=PHONE_PROMPT, buttons=[dialog_exit_button()])
         if state == "PROFILE_PASS_FULL_NAME_LATIN":
             try:
-                surname, name, patronym = parse_full_name(value, alphabet="latin")
+                name_parts = parse_full_name(value, alphabet="latin")
             except ValueError:
                 return BotResponse(
                     text=LATIN_FULL_NAME_RETRY_PROMPT,
                     buttons=[dialog_exit_button()],
                 )
+            surname, name = name_parts[:2]
+            patronym = name_parts[2] if len(name_parts) == 3 else "-"
             if (context["patronym_cyrillic"] == "-") != (patronym == "-"):
                 return BotResponse(
                     text=LATIN_FULL_NAME_RETRY_PROMPT,
@@ -1169,7 +1174,7 @@ class ConversationEngine:
             platform=message.identity.platform,
             user_id=message.identity.platform_user_id,
             payload=EnlistPayload(
-                display_name=user.full_name or "",
+                display_name=surname_and_name(user.full_name or ""),
                 wish_play=str(context["wish_play"]),
                 larp_experience=user.larp_experience,
                 crossplay=user.crossplay,
