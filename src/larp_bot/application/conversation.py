@@ -15,6 +15,7 @@ from larp_bot.domain.models import (
     Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
+    CoPlayerWishPayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -68,7 +69,12 @@ from .services import (
 PROFILE = "📝 Профиль"
 ENLIST = "🎮 Записаться на игру"
 CONFIRM = "✅ Подтвердить участие"
+# Keep the former value recognizable for keyboards sent before this rollout.
 CHARACTER = "🎭 Пожелания по персонажу"
+GAME_WISHES = "🎭 Пожелания по игре"
+CHARACTER_WISHES = "Пожелания по персонажу"
+CO_PLAYER_WISHES = "Пожелания по соигрокам"
+CO_PLAYER_WISH_SKIP = "wishes:co-player:skip"
 CANCEL = "❌ Отменить участие"
 ADMIN = "🛠 Администрирование"
 BACK = "⬅️ Назад"
@@ -186,6 +192,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ENLIST_WISH_PLAY",
         "CONFIRM_WISH",
         "CHARACTER_EDIT",
+        "CO_PLAYER_EDIT",
         "ADMIN_CREATE_NAME",
         "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
@@ -230,7 +237,7 @@ def yes_no_buttons() -> list[Button]:
 
 
 def main_buttons(has_admin_access: bool) -> list[Button]:
-    labels = [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
+    labels = [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL]
     if has_admin_access:
         labels.append(ADMIN)
     return [Button(label=label, value=label) for label in labels]
@@ -271,6 +278,7 @@ def _player_game_picker_text(flow: str) -> str:
         "enlist": "🎮 Выберите игру, на которую хотите записаться:",
         "confirm": "✅ Выберите игру, участие в которой хотите подтвердить:",
         "character": "🎭 Выберите игру, для которой хотите изменить пожелания:",
+        "wishes": "🎭 Выберите игру, для которой хотите изменить пожелания:",
         "cancel": "❌ Выберите игру, участие в которой хотите отменить:",
     }[flow]
 
@@ -280,12 +288,26 @@ def _no_games_for_action_text(flow: str) -> str:
         "enlist": "Сейчас нет игр, доступных для записи.",
         "confirm": "Сейчас нет игр, доступных для подтверждения участия.",
         "character": "Сейчас нет игр, доступных для изменения пожеланий.",
+        "wishes": "Нет игр, на которые вы записаны.",
         "cancel": "Сейчас нет игр, доступных для отмены участия.",
     }[flow]
 
 
 def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
+
+
+def co_player_wish_prompt(*, skip_value: str) -> BotResponse:
+    return BotResponse(
+        text=(
+            "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
+            "Укажите каждого как «Фамилия Имя», через запятую. "
+            "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
+            f"Ответ должен быть не длиннее {MAX_CO_PLAYER_WISH_LENGTH} символов. "
+            "Если пожеланий нет, нажмите «Пропустить»."
+        ),
+        buttons=[Button(label=SKIP, value=skip_value), dialog_exit_button()],
+    )
 
 
 def _pagination_buttons(
@@ -527,8 +549,8 @@ class ConversationEngine:
             return await self._show_open_events("enlist")
         if value == CONFIRM:
             return await self._show_registered(user, "confirm")
-        if value == CHARACTER:
-            return await self._show_registered(user, "character")
+        if value in {GAME_WISHES, CHARACTER}:
+            return await self._show_registered(user, "wishes")
         if value == CANCEL:
             return await self._show_registered(user, "cancel")
         if value in {ADMIN, ADMIN_MENU}:
@@ -537,6 +559,8 @@ class ConversationEngine:
             return await self._select_event(user, message, value)
         if value.startswith("page:"):
             return await self._page(user, value)
+        if value.startswith("wishes:"):
+            return await self._wishes_action(user, message, value)
         if value.startswith("stats:"):
             return await self._statistics_action(user, message, value)
         if value.startswith("ag:"):
@@ -584,6 +608,8 @@ class ConversationEngine:
             return await self._character_command(user, message, value, Operation.CONFIRM)
         if state == "CHARACTER_EDIT":
             return await self._character_command(user, message, value, Operation.UPDATE_CHARACTER_WISH)
+        if state == "CO_PLAYER_EDIT":
+            return await self._co_player_wish_command(user, message, value)
         if state == "CANCEL_CONFIRM":
             return await self._cancel_step(user, message, value)
         if state.startswith("ADMIN_"):
@@ -816,6 +842,7 @@ class ConversationEngine:
             "enlist": "e",
             "confirm": "c",
             "character": "w",
+            "wishes": "g",
             "cancel": "x",
             "admin-status": "s",
             "admin-archive": "a",
@@ -848,6 +875,7 @@ class ConversationEngine:
                 "e": "enlist",
                 "c": "confirm",
                 "w": "character",
+                "g": "wishes",
                 "x": "cancel",
                 "s": "admin-status",
                 "a": "admin-archive",
@@ -908,6 +936,16 @@ class ConversationEngine:
             return await self._show_admin_games(user)
         return await self._show_registered(user, flow, after=after)
 
+    @staticmethod
+    def _game_wishes_menu(event: Event) -> BotResponse:
+        return BotResponse(
+            text=f"Пожелания по игре «{event.name}»",
+            buttons=[
+                Button(label=CHARACTER_WISHES, value=f"wishes:character:{event.event_id}"),
+                Button(label=CO_PLAYER_WISHES, value=f"wishes:co-player:{event.event_id}"),
+            ],
+        )
+
     async def _show_registered(
         self,
         user: User,
@@ -923,9 +961,9 @@ class ConversationEngine:
             )
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         event_statuses = REGISTRATION_OPEN_STATUSES if flow == "cancel" else None
-        archived = False if flow == "cancel" else None
+        archived = False if flow in {"cancel", "wishes"} else None
         registration_statuses = (
-            frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}) if flow == "cancel" else None
+            frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}) if flow in {"cancel", "wishes"} else None
         )
         page = await self.registrations.registered_games_page(
             platform,
@@ -956,6 +994,8 @@ class ConversationEngine:
                 for item in matches
                 if item[0].archived_at is None and item[1].attendance_status is not AttendanceStatus.CANCELLED
             ]
+        if flow == "wishes" and len(matches) == 1 and not page.has_previous and not page.has_next:
+            return self._game_wishes_menu(matches[0][0])
         buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
         buttons.extend(
             _pagination_buttons(
@@ -982,7 +1022,7 @@ class ConversationEngine:
                 text=unavailable_text,
                 buttons=buttons,
             )
-        if flow in {"cancel", "character"} and not actionable_matches:
+        if flow in {"cancel", "character", "wishes"} and not actionable_matches:
             return BotResponse(text=_no_games_for_action_text(flow), buttons=buttons)
         return BotResponse(text=_player_game_picker_text(flow), buttons=buttons)
 
@@ -1011,19 +1051,7 @@ class ConversationEngine:
                 return BotResponse(text=f"Вы уже записаны на игру «{event.name}».")
             user.dialog_context = {"event_id": event_id, "event_name": event.name}
             user.dialog_state = "ENLIST_WISH_PLAY"
-            return BotResponse(
-                text=(
-                    "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
-                    "Укажите каждого как «Фамилия Имя», через запятую. "
-                    "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
-                    f"Ответ должен быть не длиннее {MAX_CO_PLAYER_WISH_LENGTH} символов. "
-                    "Если пожеланий нет, нажмите «Пропустить»."
-                ),
-                buttons=[
-                    Button(label=SKIP, value="enlist:wish-play:skip"),
-                    dialog_exit_button(),
-                ],
-            )
+            return co_player_wish_prompt(skip_value="enlist:wish-play:skip")
         if flow in {
             "admin-status",
             "admin-archive",
@@ -1039,7 +1067,11 @@ class ConversationEngine:
             return BotResponse(text="Сначала запишитесь на эту игру.")
         if event.archived_at is not None:
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
-        if registration.attendance_status is AttendanceStatus.CANCELLED and flow in {"confirm", "character"}:
+        if registration.attendance_status is AttendanceStatus.CANCELLED and flow in {
+            "confirm",
+            "character",
+            "wishes",
+        }:
             return BotResponse(text="Сначала снова запишитесь на эту игру.")
         if flow == "cancel" and event.status is EventStatus.CLOSED:
             return BotResponse(text=closed_game_cancellation_message(event.name))
@@ -1052,6 +1084,8 @@ class ConversationEngine:
                     )
                 )
             return BotResponse(text=f"Регистрация и подтверждение участия в игре «{event.name}» закрыты.")
+        if flow == "wishes":
+            return self._game_wishes_menu(event)
         user.dialog_context = {
             "event_id": event_id,
             "event_name": event.name,
@@ -1107,6 +1141,33 @@ class ConversationEngine:
                 ],
             )
         return BotResponse(text="Некорректное действие.")
+
+    async def _wishes_action(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        try:
+            _, action, event_id = value.split(":", 2)
+        except ValueError:
+            return BotResponse(text="Некорректный выбор.")
+        if action == "character":
+            return await self._select_event(user, message, f"select:character:{event_id}")
+        if action != "co-player":
+            return BotResponse(text="Некорректный выбор.")
+        event = await self.events.get(event_id)
+        if event is None:
+            return BotResponse(text="Игра не найдена.")
+        registration = await self.registrations.get_registration(
+            event_id,
+            message.identity.platform,
+            message.identity.platform_user_id,
+        )
+        if registration is None:
+            return BotResponse(text="Сначала запишитесь на эту игру.")
+        if event.archived_at is not None:
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        if registration.attendance_status is AttendanceStatus.CANCELLED:
+            return BotResponse(text="Сначала снова запишитесь на эту игру.")
+        user.dialog_context = {"event_id": event_id, "event_name": event.name}
+        user.dialog_state = "CO_PLAYER_EDIT"
+        return co_player_wish_prompt(skip_value=CO_PLAYER_WISH_SKIP)
 
     async def _enlist_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if not is_profile_complete(user):
@@ -1250,6 +1311,53 @@ class ConversationEngine:
                 buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:{operation.value}",
+        )
+        return BotResponse(text="⏳ Изменение принято в обработку.", deferred=True, command_enqueued=True)
+
+    async def _co_player_wish_command(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        buttons = co_player_wish_prompt(skip_value=CO_PLAYER_WISH_SKIP).buttons
+        if message.callback is not None and value == CO_PLAYER_WISH_SKIP:
+            wish = NO_CO_PLAYER_WISH
+        else:
+            wish = value.strip()
+            if not wish:
+                return BotResponse(text="Введите текст или выберите «Пропустить».", buttons=buttons)
+        if len(wish) > MAX_CO_PLAYER_WISH_LENGTH:
+            return BotResponse(text=INVALID_INPUT_RESPONSE, buttons=buttons)
+        context = user.dialog_context.copy()
+        await self._clear(user)
+        event = await self.events.get(str(context["event_id"]))
+        if event is None:
+            return BotResponse(text="Игра не найдена.")
+        if event.archived_at is not None:
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        registration = await self.registrations.get_registration(
+            event.event_id,
+            message.identity.platform,
+            message.identity.platform_user_id,
+        )
+        if registration is None:
+            return BotResponse(text="Сначала запишитесь на эту игру.")
+        if registration.attendance_status is AttendanceStatus.CANCELLED:
+            return BotResponse(text="Сначала снова запишитесь на эту игру.")
+        await self.registrations.enqueue(
+            operation=Operation.UPDATE_CO_PLAYER_WISH,
+            event_id=event.event_id,
+            platform=message.identity.platform,
+            user_id=message.identity.platform_user_id,
+            payload=CoPlayerWishPayload(wish_play=wish),
+            reply_context=ReplyContext(
+                chat_id=message.chat_id,
+                peer_id=message.peer_id,
+                text_success=f"🎭 Пожелания по соигрокам для игры «{context['event_name']}» обновлены.",
+                buttons=[main_menu_button()],
+            ),
+            idempotency_key=f"{message.update_id}:{Operation.UPDATE_CO_PLAYER_WISH.value}",
         )
         return BotResponse(text="⏳ Изменение принято в обработку.", deferred=True, command_enqueued=True)
 

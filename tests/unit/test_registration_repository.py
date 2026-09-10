@@ -365,6 +365,27 @@ async def test_ydb_confirmation_updates_wish_and_status_in_one_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ydb_co_player_wish_update_changes_only_wish_projection() -> None:
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    await repository.update_co_player_wish(
+        "event-a1",
+        operation_id="co-player-update",
+        participant_key="a" * 43,
+        wish_play="Петров Пётр",
+    )
+
+    query, params = executor.queries[0]
+    assert "SET wish_play = $wish_play" in query
+    assert "character_wish" not in query
+    assert "attendance_status" not in query
+    assert "created_at" not in query
+    assert "last_operation_id != $operation_id" in query
+    assert params["$wish_play"] == "Петров Пётр"
+
+
+@pytest.mark.asyncio
 async def test_ydb_registration_page_uses_status_and_keyset_filters() -> None:
     after = (datetime(2026, 1, 1, tzinfo=UTC), "a" * 43)
     executor = RecordingExecutor([[]])

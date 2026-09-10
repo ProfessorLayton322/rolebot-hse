@@ -111,6 +111,7 @@ class Operation(StrEnum):
     UPDATE_PROFILE = "UPDATE_PROFILE"
     CONFIRM = "CONFIRM"
     UPDATE_CHARACTER_WISH = "UPDATE_CHARACTER_WISH"
+    UPDATE_CO_PLAYER_WISH = "UPDATE_CO_PLAYER_WISH"
     CANCEL = "CANCEL"
     OPEN_REGISTRATION = "OPEN_REGISTRATION"
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
@@ -399,6 +400,18 @@ class EnlistPayload(StrictModel):
     telegram_profile: str | None = None
 
 
+class CoPlayerWishPayload(StrictModel):
+    wish_play: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("wish_play")
+    @classmethod
+    def normalize(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Пожелания не могут быть пустыми")
+        return normalized
+
+
 class CharacterWishPayload(StrictModel):
     character_wish: str = Field(min_length=1, max_length=5000)
 
@@ -467,6 +480,7 @@ class StatisticsPayload(StrictModel):
 
 CommandPayload = (
     EnlistPayload
+    | CoPlayerWishPayload
     | CharacterWishPayload
     | ConfirmationDeadlinePayload
     | NotificationPayload
@@ -511,6 +525,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.UPDATE_PROFILE,
             Operation.CONFIRM,
             Operation.UPDATE_CHARACTER_WISH,
+            Operation.UPDATE_CO_PLAYER_WISH,
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,
         }
@@ -522,6 +537,8 @@ class OrderedRegistrationCommand(StrictModel):
             self.payload, CharacterWishPayload
         ):
             raise ValueError(f"{self.operation} requires CharacterWishPayload")
+        if self.operation is Operation.UPDATE_CO_PLAYER_WISH and not isinstance(self.payload, CoPlayerWishPayload):
+            raise ValueError("UPDATE_CO_PLAYER_WISH requires CoPlayerWishPayload")
         if self.operation is Operation.OPEN_CONFIRMATION and not isinstance(self.payload, ConfirmationDeadlinePayload):
             raise ValueError("OPEN_CONFIRMATION requires ConfirmationDeadlinePayload")
         if self.operation is Operation.SEND_CONFIRMED_NOTIFICATION and not isinstance(

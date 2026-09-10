@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from larp_bot.adapters.ymq.client import YmqCommandPublisher
-from larp_bot.domain.models import EmptyPayload, Operation, OrderedRegistrationCommand, Platform
+from larp_bot.domain.models import CoPlayerWishPayload, EmptyPayload, Operation, OrderedRegistrationCommand, Platform
 
 
 class RecordingSqs:
@@ -44,3 +44,20 @@ async def test_fifo_uses_independent_event_groups_and_operation_deduplication() 
         second.operation_id,
     ]
     assert len([message for message in sqs.messages if message["QueueUrl"] == "kick-url"]) == 2
+
+
+def test_co_player_wish_command_round_trips_through_queue_json() -> None:
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id="event-a1",
+        operation=Operation.UPDATE_CO_PLAYER_WISH,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        participant_key="a" * 43,
+        payload=CoPlayerWishPayload(wish_play="Петров Пётр"),
+    )
+
+    decoded = OrderedRegistrationCommand.model_validate_json(command.model_dump_json())
+
+    assert isinstance(decoded.payload, CoPlayerWishPayload)
+    assert decoded.payload.wish_play == "Петров Пётр"
