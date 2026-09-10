@@ -27,11 +27,14 @@ from larp_bot.application.conversation import (
     CANCEL,
     CHANGE_PLAYER_AMOUNT,
     CHANGE_STATUS,
-    CHARACTER,
+    CHARACTER_WISHES,
+    CO_PLAYER_WISH_SKIP,
+    CO_PLAYER_WISHES,
     CONFIRM,
     ENLIST,
     EVENT_TABLES,
     FREE_TEXT_DIALOG_STATES,
+    GAME_WISHES,
     GAMEMASTER_NOTIFICATION,
     GAMEMASTER_REVOKED_NOTIFICATION,
     GRANT_GAMEMASTER,
@@ -74,6 +77,7 @@ from larp_bot.domain.models import (
     BotIdentity,
     Button,
     ConfirmationDeadlinePayload,
+    CoPlayerWishPayload,
     EnlistPayload,
     Event,
     EventStatus,
@@ -342,6 +346,78 @@ async def test_overlong_co_player_wish_is_rejected_without_leaving_the_prompt(
 
 
 @pytest.mark.asyncio
+async def test_single_registered_game_opens_wishes_menu_and_edits_co_player_wish(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+    )
+    await tables.confirm(
+        event.event_id,
+        operation_id="existing-confirm",
+        participant_key=key,
+        character_wish="Doctor",
+    )
+
+    menu = await engine.handle(inbound(1, GAME_WISHES))
+    prompt = await engine.handle(inbound(2, f"wishes:co-player:{event.event_id}", callback=True))
+    accepted = await engine.handle(inbound(3, "Петров Пётр"))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert menu.text == f"Пожелания по игре «{event.name}»"
+    assert menu.buttons == [
+        Button(label=CHARACTER_WISHES, value=f"wishes:character:{event.event_id}"),
+        Button(label=CO_PLAYER_WISHES, value=f"wishes:co-player:{event.event_id}"),
+    ]
+    assert prompt.text == (
+        "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
+        "Укажите каждого как «Фамилия Имя», через запятую. "
+        "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
+        "Ответ должен быть не длиннее 2000 символов. Если пожеланий нет, нажмите «Пропустить»."
+    )
+    assert prompt.buttons[0] == Button(label="Пропустить", value=CO_PLAYER_WISH_SKIP)
+    assert accepted.deferred and accepted.command_enqueued
+    assert saved is not None and saved.dialog_state == "IDLE"
+    command = publisher.commands[-1]
+    assert command.operation is Operation.UPDATE_CO_PLAYER_WISH
+    assert isinstance(command.payload, CoPlayerWishPayload)
+    assert command.payload.wish_play == "Петров Пётр"
+
+
+@pytest.mark.asyncio
+async def test_co_player_wish_edit_can_clear_wishes_with_skip(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event)
+    key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Петров Пётр",
+    )
+
+    await engine.handle(inbound(1, GAME_WISHES))
+    await engine.handle(inbound(2, f"wishes:co-player:{event.event_id}", callback=True))
+    response = await engine.handle(inbound(3, CO_PLAYER_WISH_SKIP, callback=True))
+
+    assert response.deferred
+    command = publisher.commands[-1]
+    assert command.operation is Operation.UPDATE_CO_PLAYER_WISH
+    assert isinstance(command.payload, CoPlayerWishPayload)
+    assert command.payload.wish_play == "Без пожеланий"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed", [False, True])
 async def test_active_registration_cannot_enlist_again(
     confirmed: bool,
@@ -457,7 +533,7 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
             "Сначала заполните профиль и запишитесь на игру. Мы сообщим вам, когда будет открыто "
             "подтверждение на игру — вы сможете подтвердиться, когда будете уверены, что сможете прийти на игру."
         )
-        assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
+        assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL]
         assert saved is not None and saved.dialog_state == "IDLE"
         assert saved.dialog_context == {}
 
@@ -656,11 +732,11 @@ async def test_archived_game_does_not_offer_or_open_character_wish_editing(
     )
     await engine.events.archive(event.event_id, datetime.now(UTC))
 
-    games = await engine.handle(inbound(1, CHARACTER))
+    games = await engine.handle(inbound(1, GAME_WISHES))
     stale = await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
 
     assert not any(button.value == f"select:character:{event.event_id}" for button in games.buttons)
-    assert games.text == "Сейчас нет игр, доступных для изменения пожеланий."
+    assert games.text == "Нет игр, на которые вы записаны."
     assert stale.text == "Игра больше не активна; запись и изменение данных недоступны."
     assert publisher.commands == []
 
@@ -685,8 +761,8 @@ async def test_game_archived_during_character_wish_edit_is_not_enqueued(
         character_wish="Doctor",
     )
 
-    await engine.handle(inbound(1, CHARACTER))
-    await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
+    await engine.handle(inbound(1, GAME_WISHES))
+    await engine.handle(inbound(2, f"wishes:character:{event.event_id}", callback=True))
     await engine.events.archive(event.event_id, datetime.now(UTC))
 
     rejected = await engine.handle(inbound(3, "Medic"))
@@ -789,8 +865,8 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
         character_wish=confirmation.payload.character_wish,
     )
 
-    await engine.handle(vk(18, CHARACTER))
-    edit_prompt = await engine.handle(vk(19, f"select:character:{event.event_id}", callback=True))
+    await engine.handle(vk(18, GAME_WISHES))
+    edit_prompt = await engine.handle(vk(19, f"wishes:character:{event.event_id}", callback=True))
     assert "Отправьте новый вариант" in edit_prompt.text
     await engine.handle(vk(20, "Medic"))
     assert publisher.commands[-1].operation is Operation.UPDATE_CHARACTER_WISH
@@ -896,8 +972,8 @@ async def test_waiting_blank_character_menu_routes_to_confirmation(disk_store: M
         display_name="Иван",
         wish_play="A",
     )
-    await engine.handle(inbound(1, CHARACTER))
-    response = await engine.handle(inbound(2, f"select:character:{event.event_id}", callback=True))
+    await engine.handle(inbound(1, GAME_WISHES))
+    response = await engine.handle(inbound(2, f"wishes:character:{event.event_id}", callback=True))
     assert CONFIRM in response.text
 
 
@@ -1008,7 +1084,7 @@ async def test_profile_completion_shows_confirmation_before_main_menu(
     assert not completed.deferred and not completed.command_enqueued
 
     menu = await engine.handle(inbound(6, MAIN_MENU, callback=True, user_id=2))
-    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, CHARACTER, CANCEL]
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL]
 
 
 @pytest.mark.asyncio
@@ -2550,3 +2626,19 @@ async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_stor
     )
     assert len([button for button in returned.buttons if button.value.startswith("select:confirm:")]) == PAGE_SIZE
     assert PAGE_BACK not in {button.label for button in returned.buttons}
+
+    wishes_first = await engine.handle(inbound(6, GAME_WISHES))
+    assert len([button for button in wishes_first.buttons if button.value.startswith("select:wishes:")]) == PAGE_SIZE
+    wishes_second = await engine.handle(
+        inbound(
+            7,
+            next(button.value for button in wishes_first.buttons if button.label == PAGE_FORWARD),
+            callback=True,
+        )
+    )
+    last_game_buttons = [button for button in wishes_second.buttons if button.value.startswith("select:wishes:")]
+    assert len(last_game_buttons) == 1
+    assert PAGE_BACK in {button.label for button in wishes_second.buttons}
+    selected = await engine.handle(inbound(8, last_game_buttons[0].value, callback=True))
+    assert selected.text.startswith("Пожелания по игре «")
+    assert [button.label for button in selected.buttons] == [CHARACTER_WISHES, CO_PLAYER_WISHES]

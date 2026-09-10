@@ -16,6 +16,7 @@ from larp_bot.domain.models import (
     Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
+    CoPlayerWishPayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -423,6 +424,7 @@ class RegistrationService:
         platform: Platform,
         user_id: int,
         payload: EnlistPayload
+        | CoPlayerWishPayload
         | CharacterWishPayload
         | ConfirmationDeadlinePayload
         | NotificationPayload
@@ -784,7 +786,7 @@ def confirmation_success_text(event: Event, character_wish: str, *, in_main_rost
         f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
         f"{link_text}"
         f"Пожелания по персонажу:\n{character_wish}\n\n"
-        "Позже их можно изменить через «🎭 Пожелания по персонажу»."
+        "Позже их можно изменить через «🎭 Пожелания по игре»."
     )
 
 
@@ -819,7 +821,10 @@ def enlistment_success_text(event: Event, queue_position: int) -> str:
             "Подтверждение участия пока не открыто. Мы обязательно пришлём вам уведомление, "
             "когда можно будет подтвердиться."
         )
-    return f"{position_text}\n\n{confirmation_text}"
+    return (
+        f"{position_text}\n\n{confirmation_text}\n\n"
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
+    )
 
 
 class ConfirmationNotificationService:
@@ -1260,6 +1265,7 @@ class OrderedMutationService:
                 Operation.ENLIST,
                 Operation.CONFIRM,
                 Operation.UPDATE_CHARACTER_WISH,
+                Operation.UPDATE_CO_PLAYER_WISH,
                 Operation.CANCEL,
             }:
                 raise OperationNotAllowed("Игра больше не активна; запись и изменение данных недоступны.")
@@ -1519,6 +1525,18 @@ class OrderedMutationService:
             )
             await self.catalog.refresh(event)
             return MutationResult("Пожелания по персонажу обновлены")
+        if command.operation is Operation.UPDATE_CO_PLAYER_WISH:
+            if registration.attendance_status is AttendanceStatus.CANCELLED:
+                raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
+            assert isinstance(command.payload, CoPlayerWishPayload)
+            await self.catalog.registrations.update_co_player_wish(
+                event.event_id,
+                operation_id=command.operation_id,
+                participant_key=command.participant_key,
+                wish_play=command.payload.wish_play,
+            )
+            await self.catalog.refresh(event)
+            return MutationResult("Пожелания по соигрокам обновлены")
         if command.operation is Operation.CANCEL:
             await self._record_reserve_promotion(event, command, registration)
             await self._record_confirmed_link_promotion(event, command, registration)

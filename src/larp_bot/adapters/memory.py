@@ -473,6 +473,22 @@ class MemoryRegistrationRepository:
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
 
+    async def update_co_player_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        wish_play: str,
+    ) -> bool:
+        registration = self.rows[(event_id, participant_key)]
+        if registration.last_operation_id == operation_id:
+            return False
+        registration.wish_play = wish_play
+        registration.last_operation_id = operation_id
+        registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+        return True
+
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool:
         registration = self.rows[(event_id, participant_key)]
         if registration.last_operation_id == operation_id:

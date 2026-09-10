@@ -1488,6 +1488,36 @@ class YdbRegistrationRepository:
         )
         return True
 
+    async def update_co_player_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        wish_play: str,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
+            DECLARE $operation_id AS Utf8; DECLARE $wish_play AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET wish_play = $wish_play,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $participant_key
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$wish_play": wish_play,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool:
         await self.db.query(
             """

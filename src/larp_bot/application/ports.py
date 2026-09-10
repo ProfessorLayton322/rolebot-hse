@@ -186,6 +186,15 @@ class RegistrationRepository(Protocol):
         character_wish: str,
     ) -> bool: ...
 
+    async def update_co_player_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        wish_play: str,
+    ) -> bool: ...
+
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool: ...
 
     async def remove(self, event_id: str, *, participant_key: str) -> bool: ...

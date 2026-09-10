@@ -24,6 +24,7 @@ from larp_bot.domain.models import (
     BotIdentity,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
+    CoPlayerWishPayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -45,6 +46,7 @@ def command(
     event: Event,
     operation: Operation,
     payload: EnlistPayload
+    | CoPlayerWishPayload
     | CharacterWishPayload
     | ConfirmationDeadlinePayload
     | NotificationPayload
@@ -556,6 +558,51 @@ async def test_fifo_character_update_preserves_confirmed_state(disk_store: Memor
 
 
 @pytest.mark.asyncio
+async def test_co_player_wish_update_repaints_both_participant_tables(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    await mutations.apply(
+        command(event, Operation.ENLIST, EnlistPayload(display_name="Иванов Иван", wish_play="Без пожеланий"))
+    )
+    await mutations.apply(
+        command(
+            event,
+            Operation.ENLIST,
+            EnlistPayload(display_name="Петров Пётр", wish_play="Без пожеланий"),
+            key="b" * 43,
+        )
+    )
+
+    result = await mutations.apply(
+        command(event, Operation.UPDATE_CO_PLAYER_WISH, CoPlayerWishPayload(wish_play="Петров Пётр"))
+    )
+
+    registration = await tables.get(event.event_id, "a" * 43)
+    assert result.text == "Пожелания по соигрокам обновлены"
+    assert registration is not None
+    assert registration.wish_play == "Петров Пётр"
+    assert registration.attendance_status is AttendanceStatus.WAITING
+    refreshed_event = await events.get(event.event_id)
+    assert refreshed_event is not None and refreshed_event.public_table_resource_path is not None
+    for path in (event.disk_resource_path, refreshed_event.public_table_resource_path):
+        workbook = load_workbook(BytesIO(disk_store.files[path]))
+        try:
+            first_fill = workbook.active["B2"].fill
+            second_fill = workbook.active["B3"].fill
+            assert first_fill.fill_type == "solid"
+            assert second_fill.fill_type == "solid"
+            assert first_fill.fgColor.rgb == second_fill.fgColor.rgb
+        finally:
+            workbook.close()
+
+
+@pytest.mark.asyncio
 async def test_created_game_allows_enlist_but_rejects_confirmation_until_admin_opens_it(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
@@ -673,11 +720,12 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
         (Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")),
         (Operation.CANCEL, EmptyPayload()),
         (Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="Medic")),
+        (Operation.UPDATE_CO_PLAYER_WISH, CoPlayerWishPayload(wish_play="User B")),
     ],
 )
 async def test_archived_game_rejects_participant_mutations(
     operation: Operation,
-    payload: EnlistPayload | EmptyPayload | CharacterWishPayload,
+    payload: EnlistPayload | CoPlayerWishPayload | EmptyPayload | CharacterWishPayload,
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
