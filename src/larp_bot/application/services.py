@@ -449,6 +449,7 @@ class RegistrationService:
             Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
+            Operation.UNARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }
         if operation is Operation.REMOVE_PARTICIPANT:
@@ -1183,6 +1184,11 @@ class OrderedMutationService:
             return
         raise OperationNotAllowed("Только мастера этой игры и администраторы бота могут изменять её данные")
 
+    async def _require_admin(self, command: OrderedRegistrationCommand) -> None:
+        if self.admins is not None and await self.admins.is_admin(command.platform, command.platform_user_id):
+            return
+        raise OperationNotAllowed("Только администраторы бота могут разархивировать игры")
+
     async def _refresh_pass_table(self, event: Event) -> None:
         if event.pass_table_resource_path is None:
             return
@@ -1257,6 +1263,13 @@ class OrderedMutationService:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
                 return MutationResult("Игра уже отсутствует в постоянном списке")
             raise EventNotFound("Игра уже удалена или не существует")
+
+        if command.operation is Operation.UNARCHIVE_EVENT:
+            await self._require_admin(command)
+            if event.archived_at is None:
+                return MutationResult("Игра уже разархивирована")
+            await self.events.unarchive(event.event_id, datetime.now(UTC))
+            return MutationResult("Игра разархивирована; регистрация остаётся закрытой")
 
         if event.archived_at is not None:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:

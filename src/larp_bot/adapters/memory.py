@@ -195,6 +195,19 @@ class MemoryEventRepository:
         )
         return True
 
+    async def unarchive(self, event_id: str, updated_at: datetime) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.archived_at is None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "archived_at": None,
+                "updated_at": updated_at,
+            }
+        )
+        return True
+
     async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
         event = self.rows.get(event_id)
         if event is None or event.pass_table_public_url is not None:

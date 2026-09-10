@@ -73,6 +73,7 @@ def command(
                 Operation.REMOVE_WAITING_PARTICIPANTS,
                 Operation.CLOSE_EVENT,
                 Operation.ARCHIVE_EVENT,
+                Operation.UNARCHIVE_EVENT,
                 Operation.DELETE_EVENT,
             }
             else key
@@ -917,3 +918,58 @@ async def test_archive_operation_is_distinct_from_closing_registration(
     assert archived is not None and archived.archived_at is not None
     with pytest.raises(OperationNotAllowed, match="архивирована"):
         await mutations.apply(command(event, Operation.OPEN_REGISTRATION, EmptyPayload()))
+
+
+@pytest.mark.asyncio
+async def test_admin_can_unarchive_game_without_reopening_registration(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    archived_at = datetime(2026, 9, 1, tzinfo=UTC)
+    archived_event = event.model_copy(
+        update={
+            "status": EventStatus.CLOSED,
+            "archived_at": archived_at,
+            "updated_at": archived_at,
+        }
+    )
+    events = MemoryEventRepository([archived_event])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, MemoryRegistrationRepository(), YandexDiskShowcaseRepository(disk_store)),
+        admins=StaticAdminProvider(tg_ids={1}),
+    )
+    unarchive = command(archived_event, Operation.UNARCHIVE_EVENT, EmptyPayload())
+
+    result = await mutations.apply(unarchive)
+    repeated = await mutations.apply(unarchive)
+
+    stored = await events.get(event.event_id)
+    assert result.text == "Игра разархивирована; регистрация остаётся закрытой"
+    assert repeated.text == "Игра уже разархивирована"
+    assert stored is not None
+    assert stored.archived_at is None
+    assert stored.status is EventStatus.CLOSED
+    assert stored.updated_at > archived_at
+
+
+@pytest.mark.asyncio
+async def test_event_master_cannot_unarchive_without_admin_role(disk_store: MemoryDiskStore, event: Event) -> None:
+    archived_event = event.model_copy(
+        update={
+            "status": EventStatus.CLOSED,
+            "archived_at": datetime(2026, 9, 1, tzinfo=UTC),
+        }
+    )
+    events = MemoryEventRepository([archived_event])
+    await add_command_author_as_leader(events, archived_event)
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, MemoryRegistrationRepository(), YandexDiskShowcaseRepository(disk_store)),
+        admins=StaticAdminProvider(tg_gamemaster_ids={1}),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="Только администраторы"):
+        await mutations.apply(command(archived_event, Operation.UNARCHIVE_EVENT, EmptyPayload()))
+
+    stored = await events.get(event.event_id)
+    assert stored is not None and stored.archived_at is not None

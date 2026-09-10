@@ -115,6 +115,7 @@ ADD_SELF_EVENT_LEADER = "➕ Добавить себя мастером"
 REMOVE_EVENT_LEADER = "➖ Удалить мастера"
 LIST_EVENT_LEADERS = "📋 Список мастеров"
 ARCHIVE_GAME = "📦 Архивировать игру"
+UNARCHIVE_GAME = "📤 Разархивировать игру"
 LEGACY_DELETE_GAME = "🗑 Удалить игру"
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
@@ -178,6 +179,7 @@ ADMIN_ACTIONS = frozenset(
         REMOVE_EVENT_LEADER,
         LIST_EVENT_LEADERS,
         ARCHIVE_GAME,
+        UNARCHIVE_GAME,
         LEGACY_DELETE_GAME,
         "📋 Список игр",
     }
@@ -3033,9 +3035,12 @@ class ConversationEngine:
                     f"Управление игрой «{event.name}»\n\n"
                     f"Количество игроков: {event.player_amount}\n"
                     "Статус: Архивирована\n\n"
-                    "Архивная игра доступна только для просмотра."
+                    "Разархивируйте игру, чтобы вернуть её в список управления."
                 ),
-                buttons=[Button(label=BACK, value=ARCHIVED_GAMES)],
+                buttons=[
+                    Button(label=UNARCHIVE_GAME, value=f"ag:unarchive:{event.event_id}"),
+                    Button(label=BACK, value=ARCHIVED_GAMES),
+                ],
             )
         is_leader, is_admin = await asyncio.gather(
             self._is_event_leader(user, event.event_id),
@@ -3110,6 +3115,34 @@ class ConversationEngine:
             return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
         if action == "manage":
             return await self._game_management(user, event)
+        if action == "unarchive":
+            if not await self._is_admin(user):
+                await self._clear(user)
+                return BotResponse(text="Недостаточно прав.")
+            if event.archived_at is None:
+                return BotResponse(
+                    text=f"Игра «{event.name}» уже разархивирована.",
+                    buttons=[game_management_button(event.event_id)],
+                )
+            await self._clear(user)
+            await self.registrations.enqueue(
+                operation=Operation.UNARCHIVE_EVENT,
+                event_id=event.event_id,
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=EmptyPayload(),
+                reply_context=ReplyContext(
+                    text_success=f"📤 Игра «{event.name}» разархивирована. Регистрация остаётся закрытой.",
+                    buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                ),
+                idempotency_key=f"{message.update_id}:{Operation.UNARCHIVE_EVENT.value}",
+            )
+            return BotResponse(
+                text="⏳ Разархивация принята в обработку.",
+                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                deferred=True,
+                command_enqueued=True,
+            )
         if event.archived_at is not None:
             return BotResponse(
                 text=f"Игра «{event.name}» уже архивирована.",
