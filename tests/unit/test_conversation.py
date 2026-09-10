@@ -542,6 +542,29 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
 
 
 @pytest.mark.asyncio
+async def test_vk_start_message_matches_slash_start_greeting(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+
+    def vk(update: int, value: str) -> InboundMessage:
+        return InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id=str(update),
+            text=value,
+            peer_id=7,
+        )
+
+    slash_start = await engine.handle(vk(1, "/start"))
+    await engine.handle(vk(2, PROFILE))
+    vk_start = await engine.handle(vk(3, "Начать"))
+    saved = await users.get(Platform.VK, 7)
+
+    assert vk_start == slash_start
+    assert saved is not None and saved.dialog_state == "IDLE"
+    assert saved.dialog_context == {}
+    assert not publisher.commands
+
+
+@pytest.mark.asyncio
 async def test_every_free_text_state_rejects_a_button_absent_from_the_last_bot_message(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:

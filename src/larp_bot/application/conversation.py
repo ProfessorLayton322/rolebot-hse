@@ -471,7 +471,7 @@ class ConversationEngine:
             )
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
-        if value == "/start":
+        if value == "/start" or (platform is Platform.VK and value == "Начать"):
             await self._clear(user)
             response = await self._main(user, WELCOME_TEXT)
         elif message.has_unsupported_content:
