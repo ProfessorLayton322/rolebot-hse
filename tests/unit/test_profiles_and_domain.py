@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -12,8 +14,11 @@ from larp_bot.domain.models import (
     Registration,
     TelegramUser,
     VkUser,
+    event_reference,
+    format_game_date,
     normalize_telegram_profile,
     parse_full_name,
+    parse_game_date,
     surname_and_name,
 )
 
@@ -123,6 +128,17 @@ def test_event_has_exactly_three_states_and_starts_before_confirmation() -> None
     assert event.player_amount > 0
     with pytest.raises(ValidationError):
         event.player_amount = 0
+
+
+def test_game_date_uses_strict_two_digit_russian_format() -> None:
+    parsed = parse_game_date("14.11.26")
+
+    assert parsed == date(2026, 11, 14)
+    assert format_game_date(parsed) == "14.11.26"
+    assert event_reference("Лесной предел", parsed) == "«Лесной предел» (14.11.26)"
+    for invalid in ("14.11.2026", "1.11.26", "31.02.26"):
+        with pytest.raises(ValueError):
+            parse_game_date(invalid)
 
 
 @pytest.mark.parametrize("value", [0, 10_001])

@@ -78,7 +78,8 @@ class OrderedWorker:
             envelopes.sort(key=lambda envelope: envelope.command.operation is Operation.SYNC_PROFILE)
             for raw in envelopes:
                 command = raw.command
-                if command.event_id in failed_groups:
+                group_id = command.queue_group_id
+                if group_id in failed_groups:
                     continue
                 notification_delivered = False
                 # Profile projections are background maintenance. Keep stale
@@ -130,6 +131,15 @@ class OrderedWorker:
                             text,
                             command.reply_context.buttons,
                         )
+                        if result.replaced_event_id is not None:
+                            await self.notifications.notify_reserve_promotion(
+                                command,
+                                event_id=result.replaced_event_id,
+                            )
+                            await self.notifications.notify_confirmed_link_promotion(
+                                command,
+                                event_id=result.replaced_event_id,
+                            )
                         notification_delivered = True
                     elif notifications_enabled and command.operation in {
                         Operation.CANCEL,
@@ -151,7 +161,7 @@ class OrderedWorker:
                     # Keep this command and every later command in the same FIFO
                     # group retryable, but continue draining independent groups.
                     # Re-raise after the drain so the kick itself is retried too.
-                    failed_groups.add(command.event_id)
+                    failed_groups.add(group_id)
                     if retryable_error is None:
                         retryable_error = exc
                     LOGGER.exception(

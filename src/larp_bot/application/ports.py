@@ -177,6 +177,8 @@ class RegistrationRepository(Protocol):
         operation_id: str,
         participant_key: str,
         character_wish: str,
+        replaced_event_id: str | None = None,
+        replaced_participant_key: str | None = None,
     ) -> bool: ...
 
     async def update_character_wish(

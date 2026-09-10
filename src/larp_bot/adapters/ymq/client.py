@@ -28,7 +28,7 @@ class YmqCommandPublisher:
             self.sqs.send_message,
             QueueUrl=self.fifo_url,
             MessageBody=body,
-            MessageGroupId=command.event_id,
+            MessageGroupId=command.queue_group_id,
             MessageDeduplicationId=command.operation_id,
         )
         # A failed kick makes the HTTP attempt fail; the platform retry re-emits a kick while

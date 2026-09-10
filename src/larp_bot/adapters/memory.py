@@ -460,9 +460,18 @@ class MemoryRegistrationRepository:
         operation_id: str,
         participant_key: str,
         character_wish: str,
+        replaced_event_id: str | None = None,
+        replaced_participant_key: str | None = None,
     ) -> bool:
+        if (replaced_event_id is None) != (replaced_participant_key is None):
+            raise ValueError("replacement event and participant key must be supplied together")
+        if replaced_event_id == event_id:
+            raise ValueError("replacement event must differ from the confirmed event")
         registration = self.rows[(event_id, participant_key)]
-        if registration.last_operation_id == operation_id:
+        already_applied = registration.last_operation_id == operation_id
+        if replaced_event_id is not None and replaced_participant_key is not None:
+            self.rows.pop((replaced_event_id, replaced_participant_key), None)
+        if already_applied:
             return False
         registration.character_wish = character_wish
         registration.attendance_status = AttendanceStatus.CONFIRMED

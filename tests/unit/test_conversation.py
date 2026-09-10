@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 
 import pytest
@@ -77,6 +77,7 @@ from larp_bot.domain.models import (
     AttendanceStatus,
     BotIdentity,
     Button,
+    CharacterWishPayload,
     ConfirmationDeadlinePayload,
     CoPlayerWishPayload,
     EnlistPayload,
@@ -484,6 +485,104 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     command = publisher.commands[-1]
     assert command.operation is Operation.CONFIRM
     assert command.reply_context.text_success == ""
+
+
+@pytest.mark.asyncio
+async def test_signup_wish_prompt_warns_about_another_registration_on_the_same_day(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    game_date = date(2026, 11, 14)
+    event.game_date = game_date
+    other = event.model_copy(
+        update={
+            "event_id": "event-b1",
+            "name": "Другая игра",
+            "disk_resource_path": "disk:/larp-bot/events/event-b1-other.xlsx",
+            "public_registration_url": "https://disk.example/public/other",
+        }
+    )
+    engine, _, _, tables = await engine_setup(disk_store, event, other)
+    other_key = engine.registrations.key(Platform.TELEGRAM, 1, other.event_id)
+    await tables.enlist(
+        other.event_id,
+        operation_id="other-enlist",
+        participant_key=other_key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+    )
+
+    prompt = await engine.handle(inbound(1, f"select:enlist:{event.event_id}", callback=True))
+
+    assert prompt.text.startswith(
+        "Важно: вы уже записаны на другую игру, которая проводится 14.11.26. "
+        "Вы сможете подтвердить своё участие только в одной игре, когда решите, "
+        "в какую именно хотите играть.\n\nЕсть ли игроки"
+    )
+
+
+@pytest.mark.asyncio
+async def test_same_day_confirmation_requires_replacement_consent_before_character_wishes(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.game_date = date(2026, 11, 14)
+    other = event.model_copy(
+        update={
+            "event_id": "event-b1",
+            "name": "Другая игра",
+            "disk_resource_path": "disk:/larp-bot/events/event-b1-other.xlsx",
+            "public_registration_url": "https://disk.example/public/other",
+        }
+    )
+    engine, users, publisher, tables = await engine_setup(disk_store, event, other)
+    target_key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    other_key = engine.registrations.key(Platform.TELEGRAM, 1, other.event_id)
+    for selected_event, key, operation_id in (
+        (event, target_key, "target-enlist"),
+        (other, other_key, "other-enlist"),
+    ):
+        await tables.enlist(
+            selected_event.event_id,
+            operation_id=operation_id,
+            participant_key=key,
+            display_name="Иван Иванов",
+            wish_play="Без пожеланий",
+        )
+    await tables.confirm(
+        other.event_id,
+        operation_id="other-confirm",
+        participant_key=other_key,
+        character_wish="Врач",
+    )
+
+    replacement = await engine.handle(inbound(1, f"select:confirm:{event.event_id}", callback=True))
+
+    assert replacement.text == (
+        "Вы уже подтвердили своё участие в игре «Другая игра», которая проводится 14.11.26. "
+        "Чтобы подтвердить своё участие в «Лесной предел» вам придётся отменить своё участие "
+        "в «Другая игра». Вы уверены, что хотите это сделать?"
+    )
+    assert [button.label for button in replacement.buttons] == [
+        "Да, я хочу участвовать в другой игре",
+        "Нет, не хочу ничего менять",
+    ]
+    saved = await users.get(Platform.TELEGRAM, 1)
+    assert saved is not None and saved.dialog_state == "CONFIRM_REPLACE"
+    assert not publisher.commands
+
+    wishes = await engine.handle(inbound(2, "confirm:replace:yes", callback=True))
+    assert "пожелания по персонажу" in wishes.text.casefold()
+    queued = await engine.handle(inbound(3, "Детектив"))
+
+    assert queued.deferred
+    command = publisher.commands[-1]
+    assert command.operation is Operation.CONFIRM
+    assert command.queue_group_id == "confirmation:telegram:1"
+    assert command.payload == CharacterWishPayload(
+        character_wish="Детектив",
+        replaced_event_id=other.event_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -1807,14 +1906,19 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
     prompt = await engine.handle(inbound(1, "➕ Создать игру"))
     assert prompt.text == "Введите название игры:"
     amount_prompt = await engine.handle(inbound(2, "Бал в зимнем дворце"))
+    assert amount_prompt.text == "Введите дату игры строго в формате DD.MM.YY:"
+    invalid_date = await engine.handle(inbound(3, "31.02.26"))
+    assert invalid_date.text == "Введите корректную дату игры строго в формате DD.MM.YY:"
+    amount_prompt = await engine.handle(inbound(4, "14.11.26"))
     assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
-    invalid = await engine.handle(inbound(3, "много"))
+    invalid = await engine.handle(inbound(5, "много"))
     assert invalid.text == "Введите целое количество игроков от 1 до 10000:"
-    response = await engine.handle(inbound(4, "24"))
+    response = await engine.handle(inbound(6, "24"))
 
     created_events = await engine.events.list_page(limit=10)
     created = next(candidate for candidate in created_events if candidate.name == "Бал в зимнем дворце")
     assert created.master_table_resource_path.endswith("/master_table_Бал в зимнем дворце.xlsx")
+    assert created.game_date == date(2026, 11, 14)
     assert created.player_amount == 24
     assert created.public_table_resource_path is not None
     assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
@@ -1830,9 +1934,11 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)
     ]
 
-    management = await engine.handle(inbound(5, response.buttons[0].value, callback=True))
+    assert "Дата игры: 14.11.26" in response.text
+    management = await engine.handle(inbound(7, response.buttons[0].value, callback=True))
+    assert "Управление игрой «Бал в зимнем дворце» (14.11.26)" in management.text
     assert EVENT_TABLES in [button.label for button in management.buttons]
-    tables = await engine.handle(inbound(6, f"ag:tables:{created.event_id}", callback=True))
+    tables = await engine.handle(inbound(8, f"ag:tables:{created.event_id}", callback=True))
     assert tables.text.count("https://disk.example/public/") == 3
     assert MASTER_TABLE_DISCLAIMER in tables.text
     assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
@@ -1852,7 +1958,8 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
 
     await engine.handle(inbound(1, "➕ Создать игру"))
     await engine.handle(inbound(2, "Новая игра"))
-    await engine.handle(inbound(3, "20"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
 
     created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
     leaders = await engine.events.list_leaders(created.event_id)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -567,6 +567,7 @@ async def test_statistics_actions_are_denied_to_moderators_even_with_forged_call
 
 
 async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(event: Event) -> None:
+    event.game_date = date(2026, 11, 14)
     engine, users, publisher, registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
     admin = await users.get(Platform.TELEGRAM, 1)
     assert admin is not None
@@ -638,12 +639,14 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
     assert current["A6"].value == "Всего"
     assert current["N4"].value == 1
     assert current["N5"].value == 1
+    assert current["N1"].value == "Лесной предел (14.11.26)"
     master_file = drive.files[MASTER_STATISTICS_FILE_NAME]
     master_sheet = sheet(drive.contents[master_file.file_id])
     assert master_sheet["A4"].value == "Иван Иванов"
     assert master_sheet["A5"].value == "Второй Игрок"
     assert master_sheet["M4"].value == 1
     assert master_sheet["M5"].value == 1
+    assert master_sheet["M1"].value == "Лесной предел (14.11.26)"
     experienced_admin = await users.get(Platform.TELEGRAM, 1)
     experienced_vk = await users.get(Platform.VK, 7)
     assert experienced_admin is not None and experienced_admin.larp_experience is True

@@ -21,6 +21,8 @@ from larp_bot.domain.models import (
     StatisticsPayload,
     TelegramUser,
     User,
+    event_name_with_date,
+    event_reference,
     surname_and_name,
 )
 from larp_bot.domain.security import participant_key
@@ -150,12 +152,13 @@ class StatisticsService:
 
         validate_names(players, "подтвердивших игроков")
         validate_names(masters, "мастеров игры")
+        statistics_game_name = event_name_with_date(event.name, event.game_date)
 
         def player_transform(book: StatisticsWorkbook) -> bytes | None:
-            return book.add_game(season_year, event.name, players)
+            return book.add_game(season_year, statistics_game_name, players)
 
         def master_transform(book: StatisticsWorkbook) -> bytes | None:
-            return book.add_game(season_year, event.name, masters)
+            return book.add_game(season_year, statistics_game_name, masters)
 
         # Fully parse and stage both revisions before replacing either Drive file.
         # A partial upload is retry-safe because each workbook independently rejects
@@ -170,5 +173,8 @@ class StatisticsService:
             command.operation_id,
         )
         if not player_changed and not master_changed:
-            return f"Игра «{event.name}» уже есть в статистике. Таблицы не изменены."
-        return f"Игра «{event.name}» внесена в статистику сезона {season_year}-{season_year + 1}."
+            return f"Игра {event_reference(event.name, event.game_date)} уже есть в статистике. Таблицы не изменены."
+        return (
+            f"Игра {event_reference(event.name, event.game_date)} внесена в статистику сезона "
+            f"{season_year}-{season_year + 1}."
+        )
