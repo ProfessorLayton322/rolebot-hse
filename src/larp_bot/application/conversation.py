@@ -330,7 +330,10 @@ def confirmation_replacement_prompt(event: Event, replaced_event: Event) -> BotR
             "Вы уверены, что хотите это сделать?"
         ),
         buttons=[
-            Button(label="Да, я хочу участвовать в другой игре", value="confirm:replace:yes"),
+            Button(
+                label="Да, я хочу участвовать в этой игре, а не в другой",
+                value="confirm:replace:yes",
+            ),
             dialog_exit_button(label="Нет, не хочу ничего менять"),
         ],
     )
@@ -1041,11 +1044,21 @@ class ConversationEngine:
                 buttons=[Button(label=PROFILE, value=PROFILE)],
             )
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        event_statuses = REGISTRATION_OPEN_STATUSES if flow == "cancel" else None
-        archived = False if flow in {"cancel", "wishes"} else None
-        registration_statuses = (
-            frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}) if flow in {"cancel", "wishes"} else None
-        )
+        event_statuses: frozenset[EventStatus] | None
+        archived: bool | None
+        registration_statuses: frozenset[AttendanceStatus] | None
+        if flow == "confirm":
+            event_statuses = frozenset({EventStatus.CONFIRMATION_OPEN})
+            archived = False
+            registration_statuses = frozenset({AttendanceStatus.WAITING})
+        else:
+            event_statuses = REGISTRATION_OPEN_STATUSES if flow == "cancel" else None
+            archived = False if flow in {"cancel", "wishes"} else None
+            registration_statuses = (
+                frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED})
+                if flow in {"cancel", "wishes"}
+                else None
+            )
         page = await self.registrations.registered_games_page(
             platform,
             user_id(user),
@@ -1058,14 +1071,7 @@ class ConversationEngine:
         )
         matches = page.rows
         actionable_matches = matches
-        if flow == "confirm":
-            actionable_matches = [
-                item
-                for item in matches
-                if item[0].status is EventStatus.CONFIRMATION_OPEN
-                and item[1].attendance_status is not AttendanceStatus.CANCELLED
-            ]
-        elif flow == "cancel":
+        if flow == "cancel":
             actionable_matches = [
                 item for item in matches if item[0].archived_at is None and item[0].status is not EventStatus.CLOSED
             ]
@@ -1094,15 +1100,19 @@ class ConversationEngine:
             )
         )
         if not matches and not page.has_previous and not page.has_next:
-            return BotResponse(text=_no_games_for_action_text(flow), buttons=buttons)
-        if flow == "confirm" and not actionable_matches:
-            unavailable_text = _no_games_for_action_text(flow)
-            if any(registration.attendance_status is AttendanceStatus.CANCELLED for _, registration in matches):
-                unavailable_text += " Если вы отменили участие, сначала запишитесь на игру снова."
-            return BotResponse(
-                text=unavailable_text,
-                buttons=buttons,
-            )
+            empty_text = _no_games_for_action_text(flow)
+            if flow == "confirm":
+                cancelled_page = await self.registrations.registered_games_page(
+                    platform,
+                    user_id(user),
+                    statuses=frozenset({EventStatus.CONFIRMATION_OPEN}),
+                    archived=False,
+                    registration_statuses=frozenset({AttendanceStatus.CANCELLED}),
+                    event_limit=1,
+                )
+                if cancelled_page.rows:
+                    empty_text += " Если вы отменили участие, сначала запишитесь на игру снова."
+            return BotResponse(text=empty_text, buttons=buttons)
         if flow in {"cancel", "character", "wishes"} and not actionable_matches:
             return BotResponse(text=_no_games_for_action_text(flow), buttons=buttons)
         return BotResponse(text=_player_game_picker_text(flow), buttons=buttons)
