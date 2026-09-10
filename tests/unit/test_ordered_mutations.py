@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from io import BytesIO
 from uuid import uuid4
 
@@ -483,6 +483,85 @@ async def test_active_registration_rejects_a_new_enlist_operation(
         await mutations.apply(
             command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="Changed"))
         )
+
+
+@pytest.mark.asyncio
+async def test_same_day_confirmation_requires_consent_and_atomically_replaces_registration(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.game_date = date(2026, 11, 14)
+    replaced_event = event.model_copy(
+        update={
+            "event_id": "event-b1",
+            "name": "Другая игра",
+            "disk_resource_path": "disk:/larp-bot/events/event-b1-other.xlsx",
+            "public_registration_url": "https://disk.example/public/other",
+        }
+    )
+    target_key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    replaced_key = participant_key(secret, Platform.TELEGRAM, 1, replaced_event.event_id)
+    target_registration = Registration(
+        event_id=event.event_id,
+        participant_key=target_key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+    )
+    replaced_registration = Registration(
+        event_id=replaced_event.event_id,
+        participant_key=replaced_key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+        character_wish="Врач",
+        attendance_status=AttendanceStatus.CONFIRMED,
+    )
+    events = MemoryEventRepository([event, replaced_event])
+    tables = MemoryRegistrationRepository([target_registration, replaced_registration])
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, [target_registration])
+    await showcase.create_event_workbook(replaced_event.disk_resource_path, [replaced_registration])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        participant_secret=secret,
+    )
+
+    without_consent = command(
+        event,
+        Operation.CONFIRM,
+        CharacterWishPayload(character_wish="Детектив"),
+        key=target_key,
+    )
+    with pytest.raises(OperationNotAllowed, match="подтвердили участие в другой игре"):
+        await mutations.apply(without_consent)
+    assert await tables.get(replaced_event.event_id, replaced_key) == replaced_registration
+
+    switch = command(
+        event,
+        Operation.CONFIRM,
+        CharacterWishPayload(
+            character_wish="Детектив",
+            replaced_event_id=replaced_event.event_id,
+        ),
+        key=target_key,
+    )
+    result = await mutations.apply(switch)
+    await mutations.apply(switch)
+
+    confirmed = await tables.get(event.event_id, target_key)
+    assert confirmed is not None
+    assert confirmed.attendance_status is AttendanceStatus.CONFIRMED
+    assert confirmed.character_wish == "Детектив"
+    assert await tables.get(replaced_event.event_id, replaced_key) is None
+    assert result.replaced_event_id == replaced_event.event_id
+    old_workbook = load_workbook(BytesIO(disk_store.files[replaced_event.disk_resource_path]))
+    try:
+        assert "Иван Иванов" not in {
+            old_workbook.active.cell(row, 2).value for row in range(2, old_workbook.active.max_row + 1)
+        }
+    finally:
+        old_workbook.close()
 
 
 @pytest.mark.asyncio

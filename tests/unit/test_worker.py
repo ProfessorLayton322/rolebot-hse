@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from typing import cast
 from uuid import uuid4
@@ -759,6 +759,17 @@ def test_arbitrary_or_non_chat_messages_get_broadcast_disclaimer(value: str) -> 
     assert not is_plain_chat_link(value)
     assert (
         confirmed_notification_text("Лесной предел", value) == f"Сообщение от мастеров игры «Лесной предел»:\n\n{value}"
+    )
+
+
+def test_game_date_follows_the_name_in_confirmed_player_notifications() -> None:
+    assert (
+        confirmed_notification_text(
+            "Лесной предел",
+            "Сбор в 18:30",
+            date(2026, 11, 14),
+        )
+        == "Сообщение от мастеров игры «Лесной предел» (14.11.26):\n\nСбор в 18:30"
     )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -14,6 +14,30 @@ def utc_now() -> datetime:
 
 DEFAULT_PLAYER_AMOUNT = 30
 MAX_PLAYER_AMOUNT = 10_000
+
+
+def format_game_date(value: date) -> str:
+    return value.strftime("%d.%m.%y")
+
+
+def parse_game_date(value: str) -> date:
+    match = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{2})", value.strip())
+    if match is None:
+        raise ValueError("date must use DD.MM.YY")
+    day, month, year = map(int, match.groups())
+    try:
+        return date(2000 + year, month, day)
+    except ValueError:
+        raise ValueError("date is not a valid calendar day") from None
+
+
+def event_name_with_date(name: str, game_date: date | None) -> str:
+    return f"{name} ({format_game_date(game_date)})" if game_date is not None else name
+
+
+def event_reference(name: str, game_date: date | None) -> str:
+    suffix = f" ({format_game_date(game_date)})" if game_date is not None else ""
+    return f"«{name}»{suffix}"
 
 
 class StrictModel(BaseModel):
@@ -324,6 +348,10 @@ User = TelegramUser | VkUser
 class Event(StrictModel):
     event_id: str = Field(min_length=8, max_length=80, pattern=r"^[a-z0-9-]+$")
     name: str = Field(min_length=1, max_length=200)
+    # The nullable storage column deliberately leaves every pre-rollout,
+    # archived game without an invented date. The creation dialogue requires
+    # this field for all new games.
+    game_date: date | None = None
     # Existing events predate the capacity field. They retain a conservative
     # default while every newly created game must collect an explicit value.
     player_amount: int = Field(default=DEFAULT_PLAYER_AMOUNT, ge=1, le=MAX_PLAYER_AMOUNT)
@@ -399,6 +427,7 @@ class EnlistPayload(StrictModel):
     crossplay: bool | None = None
     vk_profile: str = ""
     telegram_profile: str | None = None
+    same_day_warning_shown: bool = False
 
 
 class CoPlayerWishPayload(StrictModel):
@@ -415,6 +444,10 @@ class CoPlayerWishPayload(StrictModel):
 
 class CharacterWishPayload(StrictModel):
     character_wish: str = Field(min_length=1, max_length=5000)
+    # Optional so confirmation commands already waiting in FIFO remain valid
+    # during rollout. New switch confirmations identify the same-day game whose
+    # registration must be removed.
+    replaced_event_id: str | None = None
 
     @field_validator("character_wish")
     @classmethod
@@ -511,6 +544,15 @@ class OrderedRegistrationCommand(StrictModel):
     payload: CommandPayload = Field(default_factory=EmptyPayload)
     reply_context: ReplyContext = Field(default_factory=ReplyContext)
     created_at: datetime = Field(default_factory=utc_now)
+
+    @property
+    def queue_group_id(self) -> str:
+        # Confirmation decisions span games, so serialize them per player
+        # instead of independently per event. Other mutations retain their
+        # established per-event ordering.
+        if self.operation is Operation.CONFIRM:
+            return f"confirmation:{self.platform.value}:{self.platform_user_id}"
+        return self.event_id
 
     @model_validator(mode="after")
     def validate_shape(self) -> OrderedRegistrationCommand:

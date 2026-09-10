@@ -5,7 +5,7 @@ import logging
 import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -32,6 +32,8 @@ from larp_bot.domain.models import (
     ReplyContext,
     TelegramUser,
     User,
+    event_reference,
+    format_game_date,
     surname_and_name,
 )
 from larp_bot.domain.security import participant_key
@@ -67,8 +69,19 @@ class OperationNotAllowed(DomainError):
     pass
 
 
-def closed_game_cancellation_message(event_name: str) -> str:
-    return f"Регистрация на игру «{event_name}» закрыта, и состав зафиксирован. Отменить участие через бота уже нельзя."
+def closed_game_cancellation_message(event_name: str, game_date: date | None = None) -> str:
+    return (
+        f"Регистрация на игру {event_reference(event_name, game_date)} закрыта, и состав зафиксирован. "
+        "Отменить участие через бота уже нельзя."
+    )
+
+
+def same_day_signup_warning(game_date: date) -> str:
+    return (
+        "Важно: вы уже записаны на другую игру, которая проводится "
+        f"{format_game_date(game_date)}. Вы сможете подтвердить своё участие только "
+        "в одной игре, когда решите, в какую именно хотите играть."
+    )
 
 
 @dataclass(frozen=True)
@@ -76,6 +89,7 @@ class MutationResult:
     text: str
     notifications_enabled: bool = True
     buttons: tuple[Button, ...] | None = None
+    replaced_event_id: str | None = None
 
 
 def event_slug(name: str) -> str:
@@ -221,6 +235,51 @@ class RegisteredGamesPage:
     has_next: bool
 
 
+async def player_registrations_on_date(
+    events: EventRepository,
+    catalog: RegistrationCatalog,
+    participant_secret: str,
+    platform: Platform,
+    user_id: int,
+    game_date: date,
+    *,
+    statuses: Collection[AttendanceStatus],
+    exclude_event_id: str | None = None,
+) -> list[tuple[Event, Registration]]:
+    """Find a player's active registrations on one game date.
+
+    Events are paged because the YDB repository deliberately caps list queries
+    at ten rows. Archived legacy games have no date and never enter this scan.
+    """
+
+    accepted = set(statuses)
+    after: tuple[datetime, str] | None = None
+    matches: list[tuple[Event, Registration]] = []
+    while True:
+        page = list(await events.list_page(after=after, archived=False, limit=10))
+        if not page:
+            return matches
+        dated_events = [event for event in page if event.game_date == game_date and event.event_id != exclude_event_id]
+        registrations = await asyncio.gather(
+            *(
+                catalog.get(
+                    event,
+                    participant_key(participant_secret, platform, user_id, event.event_id),
+                )
+                for event in dated_events
+            )
+        )
+        matches.extend(
+            (event, registration)
+            for event, registration in zip(dated_events, registrations, strict=True)
+            if registration is not None and registration.attendance_status in accepted
+        )
+        if len(page) < 10:
+            return matches
+        last = page[-1]
+        after = (last.created_at, last.event_id)
+
+
 class RegistrationService:
     def __init__(
         self,
@@ -277,6 +336,26 @@ class RegistrationService:
     async def get_registration(self, event_id: str, platform: Platform, user_id: int) -> Registration | None:
         event = await self._event(event_id)
         return await self.catalog.get(event, self.key(platform, user_id, event_id))
+
+    async def registrations_on_date(
+        self,
+        platform: Platform,
+        user_id: int,
+        game_date: date,
+        *,
+        statuses: Collection[AttendanceStatus],
+        exclude_event_id: str | None = None,
+    ) -> list[tuple[Event, Registration]]:
+        return await player_registrations_on_date(
+            self.events,
+            self.catalog,
+            self.participant_secret,
+            platform,
+            user_id,
+            game_date,
+            statuses=statuses,
+            exclude_event_id=exclude_event_id,
+        )
 
     async def registered_games_page(
         self,
@@ -438,7 +517,7 @@ class RegistrationService:
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
         if operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed(closed_game_cancellation_message(event.name))
+            raise OperationNotAllowed(closed_game_cancellation_message(event.name, event.game_date))
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
@@ -519,7 +598,13 @@ class EventAdministrationService:
         self.users = users
         self.participant_secret = participant_secret
 
-    async def create_event(self, name: str, player_amount: int, leaders: Sequence[BotIdentity]) -> Event:
+    async def create_event(
+        self,
+        name: str,
+        game_date: date,
+        player_amount: int,
+        leaders: Sequence[BotIdentity],
+    ) -> Event:
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Название игры не может быть пустым")
@@ -538,6 +623,7 @@ class EventAdministrationService:
             event = Event(
                 event_id=event_id,
                 name=clean_name,
+                game_date=game_date,
                 player_amount=player_amount,
                 disk_resource_path=master_path,
                 public_registration_url=master_url,
@@ -764,11 +850,12 @@ def is_plain_chat_link(value: str) -> bool:
     return host in {"vk.me", "www.vk.me"} and bool(_VK_CHAT_PATH_RE.fullmatch(parsed.path))
 
 
-def confirmed_notification_text(event_name: str, message: str) -> str:
+def confirmed_notification_text(event_name: str, message: str, game_date: date | None = None) -> str:
     clean_message = message.strip()
+    reference = event_reference(event_name, game_date)
     if not is_plain_chat_link(clean_message):
-        return f"Сообщение от мастеров игры «{event_name}»:\n\n{clean_message}"
-    return f"Вы в основном составе игры «{event_name}». Вступите в чат: {clean_message}"
+        return f"Сообщение от мастеров игры {reference}:\n\n{clean_message}"
+    return f"Вы в основном составе игры {reference}. Вступите в чат: {clean_message}"
 
 
 def _active_main_roster(registrations: Sequence[Registration], player_amount: int) -> list[Registration]:
@@ -784,19 +871,19 @@ def _active_main_roster(registrations: Sequence[Registration], player_amount: in
 def confirmation_success_text(event: Event, character_wish: str, *, in_main_roster: bool) -> str:
     link_text = "Мастера скоро отправят вам ссылку на чат игры!\n\n" if in_main_roster else ""
     return (
-        f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
+        f"✅ Участие в игре {event_reference(event.name, event.game_date)} подтверждено.\n\n"
         f"{link_text}"
         f"Пожелания по персонажу:\n{character_wish}\n\n"
         "Позже их можно изменить через «🎭 Пожелания по игре»."
     )
 
 
-def enlistment_success_text(event: Event, queue_position: int) -> str:
+def enlistment_success_text(event: Event, queue_position: int, *, same_day_warning: bool = False) -> str:
     if event.public_table_public_url is None:
         raise RuntimeError("public game table is not initialized")
     if queue_position <= event.player_amount:
         position_text = (
-            f"Вы записались на игру «{event.name}»!\n\n"
+            f"Вы записались на игру {event_reference(event.name, event.game_date)}!\n\n"
             "Сейчас вы в основном составе.\n\n"
             "Актуальный список записавшихся и состав можно посмотреть здесь: "
             f"{event.public_table_public_url}"
@@ -804,7 +891,7 @@ def enlistment_success_text(event: Event, queue_position: int) -> str:
     else:
         cancellations_needed = queue_position - event.player_amount
         position_text = (
-            f"Вы записались на игру «{event.name}»!\n\n"
+            f"Вы записались на игру {event_reference(event.name, event.game_date)}!\n\n"
             f"Сейчас вы в запасе. Перед вами: {cancellations_needed}.\n\n"
             "Если вы перейдёте в основной состав, бот сообщит об этом отдельным сообщением.\n\n"
             "Актуальный список записавшихся и состав можно посмотреть здесь: "
@@ -822,10 +909,13 @@ def enlistment_success_text(event: Event, queue_position: int) -> str:
             "Подтверждение участия пока не открыто. Мы обязательно пришлём вам уведомление, "
             "когда можно будет подтвердиться."
         )
-    return (
+    text = (
         f"{position_text}\n\n{confirmation_text}\n\n"
         "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
     )
+    if same_day_warning and event.game_date is not None:
+        return f"{text}\n\n{same_day_signup_warning(event.game_date)}"
+    return text
 
 
 class ConfirmationNotificationService:
@@ -900,7 +990,7 @@ class ConfirmationNotificationService:
             raise EventNotFound("Игра не найдена")
         if command.operation is Operation.SEND_CONFIRMED_NOTIFICATION:
             assert isinstance(command.payload, NotificationPayload)
-            text = confirmed_notification_text(event.name, command.payload.text)
+            text = confirmed_notification_text(event.name, command.payload.text, event.game_date)
             attendance_status = AttendanceStatus.CONFIRMED
             main_roster_only = is_plain_chat_link(command.payload.text)
             buttons = [main_menu_button()]
@@ -908,10 +998,11 @@ class ConfirmationNotificationService:
             if event.confirmation_deadline is None:
                 raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
             deadline = format_confirmation_deadline(event.confirmation_deadline)
+            reference = event_reference(event.name, event.game_date)
             if command.operation is Operation.OPEN_CONFIRMATION:
-                text = f"Подтверждение участия в игре «{event.name}» открыто! Подтвердите участие до {deadline} (мск)."
+                text = f"Подтверждение участия в игре {reference} открыто! Подтвердите участие до {deadline} (мск)."
             else:
-                text = f"Напоминаем: подтвердите участие в игре «{event.name}» до {deadline} (мск)."
+                text = f"Напоминаем: подтвердите участие в игре {reference} до {deadline} (мск)."
             attendance_status = AttendanceStatus.WAITING
             main_roster_only = False
             buttons = [confirmation_button(event.event_id)]
@@ -978,7 +1069,7 @@ class ConfirmationNotificationService:
                 platform=command.platform,
                 user_id=command.platform_user_id,
                 request_id=f"{command.operation_id}:past-confirmed-notification:{index}",
-                text=confirmed_notification_text(event.name, stored_text),
+                text=confirmed_notification_text(event.name, stored_text, event.game_date),
                 buttons=[main_menu_button()],
             )
         # One command-level marker is written only after the complete bundle is
@@ -992,12 +1083,17 @@ class ConfirmationNotificationService:
         )
         return len(delivered_notifications)
 
-    async def notify_reserve_promotion(self, command: OrderedRegistrationCommand) -> int:
+    async def notify_reserve_promotion(
+        self,
+        command: OrderedRegistrationCommand,
+        *,
+        event_id: str | None = None,
+    ) -> int:
         """Notify the one reserve player promoted by this roster mutation."""
 
-        if command.operation not in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+        if command.operation not in {Operation.CANCEL, Operation.CONFIRM, Operation.REMOVE_PARTICIPANT}:
             raise ValueError("command does not promote a reserve participant")
-        event = await self.events.get(command.event_id)
+        event = await self.events.get(event_id or command.event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
         if event.last_reserve_promotion_operation_id != command.operation_id:
@@ -1029,7 +1125,8 @@ class ConfirmationNotificationService:
             user_id=recipient.user_id,
             request_id=request_id,
             text=(
-                f"Место освободилось: вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+                "Место освободилось: вы перешли из запаса в основной состав игры "
+                f"{event_reference(event.name, event.game_date)}.\n\n"
                 "После подтверждения участия мастера отправят вам ссылку на чат игры отдельным сообщением.\n\n"
                 "Посмотрите актуальный состав игроков: "
                 f"{event.public_table_public_url}"
@@ -1045,12 +1142,17 @@ class ConfirmationNotificationService:
         )
         return 1
 
-    async def notify_confirmed_link_promotion(self, command: OrderedRegistrationCommand) -> int:
+    async def notify_confirmed_link_promotion(
+        self,
+        command: OrderedRegistrationCommand,
+        *,
+        event_id: str | None = None,
+    ) -> int:
         """Replay chat links when a confirmed reserve player enters the confirmed-player limit."""
 
-        if command.operation not in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+        if command.operation not in {Operation.CANCEL, Operation.CONFIRM, Operation.REMOVE_PARTICIPANT}:
             raise ValueError("command does not promote a confirmed link recipient")
-        event = await self.events.get(command.event_id)
+        event = await self.events.get(event_id or command.event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
         if event.last_confirmed_link_promotion_operation_id != command.operation_id:
@@ -1082,7 +1184,7 @@ class ConfirmationNotificationService:
                 platform=recipient.platform,
                 user_id=recipient.user_id,
                 request_id=last_request_id,
-                text=confirmed_notification_text(event.name, link),
+                text=confirmed_notification_text(event.name, link, event.game_date),
                 buttons=[main_menu_button()],
             )
         await self.events.mark_confirmed_link_promotion_delivered(event.event_id, command.operation_id)
@@ -1116,10 +1218,11 @@ class ConfirmationNotificationService:
                 recipients[key] = NotificationRecipient(platform, uid, user)
 
         if command.operation is Operation.REMOVE_PARTICIPANT:
-            text = f"Ваша запись на игру «{event.name}» удалена."
+            text = f"Ваша запись на игру {event_reference(event.name, event.game_date)} удалена."
         else:
             text = (
-                f"Ваша запись на игру «{event.name}» удалена, потому что вы не подтвердили "
+                f"Ваша запись на игру {event_reference(event.name, event.game_date)} удалена, "
+                "потому что вы не подтвердили "
                 "и не отменили участие до указанного срока."
             )
 
@@ -1285,7 +1388,7 @@ class OrderedMutationService:
             raise OperationNotAllowed("Игра уже архивирована")
 
         if command.operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed(closed_game_cancellation_message(event.name))
+            raise OperationNotAllowed(closed_game_cancellation_message(event.name, event.game_date))
 
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
@@ -1427,7 +1530,7 @@ class OrderedMutationService:
                 and existing.attendance_status is not AttendanceStatus.CANCELLED
                 and existing.last_operation_id != command.operation_id
             ):
-                raise OperationNotAllowed(f"Вы уже записаны на игру «{event.name}»")
+                raise OperationNotAllowed(f"Вы уже записаны на игру {event_reference(event.name, event.game_date)}")
             larp_experience = command.payload.larp_experience
             crossplay = command.payload.crossplay
             vk_profile = command.payload.vk_profile
@@ -1466,8 +1569,27 @@ class OrderedMutationService:
             queue_position = next(
                 index for index, row in enumerate(active, start=1) if row.participant_key == command.participant_key
             )
+            same_day_warning = False
+            if event.game_date is not None and not command.payload.same_day_warning_shown:
+                if self.participant_secret is None:
+                    raise RuntimeError("same-day signup validation requires participant secret")
+                same_day_warning = bool(
+                    await player_registrations_on_date(
+                        self.events,
+                        self.catalog,
+                        self.participant_secret,
+                        command.platform,
+                        command.platform_user_id,
+                        event.game_date,
+                        statuses={AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED},
+                        exclude_event_id=event.event_id,
+                    )
+                )
             buttons = (confirmation_button(event.event_id),) if event.status is EventStatus.CONFIRMATION_OPEN else None
-            return MutationResult(enlistment_success_text(event, queue_position), buttons=buttons)
+            return MutationResult(
+                enlistment_success_text(event, queue_position, same_day_warning=same_day_warning),
+                buttons=buttons,
+            )
 
         if command.operation is Operation.CONFIRM and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
@@ -1502,12 +1624,70 @@ class OrderedMutationService:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
             assert isinstance(command.payload, CharacterWishPayload)
+            replaced_event: Event | None = None
+            replaced_registration: Registration | None = None
+            replaced_participant_key: str | None = None
+            if event.game_date is not None:
+                if self.participant_secret is None:
+                    raise RuntimeError("same-day confirmation validation requires participant secret")
+                conflicts = await player_registrations_on_date(
+                    self.events,
+                    self.catalog,
+                    self.participant_secret,
+                    command.platform,
+                    command.platform_user_id,
+                    event.game_date,
+                    statuses={AttendanceStatus.CONFIRMED},
+                    exclude_event_id=event.event_id,
+                )
+                conflict_ids = {conflict.event_id for conflict, _ in conflicts}
+                if conflict_ids and conflict_ids != {command.payload.replaced_event_id}:
+                    raise OperationNotAllowed(
+                        "Вы уже подтвердили участие в другой игре этого дня. "
+                        "Начните подтверждение заново и подтвердите замену."
+                    )
+                if command.payload.replaced_event_id is not None:
+                    replaced_event = await self.events.get(command.payload.replaced_event_id)
+                    if replaced_event is None or replaced_event.event_id == event.event_id:
+                        raise OperationNotAllowed("Игра, участие в которой нужно заменить, не найдена")
+                    if replaced_event.game_date != event.game_date:
+                        raise OperationNotAllowed("Игры проводятся в разные дни")
+                    replaced_participant_key = participant_key(
+                        self.participant_secret,
+                        command.platform,
+                        command.platform_user_id,
+                        replaced_event.event_id,
+                    )
+                    replaced_registration = await self.catalog.get(
+                        replaced_event,
+                        replaced_participant_key,
+                    )
+                    already_applied = (
+                        registration.last_operation_id == command.operation_id
+                        and registration.attendance_status is AttendanceStatus.CONFIRMED
+                    )
+                    if (
+                        replaced_registration is None
+                        or replaced_registration.attendance_status is not AttendanceStatus.CONFIRMED
+                    ) and not already_applied:
+                        replaced_event = None
+                        replaced_participant_key = None
+            elif command.payload.replaced_event_id is not None:
+                raise OperationNotAllowed("Для этой игры не задана дата")
+            if replaced_event is not None:
+                await self._record_reserve_promotion(replaced_event, command, replaced_registration)
+                await self._record_confirmed_link_promotion(replaced_event, command, replaced_registration)
             await self.catalog.registrations.confirm(
                 event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
                 character_wish=command.payload.character_wish,
+                replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
+                replaced_participant_key=replaced_participant_key,
             )
+            if replaced_event is not None:
+                await self.catalog.refresh(replaced_event)
+                await self._refresh_pass_table(replaced_event)
             event = await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
             main_roster_keys = {
@@ -1522,7 +1702,8 @@ class OrderedMutationService:
                     event,
                     command.payload.character_wish,
                     in_main_roster=command.participant_key in main_roster_keys,
-                )
+                ),
+                replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
             )
         if command.operation is Operation.UPDATE_CHARACTER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:

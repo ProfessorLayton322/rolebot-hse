@@ -25,6 +25,7 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "confirmed_notifications_json"' in ydb
     assert 'name = "last_confirmed_notification_operation_id"' in ydb
     assert 'name = "player_amount"' in ydb
+    assert 'name = "game_date"' in ydb
     assert 'name = "last_reserve_promotion_operation_id"' in ydb
     assert 'name = "last_reserve_promotion_participant_key"' in ydb
     assert 'name = "last_reserve_promotion_delivered_operation_id"' in ydb

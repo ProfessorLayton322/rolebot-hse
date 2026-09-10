@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Collection, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, TypeVar, cast
 
 import ydb
@@ -196,6 +196,17 @@ def _dt(value: object) -> datetime:
     if type(value) is int:
         return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=value)
     return datetime.fromisoformat(str(value)).replace(tzinfo=UTC)
+
+
+def _date(value: object) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    # The YDB Table SDK represents Date values as whole days since Unix epoch.
+    if type(value) is int:
+        return date(1970, 1, 1) + timedelta(days=value)
+    return date.fromisoformat(str(value))
 
 
 class YdbUserRepository:
@@ -451,7 +462,7 @@ class YdbUserRepository:
 
 class YdbEventRepository:
     COLUMNS = """
-        event_id, name, player_amount, disk_resource_path, public_registration_url,
+        event_id, name, game_date, player_amount, disk_resource_path, public_registration_url,
         public_table_resource_path, public_table_public_url,
         status, confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
@@ -478,6 +489,7 @@ class YdbEventRepository:
         return Event(
             event_id=row["event_id"],
             name=row["name"],
+            game_date=_date(row["game_date"]) if row.get("game_date") is not None else None,
             player_amount=row.get("player_amount") or DEFAULT_PLAYER_AMOUNT,
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
@@ -557,7 +569,8 @@ class YdbEventRepository:
             )
         await self.db.query(
             f"""
-            DECLARE $event_id AS Utf8; DECLARE $name AS Utf8; DECLARE $player_amount AS Uint64;
+            DECLARE $event_id AS Utf8; DECLARE $name AS Utf8; DECLARE $game_date AS Optional<Date>;
+            DECLARE $player_amount AS Uint64;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
@@ -581,7 +594,7 @@ class YdbEventRepository:
             DECLARE $updated_at AS Timestamp;
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
-                event_id, name, player_amount, disk_resource_path, public_registration_url,
+                event_id, name, game_date, player_amount, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
                 status, confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
@@ -595,7 +608,7 @@ class YdbEventRepository:
                 archived_at,
                 created_at, updated_at
             ) VALUES (
-                $event_id, $name, $player_amount, $disk_resource_path, $public_url,
+                $event_id, $name, $game_date, $player_amount, $disk_resource_path, $public_url,
                 $public_table_resource_path, $public_table_public_url,
                 $status, $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
@@ -614,6 +627,7 @@ class YdbEventRepository:
             {
                 "$event_id": event.event_id,
                 "$name": event.name,
+                "$game_date": event.game_date,
                 "$player_amount": event.player_amount,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
@@ -1453,12 +1467,43 @@ class YdbRegistrationRepository:
         operation_id: str,
         participant_key: str,
         character_wish: str,
+        replaced_event_id: str | None = None,
+        replaced_participant_key: str | None = None,
     ) -> bool:
-        await self.db.query(
+        if (replaced_event_id is None) != (replaced_participant_key is None):
+            raise ValueError("replacement event and participant key must be supplied together")
+        if replaced_event_id == event_id:
+            raise ValueError("replacement event must differ from the confirmed event")
+        replacement_declarations = ""
+        replacement_delete = ""
+        params: dict[str, Any] = {
+            "$event_id": event_id,
+            "$participant_key": participant_key,
+            "$operation_id": operation_id,
+            "$character_wish": character_wish,
+            "$attendance_status": AttendanceStatus.CONFIRMED.value,
+            "$updated_at": datetime.now(UTC),
+        }
+        if replaced_event_id is not None and replaced_participant_key is not None:
+            replacement_declarations = "DECLARE $replaced_event_id AS Utf8; DECLARE $replaced_participant_key AS Utf8;"
+            replacement_delete = """
+                DELETE FROM `registrations`
+                WHERE event_id = $replaced_event_id
+                  AND participant_key = $replaced_participant_key;
             """
+            params.update(
+                {
+                    "$replaced_event_id": replaced_event_id,
+                    "$replaced_participant_key": replaced_participant_key,
+                }
+            )
+        await self.db.query(
+            f"""
             DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
             DECLARE $operation_id AS Utf8; DECLARE $character_wish AS Utf8;
             DECLARE $attendance_status AS Utf8; DECLARE $updated_at AS Timestamp;
+            {replacement_declarations}
+            {replacement_delete}
             UPDATE `registrations`
             SET character_wish = $character_wish,
                 attendance_status = $attendance_status,
@@ -1467,14 +1512,7 @@ class YdbRegistrationRepository:
             WHERE event_id = $event_id AND participant_key = $participant_key
               AND last_operation_id != $operation_id;
             """,
-            {
-                "$event_id": event_id,
-                "$participant_key": participant_key,
-                "$operation_id": operation_id,
-                "$character_wish": character_wish,
-                "$attendance_status": AttendanceStatus.CONFIRMED.value,
-                "$updated_at": datetime.now(UTC),
-            },
+            params,
         )
         return True
 

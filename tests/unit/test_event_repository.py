@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -70,6 +70,18 @@ def test_event_without_persisted_player_amount_uses_rollout_default() -> None:
     event = YdbEventRepository._from_row(row)
 
     assert event.player_amount == DEFAULT_PLAYER_AMOUNT
+
+
+def test_event_without_persisted_game_date_stays_undated() -> None:
+    event = YdbEventRepository._from_row(event_row("CLOSED"))
+
+    assert event.game_date is None
+
+
+def test_persisted_game_date_is_loaded() -> None:
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"game_date": date(2026, 11, 14)})
+
+    assert event.game_date == date(2026, 11, 14)
 
 
 def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
@@ -142,6 +154,18 @@ async def test_event_creation_atomically_seeds_platform_specific_leaders() -> No
     assert executor.params["$leader_platform_1"] == Platform.VK.value
     assert executor.params["$leader_user_id_1"] == 20
     assert executor.params["$player_amount"] == 12
+
+
+@pytest.mark.asyncio
+async def test_event_creation_persists_optional_game_date() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"game_date": date(2026, 11, 14)})
+
+    await repository.create(event)
+
+    assert "game_date" in executor.query_text
+    assert executor.params["$game_date"] == date(2026, 11, 14)
 
 
 @pytest.mark.asyncio

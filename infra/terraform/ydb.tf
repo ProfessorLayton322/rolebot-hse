@@ -116,6 +116,12 @@ resource "yandex_ydb_table" "events" {
     type     = "Utf8"
     not_null = true
   }
+  # Nullable so applying the schema change does not assign a date to archived
+  # games created before this field existed.
+  column {
+    name = "game_date"
+    type = "Date"
+  }
   # Optional at storage level so Terraform can add it to existing rows; the
   # application supplies a legacy default and always writes it for new games.
   column {

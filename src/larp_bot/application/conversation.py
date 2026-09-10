@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from secrets import token_urlsafe
 from uuid import NAMESPACE_URL, uuid5
 
@@ -34,11 +34,14 @@ from larp_bot.domain.models import (
     TelegramUser,
     User,
     VkUser,
+    event_reference,
+    format_game_date,
     normalize_mobile_phone,
     normalize_telegram_handle,
     normalize_telegram_profile,
     normalize_vk_url,
     parse_full_name,
+    parse_game_date,
     surname_and_name,
     validate_pass_email,
 )
@@ -64,6 +67,7 @@ from .services import (
     closed_game_cancellation_message,
     confirmed_notification_text,
     is_plain_chat_link,
+    same_day_signup_warning,
 )
 
 PROFILE = "📝 Профиль"
@@ -196,6 +200,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "CHARACTER_EDIT",
         "CO_PLAYER_EDIT",
         "ADMIN_CREATE_NAME",
+        "ADMIN_CREATE_DATE",
         "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
         "ADMIN_CONFIRMATION_DEADLINE",
@@ -299,9 +304,11 @@ def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
 
 
-def co_player_wish_prompt(*, skip_value: str) -> BotResponse:
+def co_player_wish_prompt(*, skip_value: str, same_day_warning_date: date | None = None) -> BotResponse:
+    warning = f"{same_day_signup_warning(same_day_warning_date)}\n\n" if same_day_warning_date is not None else ""
     return BotResponse(
         text=(
+            f"{warning}"
             "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
             "Укажите каждого как «Фамилия Имя», через запятую. "
             "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
@@ -309,6 +316,23 @@ def co_player_wish_prompt(*, skip_value: str) -> BotResponse:
             "Если пожеланий нет, нажмите «Пропустить»."
         ),
         buttons=[Button(label=SKIP, value=skip_value), dialog_exit_button()],
+    )
+
+
+def confirmation_replacement_prompt(event: Event, replaced_event: Event) -> BotResponse:
+    if event.game_date is None:
+        raise ValueError("same-day confirmation requires a game date")
+    return BotResponse(
+        text=(
+            f"Вы уже подтвердили своё участие в игре «{replaced_event.name}», которая проводится "
+            f"{format_game_date(event.game_date)}. Чтобы подтвердить своё участие в «{event.name}» "
+            f"вам придётся отменить своё участие в «{replaced_event.name}». "
+            "Вы уверены, что хотите это сделать?"
+        ),
+        buttons=[
+            Button(label="Да, я хочу участвовать в другой игре", value="confirm:replace:yes"),
+            dialog_exit_button(label="Нет, не хочу ничего менять"),
+        ],
     )
 
 
@@ -339,10 +363,15 @@ def notification_management_button(event_id: str) -> Button:
     return Button(label=BACK, value=f"ag:notifications:{event_id}")
 
 
-def _admin_status_response(event_name: str, current_status: EventStatus, event_id: str) -> BotResponse:
+def _admin_status_response(
+    event_name: str,
+    current_status: EventStatus,
+    event_id: str,
+    game_date: date | None = None,
+) -> BotResponse:
     return BotResponse(
         text=(
-            f"Игра: «{event_name}»\n"
+            f"Игра: {event_reference(event_name, game_date)}\n"
             f"Текущий Статус: {EVENT_STATUS_LABELS[current_status]}\n\n"
             "Выберите новый Статус:\n\n"
             f"{STATUS_REGISTRATION} — игроки могут записываться, но ещё не могут подтверждать участие.\n\n"
@@ -372,19 +401,21 @@ def _confirmed_notification_prompt(
     event_id: str,
     *,
     link: bool,
+    game_date: date | None = None,
     invalid: str = "",
 ) -> BotResponse:
     prefix = f"{invalid}\n\n" if invalid else ""
+    reference = event_reference(event_name, game_date)
     if link:
         prompt = (
-            f"Отправьте ссылку-приглашение в чат игры «{event_name}».\n\n"
+            f"Отправьте ссылку-приглашение в чат игры {reference}.\n\n"
             "Сообщение должно состоять только из корректной ссылки на чат Telegram или VK."
         )
     else:
         prompt = (
             "Эта кнопка нужна для рассылки оргинформации всем подтвердившимся на игру игрокам, "
             "включая подтвердившихся в запас.\n\n"
-            f"Отправьте текст сообщения для подтвердившихся на игру «{event_name}»."
+            f"Отправьте текст сообщения для подтвердившихся на игру {reference}."
         )
     return BotResponse(
         text=f"{prefix}{prompt}",
@@ -392,12 +423,18 @@ def _confirmed_notification_prompt(
     )
 
 
-def _confirmed_notification_preview(event_name: str, event_id: str, message: str, recipient_count: int) -> BotResponse:
+def _confirmed_notification_preview(
+    event_name: str,
+    event_id: str,
+    message: str,
+    recipient_count: int,
+    game_date: date | None = None,
+) -> BotResponse:
     return BotResponse(
         text=(
             f"Получателей: {recipient_count}\n\n"
             "Итоговое сообщение:\n\n"
-            f"{confirmed_notification_text(event_name, message)}"
+            f"{confirmed_notification_text(event_name, message, game_date)}"
         ),
         buttons=[
             Button(label=f"✅ Отправить ({recipient_count})", value="admin:notification:confirm"),
@@ -416,6 +453,12 @@ def _normalize_vk_telegram_contact(value: str) -> str | None:
             return normalize_telegram_handle(value)
         except ValueError:
             return None
+
+
+def _context_event_reference(context: dict[str, object]) -> str:
+    raw_date = context.get("game_date")
+    game_date = date.fromisoformat(str(raw_date)) if raw_date is not None else None
+    return event_reference(str(context["event_name"]), game_date)
 
 
 class ConversationEngine:
@@ -606,6 +649,8 @@ class ConversationEngine:
             return await self._profile_step(user, message, value)
         if state.startswith("ENLIST_"):
             return await self._enlist_step(user, message, value)
+        if state == "CONFIRM_REPLACE":
+            return await self._confirm_replacement_step(user, message, value)
         if state == "CONFIRM_WISH":
             return await self._character_command(user, message, value, Operation.CONFIRM)
         if state == "CHARACTER_EDIT":
@@ -941,10 +986,44 @@ class ConversationEngine:
     @staticmethod
     def _game_wishes_menu(event: Event) -> BotResponse:
         return BotResponse(
-            text=f"Пожелания по игре «{event.name}»",
+            text=f"Пожелания по игре {event_reference(event.name, event.game_date)}",
             buttons=[
                 Button(label=CHARACTER_WISHES, value=f"wishes:character:{event.event_id}"),
                 Button(label=CO_PLAYER_WISHES, value=f"wishes:co-player:{event.event_id}"),
+            ],
+        )
+
+    @staticmethod
+    def _begin_confirmation_wish(
+        user: User,
+        event: Event,
+        registration: Registration,
+        *,
+        replaced_event_id: str | None = None,
+    ) -> BotResponse:
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "existing_character_wish": registration.character_wish,
+        }
+        if replaced_event_id is not None:
+            user.dialog_context["replaced_event_id"] = replaced_event_id
+        user.dialog_state = "CONFIRM_WISH"
+        current = registration.character_wish or "ещё не указаны"
+        buttons = [Button(label=NO_WISHES, value=NO_WISHES), Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)]
+        if registration.character_wish:
+            buttons.insert(0, Button(label=KEEP, value=KEEP))
+        return BotResponse(
+            text=(
+                f"Игра: {event_reference(event.name, event.game_date)}\n"
+                f"Статус: {_attendance_status_text(registration.attendance_status)}\n\n"
+                f"Текущие пожелания: {current}\n\n"
+                f"Отправьте пожелания по персонажу для этой игры — до {MAX_CHARACTER_WISH_LENGTH} символов.\n\n"
+                "После отправки ответа ваше участие будет подтверждено."
+            ),
+            buttons=[
+                *buttons[:-1],
+                dialog_exit_button(label="Не подтверждать сейчас"),
             ],
         )
 
@@ -1050,10 +1129,28 @@ class ConversationEngine:
                 return BotResponse(text="Регистрация на эту игру уже закрыта.")
             registration = await self.registrations.get_registration(event_id, platform, uid)
             if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
-                return BotResponse(text=f"Вы уже записаны на игру «{event.name}».")
-            user.dialog_context = {"event_id": event_id, "event_name": event.name}
+                return BotResponse(text=f"Вы уже записаны на игру {event_reference(event.name, event.game_date)}.")
+            same_day_registrations = (
+                await self.registrations.registrations_on_date(
+                    platform,
+                    uid,
+                    event.game_date,
+                    statuses={AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED},
+                    exclude_event_id=event.event_id,
+                )
+                if event.game_date is not None
+                else []
+            )
+            user.dialog_context = {
+                "event_id": event_id,
+                "event_name": event.name,
+                "same_day_warning_shown": bool(same_day_registrations),
+            }
             user.dialog_state = "ENLIST_WISH_PLAY"
-            return co_player_wish_prompt(skip_value="enlist:wish-play:skip")
+            return co_player_wish_prompt(
+                skip_value="enlist:wish-play:skip",
+                same_day_warning_date=event.game_date if same_day_registrations else None,
+            )
         if flow in {
             "admin-status",
             "admin-archive",
@@ -1076,41 +1173,50 @@ class ConversationEngine:
         }:
             return BotResponse(text="Сначала снова запишитесь на эту игру.")
         if flow == "cancel" and event.status is EventStatus.CLOSED:
-            return BotResponse(text=closed_game_cancellation_message(event.name))
+            return BotResponse(text=closed_game_cancellation_message(event.name, event.game_date))
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
                 return BotResponse(
                     text=(
-                        f"Вы записаны на игру «{event.name}», но подтверждение участия ещё не открыто. "
+                        f"Вы записаны на игру {event_reference(event.name, event.game_date)}, "
+                        "но подтверждение участия ещё не открыто. "
                         "Организаторы откроют его позже."
                     )
                 )
-            return BotResponse(text=f"Регистрация и подтверждение участия в игре «{event.name}» закрыты.")
+            return BotResponse(
+                text=(
+                    f"Регистрация и подтверждение участия в игре "
+                    f"{event_reference(event.name, event.game_date)} закрыты."
+                )
+            )
         if flow == "wishes":
             return self._game_wishes_menu(event)
+        if flow == "confirm":
+            confirmed_same_day = (
+                await self.registrations.registrations_on_date(
+                    platform,
+                    uid,
+                    event.game_date,
+                    statuses={AttendanceStatus.CONFIRMED},
+                    exclude_event_id=event.event_id,
+                )
+                if event.game_date is not None
+                else []
+            )
+            if confirmed_same_day:
+                replaced_event, _ = confirmed_same_day[0]
+                user.dialog_state = "CONFIRM_REPLACE"
+                user.dialog_context = {
+                    "event_id": event.event_id,
+                    "replaced_event_id": replaced_event.event_id,
+                }
+                return confirmation_replacement_prompt(event, replaced_event)
+            return self._begin_confirmation_wish(user, event, registration)
         user.dialog_context = {
             "event_id": event_id,
             "event_name": event.name,
             "existing_character_wish": registration.character_wish,
         }
-        if flow == "confirm":
-            user.dialog_state = "CONFIRM_WISH"
-            current = registration.character_wish or "ещё не указаны"
-            buttons = [Button(label=NO_WISHES, value=NO_WISHES), Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG)]
-            if registration.character_wish:
-                buttons.insert(0, Button(label=KEEP, value=KEEP))
-            return BotResponse(
-                text=(
-                    f"Игра: «{event.name}»\nСтатус: {_attendance_status_text(registration.attendance_status)}\n\n"
-                    f"Текущие пожелания: {current}\n\n"
-                    f"Отправьте пожелания по персонажу для этой игры — до {MAX_CHARACTER_WISH_LENGTH} символов.\n\n"
-                    "После отправки ответа ваше участие будет подтверждено."
-                ),
-                buttons=[
-                    *buttons[:-1],
-                    dialog_exit_button(label="Не подтверждать сейчас"),
-                ],
-            )
         if flow == "character":
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 await self._clear(user)
@@ -1123,7 +1229,8 @@ class ConversationEngine:
             user.dialog_state = "CHARACTER_EDIT"
             return BotResponse(
                 text=(
-                    f"Игра: «{event.name}»\nСтатус: {_attendance_status_text(registration.attendance_status)}\n\n"
+                    f"Игра: {event_reference(event.name, event.game_date)}\n"
+                    f"Статус: {_attendance_status_text(registration.attendance_status)}\n\n"
                     f"Текущие пожелания:\n{registration.character_wish}\n\n"
                     f"Отправьте новый вариант — до {MAX_CHARACTER_WISH_LENGTH} символов."
                 ),
@@ -1133,7 +1240,8 @@ class ConversationEngine:
             user.dialog_state = "CANCEL_CONFIRM"
             return BotResponse(
                 text=(
-                    f"Вы уверены, что хотите отменить участие в игре «{event.name}»? "
+                    "Вы уверены, что хотите отменить участие в игре "
+                    f"{event_reference(event.name, event.game_date)}? "
                     "Если вы отмените участие, то сможете записаться снова, но попадёте "
                     "в конец очереди на основной состав."
                 ),
@@ -1143,6 +1251,44 @@ class ConversationEngine:
                 ],
             )
         return BotResponse(text="Некорректное действие.")
+
+    async def _confirm_replacement_step(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        replaced_event_id = str(user.dialog_context["replaced_event_id"])
+        event, replaced_event = await asyncio.gather(
+            self.events.get(event_id),
+            self.events.get(replaced_event_id),
+        )
+        if event is None or replaced_event is None:
+            await self._clear(user)
+            return BotResponse(text="Одна из игр больше не найдена.")
+        if value != "confirm:replace:yes":
+            return confirmation_replacement_prompt(event, replaced_event)
+        if event.archived_at is not None:
+            await self._clear(user)
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        if event.status is not EventStatus.CONFIRMATION_OPEN:
+            await self._clear(user)
+            return BotResponse(text="Подтверждение участия в этой игре уже закрыто.")
+        registration = await self.registrations.get_registration(
+            event.event_id,
+            message.identity.platform,
+            message.identity.platform_user_id,
+        )
+        if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
+            await self._clear(user)
+            return BotResponse(text="Сначала снова запишитесь на эту игру.")
+        return self._begin_confirmation_wish(
+            user,
+            event,
+            registration,
+            replaced_event_id=replaced_event.event_id,
+        )
 
     async def _wishes_action(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         try:
@@ -1222,7 +1368,7 @@ class ConversationEngine:
         )
         if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
             await self._clear(user)
-            return BotResponse(text=f"Вы уже записаны на игру «{event.name}».")
+            return BotResponse(text=f"Вы уже записаны на игру {event_reference(event.name, event.game_date)}.")
         await self._clear(user)
         if isinstance(user, TelegramUser):
             vk_profile = user.vk_url or ""
@@ -1243,6 +1389,7 @@ class ConversationEngine:
                 crossplay=user.crossplay,
                 vk_profile=vk_profile,
                 telegram_profile=telegram_profile,
+                same_day_warning_shown=bool(context.get("same_day_warning_shown")),
             ),
             reply_context=ReplyContext(
                 chat_id=message.chat_id,
@@ -1301,14 +1448,21 @@ class ConversationEngine:
             event_id=str(context["event_id"]),
             platform=message.identity.platform,
             user_id=message.identity.platform_user_id,
-            payload=CharacterWishPayload(character_wish=wish),
+            payload=CharacterWishPayload(
+                character_wish=wish,
+                replaced_event_id=(
+                    str(context["replaced_event_id"])
+                    if operation is Operation.CONFIRM and context.get("replaced_event_id") is not None
+                    else None
+                ),
+            ),
             reply_context=ReplyContext(
                 chat_id=message.chat_id,
                 peer_id=message.peer_id,
                 text_success=(
                     ""
                     if operation is Operation.CONFIRM
-                    else f"🎭 Пожелания для игры «{context['event_name']}» обновлены."
+                    else f"🎭 Пожелания для игры {event_reference(event.name, event.game_date)} обновлены."
                 ),
                 buttons=[main_menu_button()],
             ),
@@ -1356,7 +1510,9 @@ class ConversationEngine:
             reply_context=ReplyContext(
                 chat_id=message.chat_id,
                 peer_id=message.peer_id,
-                text_success=f"🎭 Пожелания по соигрокам для игры «{context['event_name']}» обновлены.",
+                text_success=(
+                    f"🎭 Пожелания по соигрокам для игры {event_reference(event.name, event.game_date)} обновлены."
+                ),
                 buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:{Operation.UPDATE_CO_PLAYER_WISH.value}",
@@ -1374,7 +1530,7 @@ class ConversationEngine:
         if event.archived_at is not None:
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
         if event.status is EventStatus.CLOSED:
-            return BotResponse(text=closed_game_cancellation_message(event.name))
+            return BotResponse(text=closed_game_cancellation_message(event.name, event.game_date))
         await self.registrations.enqueue(
             operation=Operation.CANCEL,
             event_id=str(context["event_id"]),
@@ -1384,7 +1540,7 @@ class ConversationEngine:
             reply_context=ReplyContext(
                 chat_id=message.chat_id,
                 peer_id=message.peer_id,
-                text_success=f"❌ Участие в игре «{context['event_name']}» отменено.",
+                text_success=f"❌ Участие в игре {event_reference(event.name, event.game_date)} отменено.",
                 buttons=[main_menu_button()],
             ),
             idempotency_key=f"{message.update_id}:CANCEL",
@@ -1601,7 +1757,7 @@ class ConversationEngine:
         if await self._is_admin(user) and not await self._is_event_leader(user, event.event_id):
             buttons.insert(0, Button(label=ADD_SELF_EVENT_LEADER, value=f"master:self-add:{event.event_id}"))
         return BotResponse(
-            text=f"Мастера игры «{event.name}»",
+            text=f"Мастера игры {event_reference(event.name, event.game_date)}",
             buttons=buttons,
         )
 
@@ -1664,7 +1820,8 @@ class ConversationEngine:
             )
         )
         text = (
-            f"Выберите модератора или администратора, которого нужно добавить мастером игры «{event.name}»:"
+            "Выберите модератора или администратора, которого нужно добавить мастером игры "
+            f"{event_reference(event.name, event.game_date)}:"
             if page
             else (
                 "Нет модераторов или администраторов, которых можно выбрать. "
@@ -1711,10 +1868,10 @@ class ConversationEngine:
             )
         )
         if mode == "remove":
-            text = f"Выберите мастера, которого нужно удалить из игры «{event.name}»:"
+            text = f"Выберите мастера, которого нужно удалить из игры {event_reference(event.name, event.game_date)}:"
             empty = "В этой игре нет назначенных мастеров, которых можно удалить."
         else:
-            text = f"Мастера игры «{event.name}»:"
+            text = f"Мастера игры {event_reference(event.name, event.game_date)}:"
             empty = "У этой игры пока нет мастеров."
         return BotResponse(text=text if page else empty, buttons=buttons)
 
@@ -1733,7 +1890,7 @@ class ConversationEngine:
                 if event is None:
                     return BotResponse(text="Игра не найдена.")
                 if event.archived_at is not None:
-                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                    return BotResponse(text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.")
                 return await self._assign_event_leader(user, message, event, user)
             if value.startswith("mod:list-page:"):
                 return await self._show_moderators(user, "list", offset=int(parts[2]))
@@ -1816,7 +1973,7 @@ class ConversationEngine:
                 if event is None:
                     return BotResponse(text="Игра не найдена.")
                 if event.archived_at is not None:
-                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                    return BotResponse(text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.")
                 denied = await self._event_leader_required(user, event.event_id)
                 return denied or await self._show_event_master_candidates(user, event)
             if value.startswith("master:remove:") and len(parts) == 3:
@@ -1824,7 +1981,7 @@ class ConversationEngine:
                 if event is None:
                     return BotResponse(text="Игра не найдена.")
                 if event.archived_at is not None:
-                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                    return BotResponse(text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.")
                 denied = await self._event_leader_required(user, event.event_id)
                 return denied or await self._show_event_masters(user, event, "remove")
             if value.startswith("master:list:") and len(parts) == 3:
@@ -1832,7 +1989,7 @@ class ConversationEngine:
                 if event is None:
                     return BotResponse(text="Игра не найдена.")
                 if event.archived_at is not None:
-                    return BotResponse(text=f"Игра «{event.name}» уже архивирована.")
+                    return BotResponse(text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.")
                 denied = await self._event_leader_required(user, event.event_id)
                 return denied or await self._show_event_masters(user, event, "list")
             if value.startswith("master:add-page:"):
@@ -1902,6 +2059,11 @@ class ConversationEngine:
                     return BotResponse(text="Некорректное действие.")
                 event_id = str(user.dialog_context["event_id"])
                 event_name = str(user.dialog_context["event_name"])
+                event = await self.events.get(event_id)
+                if event is None:
+                    await self._clear(user)
+                    return BotResponse(text="Игра не найдена.")
+                reference = event_reference(event_name, event.game_date)
                 platform = Platform(str(user.dialog_context["target_platform"]))
                 target_id = int(user.dialog_context["target_user_id"])
                 identity = BotIdentity(platform=platform, platform_user_id=target_id)
@@ -1932,11 +2094,11 @@ class ConversationEngine:
                         user,
                         target,
                         request_id=request_id,
-                        text=f"Вы больше не являетесь мастером игры «{event_name}».",
+                        text=f"Вы больше не являетесь мастером игры {reference}.",
                     )
                 await self._clear(user)
                 return BotResponse(
-                    text=f"✅ Мастер удалён из игры «{event_name}».",
+                    text=f"✅ Мастер удалён из игры {reference}.",
                     buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
                 )
         except (KeyError, TypeError, ValueError):
@@ -1976,7 +2138,7 @@ class ConversationEngine:
                 if not await self._is_admin(user):
                     return BotResponse(text="Игра не найдена.")
                 return BotResponse(
-                    text=f"Игра «{event.name}» уже архивирована.",
+                    text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.",
                     buttons=[Button(label=BACK, value=MANAGE_GAMES)],
                 )
             pending_self_removal = (
@@ -2054,8 +2216,16 @@ class ConversationEngine:
                 return BotResponse(text="Название игры не может быть пустым. Введите название игры:")
             if len(clean_name) > 200:
                 return BotResponse(text="Название игры не должно превышать 200 символов. Введите название игры:")
-            user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
+            user.dialog_state = "ADMIN_CREATE_DATE"
             user.dialog_context = {"event_name": clean_name}
+            return BotResponse(text="Введите дату игры строго в формате DD.MM.YY:")
+        if user.dialog_state == "ADMIN_CREATE_DATE":
+            try:
+                game_date = parse_game_date(value)
+            except ValueError:
+                return BotResponse(text="Введите корректную дату игры строго в формате DD.MM.YY:")
+            user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
+            user.dialog_context["game_date"] = game_date.isoformat()
             return BotResponse(text=f"Введите количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):")
         if user.dialog_state == "ADMIN_CREATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
@@ -2064,8 +2234,10 @@ class ConversationEngine:
             player_amount = int(raw_amount)
             if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
                 return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
+            game_date = date.fromisoformat(str(user.dialog_context["game_date"]))
             event = await self.administration.create_event(
                 str(user.dialog_context["event_name"]),
+                game_date,
                 player_amount,
                 [self._identity(user)],
             )
@@ -2073,6 +2245,7 @@ class ConversationEngine:
             return BotResponse(
                 text=(
                     f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
+                    f"Дата игры: {format_game_date(game_date)}\n\n"
                     f"Количество игроков: {event.player_amount}\n\n"
                     f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
                     "но пока не могут подтверждать участие."
@@ -2095,7 +2268,9 @@ class ConversationEngine:
                 user_id=message.identity.platform_user_id,
                 payload=PlayerAmountPayload(player_amount=player_amount),
                 reply_context=ReplyContext(
-                    text_success=(f"Количество игроков игры «{context['event_name']}» изменено: {player_amount}."),
+                    text_success=(
+                        f"Количество игроков игры {_context_event_reference(context)} изменено: {player_amount}."
+                    ),
                     buttons=[game_management_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.UPDATE_PLAYER_AMOUNT.value}",
@@ -2113,6 +2288,11 @@ class ConversationEngine:
                     str(user.dialog_context["event_name"]),
                     EventStatus(str(user.dialog_context["event_status"])),
                     str(user.dialog_context["event_id"]),
+                    (
+                        date.fromisoformat(str(user.dialog_context["game_date"]))
+                        if user.dialog_context.get("game_date") is not None
+                        else None
+                    ),
                 )
             status_label, operation = choice
             if operation is Operation.OPEN_CONFIRMATION:
@@ -2127,7 +2307,7 @@ class ConversationEngine:
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
-                    text_success=f"Статус игры «{context['event_name']}» изменён: {status_label}.",
+                    text_success=f"Статус игры {_context_event_reference(context)} изменён: {status_label}.",
                     buttons=[game_management_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{operation.value}",
@@ -2155,7 +2335,7 @@ class ConversationEngine:
                 user_id=message.identity.platform_user_id,
                 payload=ConfirmationDeadlinePayload(deadline=deadline),
                 reply_context=ReplyContext(
-                    text_success=f"Статус игры «{context['event_name']}» изменён: {STATUS_CONFIRMATION}.",
+                    text_success=(f"Статус игры {_context_event_reference(context)} изменён: {STATUS_CONFIRMATION}."),
                     buttons=[game_management_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.OPEN_CONFIRMATION.value}",
@@ -2176,12 +2356,15 @@ class ConversationEngine:
         }:
             event_name = str(user.dialog_context["event_name"])
             event_id = str(user.dialog_context["event_id"])
+            raw_game_date = user.dialog_context.get("game_date")
+            notification_game_date = date.fromisoformat(str(raw_game_date)) if raw_game_date is not None else None
             link = user.dialog_state == "ADMIN_NOTIFICATION_LINK_TEXT"
             if message.callback is not None:
                 return _confirmed_notification_prompt(
                     event_name,
                     event_id,
                     link=link,
+                    game_date=notification_game_date,
                     invalid="Отправьте содержимое обычным текстовым сообщением.",
                 )
             if not value:
@@ -2189,6 +2372,7 @@ class ConversationEngine:
                     event_name,
                     event_id,
                     link=link,
+                    game_date=notification_game_date,
                     invalid="Сообщение не может быть пустым.",
                 )
             if link and not is_plain_chat_link(value):
@@ -2196,6 +2380,7 @@ class ConversationEngine:
                     event_name,
                     event_id,
                     link=True,
+                    game_date=notification_game_date,
                     invalid="Пришлите только корректную ссылку-приглашение в чат Telegram или VK.",
                 )
             if not link and is_plain_chat_link(value):
@@ -2203,13 +2388,15 @@ class ConversationEngine:
                     event_name,
                     event_id,
                     link=False,
+                    game_date=notification_game_date,
                     invalid=f"Для рассылки ссылки на чат используйте кнопку «{SEND_CONFIRMED_LINK}».",
                 )
-            if len(value) > 4000 or len(confirmed_notification_text(event_name, value)) > 4000:
+            if len(value) > 4000 or len(confirmed_notification_text(event_name, value, notification_game_date)) > 4000:
                 return _confirmed_notification_prompt(
                     event_name,
                     event_id,
                     link=link,
+                    game_date=notification_game_date,
                     invalid="Итоговое сообщение не должно превышать 4000 символов.",
                 )
             recipient_count = await self.administration.confirmed_registration_count(
@@ -2219,14 +2406,28 @@ class ConversationEngine:
             user.dialog_state = "ADMIN_NOTIFICATION_CONFIRM"
             user.dialog_context["notification_text"] = value
             user.dialog_context["notification_recipient_count"] = recipient_count
-            return _confirmed_notification_preview(event_name, event_id, value, recipient_count)
+            return _confirmed_notification_preview(
+                event_name,
+                event_id,
+                value,
+                recipient_count,
+                notification_game_date,
+            )
         if user.dialog_state == "ADMIN_NOTIFICATION_CONFIRM":
             event_name = str(user.dialog_context["event_name"])
             event_id = str(user.dialog_context["event_id"])
+            raw_game_date = user.dialog_context.get("game_date")
+            notification_game_date = date.fromisoformat(str(raw_game_date)) if raw_game_date is not None else None
             notification_text = str(user.dialog_context["notification_text"])
             recipient_count = int(user.dialog_context["notification_recipient_count"])
             if value != "admin:notification:confirm":
-                return _confirmed_notification_preview(event_name, event_id, notification_text, recipient_count)
+                return _confirmed_notification_preview(
+                    event_name,
+                    event_id,
+                    notification_text,
+                    recipient_count,
+                    notification_game_date,
+                )
             await self._clear(user)
             await self.registrations.enqueue(
                 operation=Operation.SEND_CONFIRMED_NOTIFICATION,
@@ -2244,7 +2445,8 @@ class ConversationEngine:
                 command_enqueued=True,
             )
         if user.dialog_state in {"ADMIN_ARCHIVE_NAME", "ADMIN_DELETE_NAME"}:
-            expected = str(user.dialog_context["event_name"])
+            context = user.dialog_context.copy()
+            expected = str(context["event_name"])
             if value.strip() != expected:
                 return BotResponse(
                     text=f"Название не совпало. Введите точно:\n\n{expected}",
@@ -2260,7 +2462,8 @@ class ConversationEngine:
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
                     text_success=(
-                        f"📦 Игра «{expected}» архивирована. Игра, записи и XLSX-таблицы сохранены в постоянном списке."
+                        f"📦 Игра {_context_event_reference(context)} архивирована. "
+                        "Игра, записи и XLSX-таблицы сохранены в постоянном списке."
                     ),
                     buttons=[Button(label=BACK, value=MANAGE_GAMES)],
                 ),
@@ -2423,6 +2626,7 @@ class ConversationEngine:
                 buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
             )
         role_name = "Администратор" if configured_admin else "Модератор"
+        reference = event_reference(event.name, event.game_date)
         notification_button = Button(label="Управление игрой", value=f"ag:manage:{event_id}")
         if identity in await self.events.list_leaders(event_id):
             if (
@@ -2434,17 +2638,17 @@ class ConversationEngine:
                     user,
                     target,
                     request_id=request_id,
-                    text=f"Вы добавлены мастером игры «{event.name}».",
+                    text=f"Вы добавлены мастером игры {reference}.",
                     buttons=[notification_button],
                 )
                 await self._clear(user)
                 return BotResponse(
-                    text=f"✅ {role_name} добавлен мастером игры «{event.name}».",
+                    text=f"✅ {role_name} добавлен мастером игры {reference}.",
                     buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
                 )
             await self._clear(user)
             return BotResponse(
-                text=f"Этот пользователь уже является мастером игры «{event.name}».",
+                text=f"Этот пользователь уже является мастером игры {reference}.",
                 buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
             )
 
@@ -2458,12 +2662,12 @@ class ConversationEngine:
             user,
             target,
             request_id=request_id,
-            text=f"Вы добавлены мастером игры «{event.name}».",
+            text=f"Вы добавлены мастером игры {reference}.",
             buttons=[notification_button],
         )
         await self._clear(user)
         return BotResponse(
-            text=f"✅ {role_name} добавлен мастером игры «{event.name}».",
+            text=f"✅ {role_name} добавлен мастером игры {reference}.",
             buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
         )
 
@@ -2499,10 +2703,14 @@ class ConversationEngine:
         user.dialog_context = {
             "event_id": event.event_id,
             "event_name": event.name,
+            "game_date": event.game_date.isoformat() if event.game_date is not None else None,
         }
         if not page.rows:
             return BotResponse(
-                text=(f"В игре «{event.name}» нет записавшихся или подтвердивших участие игроков."),
+                text=(
+                    f"В игре {event_reference(event.name, event.game_date)} нет записавшихся "
+                    "или подтвердивших участие игроков."
+                ),
                 buttons=_pagination_buttons(
                     previous=None,
                     following=None,
@@ -2540,7 +2748,7 @@ class ConversationEngine:
         prefix = f"{invalid}\n\n" if invalid else ""
         return BotResponse(
             text=(
-                f"{prefix}Удаление игрока из игры «{event.name}»\n\n"
+                f"{prefix}Удаление игрока из игры {event_reference(event.name, event.game_date)}\n\n"
                 "Выберите игрока. Показаны записавшиеся и подтвердившие участие; "
                 "на кнопках указаны имена из их профилей."
             ),
@@ -2566,10 +2774,14 @@ class ConversationEngine:
         user.dialog_context = {
             "event_id": event.event_id,
             "event_name": event.name,
+            "game_date": event.game_date.isoformat() if event.game_date is not None else None,
         }
         if not page.rows:
             return BotResponse(
-                text=f"В игре «{event.name}» нет записавшихся, которые ещё не подтвердили участие.",
+                text=(
+                    f"В игре {event_reference(event.name, event.game_date)} нет записавшихся, "
+                    "которые ещё не подтвердили участие."
+                ),
                 buttons=_pagination_buttons(
                     previous=None,
                     following=None,
@@ -2607,7 +2819,9 @@ class ConversationEngine:
         prefix = f"{invalid}\n\n" if invalid else ""
         return BotResponse(
             text=(
-                f"{prefix}Не подтвердившие участие в игре «{event.name}»\n\nВыберите игрока, чтобы увидеть его профили."
+                f"{prefix}Не подтвердившие участие в игре "
+                f"{event_reference(event.name, event.game_date)}\n\n"
+                "Выберите игрока, чтобы увидеть его профили."
             ),
             buttons=buttons,
         )
@@ -2788,7 +3002,9 @@ class ConversationEngine:
             user_id=message.identity.platform_user_id,
             payload=EmptyPayload(),
             reply_context=ReplyContext(
-                text_success=(f"🗑 Игрок «{registration.display_name}» удалён из игры «{context['event_name']}»."),
+                text_success=(
+                    f"🗑 Игрок «{registration.display_name}» удалён из игры {_context_event_reference(context)}."
+                ),
                 buttons=[player_management_button(event_id)],
             ),
             idempotency_key=f"{message.update_id}:{Operation.REMOVE_PARTICIPANT.value}",
@@ -2806,7 +3022,7 @@ class ConversationEngine:
         if count == 0:
             await self._clear(user)
             return BotResponse(
-                text=f"В игре «{event.name}» нет игроков, не подтвердивших участие.",
+                text=(f"В игре {event_reference(event.name, event.game_date)} нет игроков, не подтвердивших участие."),
                 buttons=[player_management_button(event.event_id)],
             )
         token = token_urlsafe(8)
@@ -2814,6 +3030,7 @@ class ConversationEngine:
         user.dialog_context = {
             "event_id": event.event_id,
             "event_name": event.name,
+            "game_date": event.game_date.isoformat() if event.game_date is not None else None,
             "remove_waiting_count": count,
             "remove_waiting_token": token,
         }
@@ -2821,7 +3038,7 @@ class ConversationEngine:
         return BotResponse(
             text=(
                 f"{prefix}⚠️ Вы действительно хотите удалить всех игроков, которые не подтвердили участие "
-                f"в игре «{event.name}»?\n\nБудет удалено игроков: {count}."
+                f"в игре {event_reference(event.name, event.game_date)}?\n\nБудет удалено игроков: {count}."
             ),
             buttons=[
                 Button(label="Да, удалить", value=f"admin:remove-waiting:confirm:{token}"),
@@ -3032,7 +3249,7 @@ class ConversationEngine:
                 )
             return BotResponse(
                 text=(
-                    f"Управление игрой «{event.name}»\n\n"
+                    f"Управление игрой {event_reference(event.name, event.game_date)}\n\n"
                     f"Количество игроков: {event.player_amount}\n"
                     "Статус: Архивирована\n\n"
                     "Разархивируйте игру, чтобы вернуть её в список управления."
@@ -3047,7 +3264,7 @@ class ConversationEngine:
             self._is_admin(user),
         )
         text = (
-            f"Управление игрой «{event.name}»\n\n"
+            f"Управление игрой {event_reference(event.name, event.game_date)}\n\n"
             f"Количество игроков: {event.player_amount}\n"
             f"Статус: {EVENT_STATUS_LABELS[event.status]}"
         )
@@ -3075,7 +3292,7 @@ class ConversationEngine:
     @staticmethod
     def _notification_management(event: Event) -> BotResponse:
         return BotResponse(
-            text=f"Уведомления игры «{event.name}»\n\nВыберите действие:",
+            text=f"Уведомления игры {event_reference(event.name, event.game_date)}\n\nВыберите действие:",
             buttons=[
                 Button(label=SEND_CONFIRMATION_REMINDER, value=f"ag:remind:{event.event_id}"),
                 Button(label=SEND_CONFIRMED_LINK, value=f"ag:notify-link:{event.event_id}"),
@@ -3087,7 +3304,7 @@ class ConversationEngine:
     @staticmethod
     def _player_management(event: Event) -> BotResponse:
         return BotResponse(
-            text=f"Управление игроками игры «{event.name}»\n\nВыберите действие:",
+            text=(f"Управление игроками игры {event_reference(event.name, event.game_date)}\n\nВыберите действие:"),
             buttons=[
                 Button(label=REMOVE_PLAYER, value=f"ag:remove:{event.event_id}"),
                 Button(label=REMOVE_WAITING_PLAYERS, value=f"ag:remove-waiting:{event.event_id}"),
@@ -3121,7 +3338,7 @@ class ConversationEngine:
                 return BotResponse(text="Недостаточно прав.")
             if event.archived_at is None:
                 return BotResponse(
-                    text=f"Игра «{event.name}» уже разархивирована.",
+                    text=f"Игра {event_reference(event.name, event.game_date)} уже разархивирована.",
                     buttons=[game_management_button(event.event_id)],
                 )
             await self._clear(user)
@@ -3132,7 +3349,10 @@ class ConversationEngine:
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
-                    text_success=f"📤 Игра «{event.name}» разархивирована. Регистрация остаётся закрытой.",
+                    text_success=(
+                        f"📤 Игра {event_reference(event.name, event.game_date)} разархивирована. "
+                        "Регистрация остаётся закрытой."
+                    ),
                     buttons=[Button(label=BACK, value=MANAGE_GAMES)],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.UNARCHIVE_EVENT.value}",
@@ -3145,7 +3365,7 @@ class ConversationEngine:
             )
         if event.archived_at is not None:
             return BotResponse(
-                text=f"Игра «{event.name}» уже архивирована.",
+                text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.",
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
         denied = await self._event_leader_required(user, event.event_id)
@@ -3156,11 +3376,12 @@ class ConversationEngine:
         user.dialog_context = {
             "event_id": event.event_id,
             "event_name": event.name,
+            "game_date": event.game_date.isoformat() if event.game_date is not None else None,
             "event_status": event.status.value,
         }
         if action == "status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
-            return _admin_status_response(event.name, event.status, event.event_id)
+            return _admin_status_response(event.name, event.status, event.event_id, event.game_date)
         if action == "player-amount":
             user.dialog_state = "ADMIN_UPDATE_PLAYER_AMOUNT"
             return BotResponse(
@@ -3176,13 +3397,13 @@ class ConversationEngine:
             await self._clear(user)
             if event.status is not EventStatus.CONFIRMATION_OPEN:
                 return BotResponse(
-                    text=f"Подтверждение участия для игры «{event.name}» не открыто.",
+                    text=(f"Подтверждение участия для игры {event_reference(event.name, event.game_date)} не открыто."),
                     buttons=[notification_management_button(event.event_id)],
                 )
             if event.confirmation_deadline is None:
                 return BotResponse(
                     text=(
-                        f"Для игры «{event.name}» не задан дедлайн. "
+                        f"Для игры {event_reference(event.name, event.game_date)} не задан дедлайн. "
                         "Снова откройте статус подтверждения и укажите дедлайн."
                     ),
                     buttons=[notification_management_button(event.event_id)],
@@ -3205,10 +3426,20 @@ class ConversationEngine:
             )
         if action == "notify-link":
             user.dialog_state = "ADMIN_NOTIFICATION_LINK_TEXT"
-            return _confirmed_notification_prompt(event.name, event.event_id, link=True)
+            return _confirmed_notification_prompt(
+                event.name,
+                event.event_id,
+                link=True,
+                game_date=event.game_date,
+            )
         if action in {"notify", "notify-message"}:
             user.dialog_state = "ADMIN_NOTIFICATION_MESSAGE_TEXT"
-            return _confirmed_notification_prompt(event.name, event.event_id, link=False)
+            return _confirmed_notification_prompt(
+                event.name,
+                event.event_id,
+                link=False,
+                game_date=event.game_date,
+            )
         if action == "waiting":
             return await self._show_waiting_players(user, event)
         if action == "players":
@@ -3221,7 +3452,7 @@ class ConversationEngine:
             if refreshed is None:
                 return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
             return BotResponse(
-                text=f"Таблицы игры «{event.name}»\n\n{event_table_links(refreshed)}",
+                text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(refreshed)}"),
                 buttons=[game_management_button(event.event_id)],
             )
         if action == "remove":
