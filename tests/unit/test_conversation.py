@@ -64,6 +64,7 @@ from larp_bot.application.conversation import (
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
     STATUS_REGISTRATION,
+    UNARCHIVE_GAME,
     UNSUPPORTED_CONTENT_RESPONSE,
     ConversationEngine,
 )
@@ -2201,9 +2202,7 @@ async def test_admin_game_buttons_are_newest_first_and_paginated(disk_store: Mem
 
 
 @pytest.mark.asyncio
-async def test_admin_sees_archived_games_only_in_read_only_archive_menu(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
+async def test_admin_can_unarchive_game_from_archive_menu(disk_store: MemoryDiskStore, event: Event) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     closed = Event(
         event_id="event-closed",
@@ -2227,7 +2226,7 @@ async def test_admin_sees_archived_games_only_in_read_only_archive_menu(
         )
         for index in range(PAGE_SIZE + 1)
     ]
-    engine, _, _, _ = await engine_setup(disk_store, closed, *archived, admin=True)
+    engine, _, publisher, _ = await engine_setup(disk_store, closed, *archived, admin=True)
 
     games = await engine.handle(inbound(1, MANAGE_GAMES))
 
@@ -2251,7 +2250,23 @@ async def test_admin_sees_archived_games_only_in_read_only_archive_menu(
 
     archived_management = await engine.handle(inbound(4, "ag:manage:event-archived-0", callback=True))
     assert "Статус: Архивирована" in archived_management.text
-    assert archived_management.buttons == [Button(label="⬅️ Назад", value=ARCHIVED_GAMES)]
+    assert archived_management.buttons == [
+        Button(label=UNARCHIVE_GAME, value="ag:unarchive:event-archived-0"),
+        Button(label="⬅️ Назад", value=ARCHIVED_GAMES),
+    ]
+
+    accepted = await engine.handle(inbound(5, "ag:unarchive:event-archived-0", callback=True))
+
+    assert accepted.text == "⏳ Разархивация принята в обработку."
+    assert accepted.deferred
+    assert accepted.command_enqueued
+    assert accepted.buttons == [Button(label="⬅️ Назад", value=MANAGE_GAMES)]
+    assert publisher.commands[-1].operation is Operation.UNARCHIVE_EVENT
+    assert publisher.commands[-1].participant_key is None
+    assert publisher.commands[-1].reply_context.text_success == (
+        "📤 Игра «Archived 0» разархивирована. Регистрация остаётся закрытой."
+    )
+    assert publisher.commands[-1].reply_context.buttons == [Button(label="⬅️ Назад", value=MANAGE_GAMES)]
 
 
 @pytest.mark.asyncio
@@ -2268,12 +2283,15 @@ async def test_gamemaster_cannot_list_or_open_archived_games(disk_store: MemoryD
     games = await engine.handle(inbound(1, MANAGE_GAMES))
     forged = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
     forged_action = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
+    forged_unarchive = await engine.handle(inbound(4, f"ag:unarchive:{event.event_id}", callback=True))
 
     assert not any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
     assert forged.text == "Игра не найдена."
     assert event.name not in forged.text
     assert forged_action.text == "Игра не найдена."
     assert event.name not in forged_action.text
+    assert forged_unarchive.text == "Игра не найдена."
+    assert event.name not in forged_unarchive.text
 
 
 @pytest.mark.asyncio

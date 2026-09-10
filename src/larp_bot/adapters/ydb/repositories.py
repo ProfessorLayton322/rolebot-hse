@@ -791,6 +791,26 @@ class YdbEventRepository:
         )
         return True
 
+    async def unarchive(self, event_id: str, updated_at: datetime) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.archived_at is None:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $archived_at AS Optional<Timestamp>;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET archived_at = $archived_at, updated_at = $updated_at
+            WHERE event_id = $event_id AND archived_at IS NOT NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$archived_at": None,
+                "$updated_at": updated_at.astimezone(UTC),
+            },
+        )
+        return True
+
     async def open_confirmation(self, event_id: str, deadline: datetime) -> bool:
         event = await self.get(event_id)
         if event is None:

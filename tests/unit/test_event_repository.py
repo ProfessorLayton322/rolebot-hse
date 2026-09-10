@@ -296,6 +296,21 @@ async def test_archive_sets_timestamp_and_closed_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unarchive_clears_timestamp_without_changing_status() -> None:
+    archived_at = datetime(2026, 9, 5, 15, tzinfo=UTC)
+    executor = RecordingExecutor([event_row("CLOSED") | {"archived_at": archived_at}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    updated_at = datetime(2026, 9, 10, 15, tzinfo=UTC)
+
+    assert await repository.unarchive("event-a1", updated_at)
+
+    assert "archived_at = $archived_at" in executor.query_text
+    assert "status =" not in executor.query_text
+    assert executor.params["$archived_at"] is None
+    assert executor.params["$updated_at"] == updated_at
+
+
+@pytest.mark.asyncio
 async def test_open_confirmation_persists_deadline_with_status() -> None:
     executor = RecordingExecutor([event_row("CREATED")])
     repository = YdbEventRepository(executor)  # type: ignore[arg-type]

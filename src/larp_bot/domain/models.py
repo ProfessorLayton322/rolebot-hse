@@ -122,6 +122,7 @@ class Operation(StrEnum):
     REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
     CLOSE_EVENT = "CLOSE_EVENT"
     ARCHIVE_EVENT = "ARCHIVE_EVENT"
+    UNARCHIVE_EVENT = "UNARCHIVE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
 
 
@@ -556,6 +557,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.CLOSE_EVENT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.ARCHIVE_EVENT,
+            Operation.UNARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }
         if self.operation in empty_payload_operations and not isinstance(self.payload, EmptyPayload):
