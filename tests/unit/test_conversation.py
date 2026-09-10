@@ -564,7 +564,7 @@ async def test_same_day_confirmation_requires_replacement_consent_before_charact
         "в «Другая игра». Вы уверены, что хотите это сделать?"
     )
     assert [button.label for button in replacement.buttons] == [
-        "Да, я хочу участвовать в другой игре",
+        "Да, я хочу участвовать в этой игре, а не в другой",
         "Нет, не хочу ничего менять",
     ]
     saved = await users.get(Platform.TELEGRAM, 1)
@@ -711,6 +711,59 @@ async def test_created_game_accepts_signup_but_does_not_offer_confirmation(
     assert confirmation_games.text == "Сейчас нет игр, доступных для подтверждения участия."
     assert not any(button.value == f"select:confirm:{event.event_id}" for button in confirmation_games.buttons)
     assert not publisher.commands
+
+
+@pytest.mark.asyncio
+async def test_confirmation_picker_filters_games_before_paginating(disk_store: MemoryDiskStore) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    game_date = date(2026, 11, 14)
+    events = [
+        Event(
+            event_id=f"event-{index:04d}",
+            name=(
+                f"Unavailable {index}"
+                if index < PAGE_SIZE
+                else f"Eligible {index - PAGE_SIZE}"
+                if index < PAGE_SIZE + 3
+                else "Already confirmed"
+            ),
+            game_date=game_date,
+            disk_resource_path=f"disk:/larp-bot/events/event-{index:04d}/game.xlsx",
+            public_registration_url=f"https://disk.example/{index}",
+            status=EventStatus.CREATED if index < PAGE_SIZE else EventStatus.CONFIRMATION_OPEN,
+            registrations_migrated_at=base,
+            created_at=base + timedelta(seconds=index),
+            updated_at=base + timedelta(seconds=index),
+        )
+        for index in range(PAGE_SIZE + 4)
+    ]
+    engine, _, _, registrations = await engine_setup(disk_store, *events)
+    await registrations.import_missing(
+        [
+            Registration(
+                event_id=candidate.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, 1, candidate.event_id),
+                display_name="Иван Иванов",
+                wish_play="Без пожеланий",
+                attendance_status=(
+                    AttendanceStatus.CANCELLED
+                    if candidate is events[PAGE_SIZE - 1]
+                    else AttendanceStatus.CONFIRMED
+                    if candidate is events[-1]
+                    else AttendanceStatus.WAITING
+                ),
+            )
+            for candidate in events
+        ]
+    )
+
+    response = await engine.handle(inbound(1, CONFIRM))
+    game_buttons = [button for button in response.buttons if button.value.startswith("select:confirm:")]
+
+    assert response.text == "✅ Выберите игру, участие в которой хотите подтвердить:"
+    assert [button.label for button in game_buttons] == ["Eligible 0", "Eligible 1", "Eligible 2"]
+    assert PAGE_FORWARD not in {button.label for button in response.buttons}
+    assert "Already confirmed" not in {button.label for button in response.buttons}
 
 
 @pytest.mark.asyncio
