@@ -122,6 +122,9 @@ ADD_EVENT_LEADER = "➕ Добавить мастера"
 ADD_SELF_EVENT_LEADER = "➕ Добавить себя мастером"
 REMOVE_EVENT_LEADER = "➖ Удалить мастера"
 LIST_EVENT_LEADERS = "📋 Список мастеров"
+CREATION_MASTER_QUESTION = "Собираетесь ли вы сами мастерить эту игру, или добавите на эту роль кого-то ещё?"
+CREATE_AS_MASTER = "Да, буду мастерить самостоятельно"
+CREATE_WITH_OTHER_MASTER = "Нет, выбрать мастера"
 ARCHIVE_GAME = "📦 Архивировать игру"
 UNARCHIVE_GAME = "📤 Разархивировать игру"
 LEGACY_DELETE_GAME = "🗑 Удалить игру"
@@ -206,6 +209,8 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_NAME",
         "ADMIN_CREATE_DATE",
         "ADMIN_CREATE_PLAYER_AMOUNT",
+        "ADMIN_CREATE_MASTER_CHOICE",
+        "ADMIN_CREATE_MASTER_PICK",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_LINK_TEXT",
@@ -1842,20 +1847,8 @@ class ConversationEngine:
             buttons=buttons,
         )
 
-    async def _show_event_master_candidates(
-        self,
-        user: User,
-        event: Event,
-        *,
-        offset: int = 0,
-    ) -> BotResponse:
-        if offset < 0:
-            return BotResponse(text="Некорректная страница.")
-        moderators, admins, current = await asyncio.gather(
-            self._moderator_users(),
-            self.admins.list_admins(),
-            self.events.list_leaders(event.event_id),
-        )
+    async def _master_candidates(self) -> list[User]:
+        moderators, admins = await asyncio.gather(self._moderator_users(), self.admins.list_admins())
         admin_profiles = await asyncio.gather(
             *(self.users.get(identity.platform, identity.platform_user_id) for identity in admins)
         )
@@ -1867,15 +1860,29 @@ class ConversationEngine:
                 if profile is not None
             }
         )
-        current_keys = {(identity.platform, identity.platform_user_id) for identity in current}
-        candidates = sorted(
-            (profile for key, profile in eligible.items() if key not in current_keys),
+        return sorted(
+            eligible.values(),
             key=lambda profile: (
                 (profile.full_name or "").casefold(),
                 self._identity(profile).platform.value,
                 user_id(profile),
             ),
         )
+
+    async def _show_event_master_candidates(
+        self,
+        user: User,
+        event: Event,
+        *,
+        offset: int = 0,
+    ) -> BotResponse:
+        if offset < 0:
+            return BotResponse(text="Некорректная страница.")
+        eligible, current = await asyncio.gather(
+            self._master_candidates(),
+            self.events.list_leaders(event.event_id),
+        )
+        candidates = [profile for profile in eligible if self._identity(profile) not in current]
         if offset >= len(candidates) and offset:
             offset = max(0, ((len(candidates) - 1) // PAGE_SIZE) * PAGE_SIZE)
         page = candidates[offset : offset + PAGE_SIZE]
@@ -1910,6 +1917,140 @@ class ConversationEngine:
             )
         )
         return BotResponse(text=text, buttons=buttons)
+
+    @staticmethod
+    def _creation_master_question(user: User) -> BotResponse:
+        user.dialog_state = "ADMIN_CREATE_MASTER_CHOICE"
+        return BotResponse(
+            text=CREATION_MASTER_QUESTION,
+            buttons=[
+                Button(label=CREATE_AS_MASTER, value="create:master-self"),
+                Button(label=CREATE_WITH_OTHER_MASTER, value="create:master-pick"),
+            ],
+        )
+
+    async def _show_creation_master_candidates(self, user: User, *, offset: int = 0, notice: str = "") -> BotResponse:
+        creator = self._identity(user)
+        candidates = [profile for profile in await self._master_candidates() if self._identity(profile) != creator]
+        if offset >= len(candidates) and offset:
+            offset = max(0, ((len(candidates) - 1) // PAGE_SIZE) * PAGE_SIZE)
+        page = candidates[offset : offset + PAGE_SIZE]
+        user.dialog_state = "ADMIN_CREATE_MASTER_PICK"
+        user.dialog_context["master_offset"] = offset
+        buttons = [
+            Button(
+                label=self._person_label(self._identity(profile), profile),
+                value=f"create:master:{self._platform_code(self._identity(profile).platform)}:{user_id(profile)}",
+            )
+            for profile in page
+        ]
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"create:master-page:{max(0, offset - PAGE_SIZE)}" if offset else None,
+                following=f"create:master-page:{offset + PAGE_SIZE}" if offset + PAGE_SIZE < len(candidates) else None,
+                cancel="create:master-choice",
+            )
+        )
+        reference = event_reference(
+            str(user.dialog_context["event_name"]),
+            date.fromisoformat(str(user.dialog_context["game_date"])),
+        )
+        text = (
+            f"Выберите модератора или администратора, который станет первым мастером игры {reference}:"
+            if page
+            else "Нет других модераторов или администраторов, которых можно выбрать мастером."
+        )
+        return BotResponse(text=f"{notice}{text}", buttons=buttons)
+
+    async def _creation_master_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        if "created_event_id" in user.dialog_context:
+            return await self._finish_game_creation(user)
+        if not await self._is_admin(user):
+            await self._clear(user)
+            return BotResponse(text="Недостаточно прав.")
+        if value == "create:master-self":
+            return await self._create_game(user, message, user)
+        if value == "create:master-pick":
+            return await self._show_creation_master_candidates(user)
+        if user.dialog_state != "ADMIN_CREATE_MASTER_PICK" or value == "create:master-choice":
+            return self._creation_master_question(user)
+        offset = int(user.dialog_context.get("master_offset", 0))
+        parts = value.split(":")
+        if value.startswith("create:master-page:") and len(parts) == 3 and parts[2].isdecimal():
+            return await self._show_creation_master_candidates(user, offset=int(parts[2]))
+        if value.startswith("create:master:") and len(parts) == 4 and parts[2] in {"t", "v"} and parts[3].isdecimal():
+            target = await self.users.get(self._platform_from_code(parts[2]), int(parts[3]))
+            if target is not None and await self._has_admin_access(target):
+                return await self._create_game(user, message, target)
+            return await self._show_creation_master_candidates(
+                user,
+                offset=offset,
+                notice="Мастером можно выбрать только модератора или администратора.\n\n",
+            )
+        return await self._show_creation_master_candidates(user, offset=offset)
+
+    async def _create_game(self, user: User, message: InboundMessage, master: User) -> BotResponse:
+        context = user.dialog_context
+        game_date = date.fromisoformat(str(context["game_date"]))
+        master_identity = self._identity(master)
+        event = await self.administration.create_event(
+            str(context["event_name"]),
+            game_date,
+            int(context["player_amount"]),
+            [master_identity],
+        )
+        if master_identity == self._identity(user):
+            await self._clear(user)
+            return self._game_created_response(event, game_date)
+        # Persist the game before notifying, so a retried update finishes it instead of creating another.
+        context["created_event_id"] = event.event_id
+        context["master_platform"] = master_identity.platform.value
+        context["master_user_id"] = master_identity.platform_user_id
+        context["master_grant_request"] = (
+            f"leader-grant:{event.event_id}:{master_identity.platform.value}:"
+            f"{master_identity.platform_user_id}:{message.update_id}"
+        )
+        await self.users.save(user)
+        return await self._finish_game_creation(user)
+
+    async def _finish_game_creation(self, user: User) -> BotResponse:
+        context = user.dialog_context
+        event = await self.events.get(str(context["created_event_id"]))
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.")
+        identity = BotIdentity(
+            platform=Platform(str(context["master_platform"])),
+            platform_user_id=int(context["master_user_id"]),
+        )
+        master = await self.users.get(identity.platform, identity.platform_user_id)
+        request_id = str(context["master_grant_request"])
+        if master is not None and master.last_delivery_operation_id != request_id:
+            await self._notify_status_change(
+                user,
+                master,
+                request_id=request_id,
+                text=f"Вы добавлены мастером игры {event_reference(event.name, event.game_date)}.",
+                buttons=[Button(label="Управление игрой", value=f"ag:manage:{event.event_id}")],
+            )
+        game_date = date.fromisoformat(str(context["game_date"]))
+        await self._clear(user)
+        return self._game_created_response(event, game_date, master_label=self._person_label(identity, master))
+
+    @staticmethod
+    def _game_created_response(event: Event, game_date: date, *, master_label: str | None = None) -> BotResponse:
+        master_line = "" if master_label is None else f"Мастер: {master_label}\n\n"
+        return BotResponse(
+            text=(
+                f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
+                f"Дата игры: {format_game_date(game_date)}\n\n"
+                f"Количество игроков: {event.player_amount}\n\n"
+                f"{master_line}"
+                f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
+                "но пока не могут подтверждать участие."
+            ),
+            buttons=[game_management_button(event.event_id)],
+        )
 
     async def _show_event_masters(
         self,
@@ -2291,6 +2432,8 @@ class ConversationEngine:
             return await self._admin_remove_waiting_confirm(user, message, value)
         if user.dialog_state == "ADMIN_WAITING_PICK":
             return await self._admin_waiting_pick(user, value)
+        if user.dialog_state in {"ADMIN_CREATE_MASTER_CHOICE", "ADMIN_CREATE_MASTER_PICK"}:
+            return await self._creation_master_step(user, message, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
             clean_name = value.strip()
             if not clean_name:
@@ -2315,24 +2458,10 @@ class ConversationEngine:
             player_amount = int(raw_amount)
             if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
                 return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
-            game_date = date.fromisoformat(str(user.dialog_context["game_date"]))
-            event = await self.administration.create_event(
-                str(user.dialog_context["event_name"]),
-                game_date,
-                player_amount,
-                [self._identity(user)],
-            )
-            await self._clear(user)
-            return BotResponse(
-                text=(
-                    f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
-                    f"Дата игры: {format_game_date(game_date)}\n\n"
-                    f"Количество игроков: {event.player_amount}\n\n"
-                    f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
-                    "но пока не могут подтверждать участие."
-                ),
-                buttons=[game_management_button(event.event_id)],
-            )
+            user.dialog_context["player_amount"] = player_amount
+            if await self._is_admin(user):
+                return self._creation_master_question(user)
+            return await self._create_game(user, message, user)
         if user.dialog_state == "ADMIN_UPDATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
             if not raw_amount.isdecimal():

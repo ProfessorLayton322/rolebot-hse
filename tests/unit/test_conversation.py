@@ -32,6 +32,7 @@ from larp_bot.application.conversation import (
     CO_PLAYER_WISH_SKIP,
     CO_PLAYER_WISHES,
     CONFIRM,
+    CREATION_MASTER_QUESTION,
     ENLIST,
     EVENT_TABLES,
     FREE_TEXT_DIALOG_STATES,
@@ -1976,7 +1977,14 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
     assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
     invalid = await engine.handle(inbound(5, "много"))
     assert invalid.text == "Введите целое количество игроков от 1 до 10000:"
-    response = await engine.handle(inbound(6, "24"))
+    question = await engine.handle(inbound(6, "24"))
+    assert question.text == "Собираетесь ли вы сами мастерить эту игру, или добавите на эту роль кого-то ещё?"
+    assert question.buttons == [
+        Button(label="Да, буду мастерить самостоятельно", value="create:master-self"),
+        Button(label="Нет, выбрать мастера", value="create:master-pick"),
+    ]
+    assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]
+    response = await engine.handle(inbound(7, "create:master-self", callback=True))
 
     created_events = await engine.events.list_page(limit=10)
     created = next(candidate for candidate in created_events if candidate.name == "Бал в зимнем дворце")
@@ -1998,10 +2006,10 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
     ]
 
     assert "Дата игры: 14.11.26" in response.text
-    management = await engine.handle(inbound(7, response.buttons[0].value, callback=True))
+    management = await engine.handle(inbound(8, response.buttons[0].value, callback=True))
     assert "Управление игрой «Бал в зимнем дворце» (14.11.26)" in management.text
     assert EVENT_TABLES in [button.label for button in management.buttons]
-    tables = await engine.handle(inbound(8, f"ag:tables:{created.event_id}", callback=True))
+    tables = await engine.handle(inbound(9, f"ag:tables:{created.event_id}", callback=True))
     assert tables.text.count("https://disk.example/public/") == 3
     assert MASTER_TABLE_DISCLAIMER in tables.text
     assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
@@ -2022,13 +2030,142 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
     await engine.handle(inbound(1, "➕ Создать игру"))
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
-    await engine.handle(inbound(4, "20"))
+    response = await engine.handle(inbound(4, "20"))
 
+    assert response.text.startswith("✅ Игра создана.")
     created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
     leaders = await engine.events.list_leaders(created.event_id)
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
         (Platform.TELEGRAM, 1),
     }
+
+
+@pytest.mark.asyncio
+async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_first_master(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True, tg_admin_ids={20})
+    for target_id in (*range(2, 8), 20):
+        await users.save(
+            TelegramUser(
+                tg_id=target_id,
+                telegram_handle=f"@privileged_{target_id}",
+                full_name=f"Мастер {target_id:02d}",
+                vk_url=f"https://vk.com/id{target_id}",
+                crossplay=True,
+                larp_experience=False,
+                needs_pass=False,
+                is_gamemaster=target_id != 20,
+            )
+        )
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая игра"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
+    first_page = await engine.handle(inbound(5, "create:master-pick", callback=True))
+    second_page = await engine.handle(inbound(6, "create:master-page:5", callback=True))
+
+    assert first_page.text == (
+        "Выберите модератора или администратора, который станет первым мастером игры «Новая игра» (15.11.26):"
+    )
+    assert [button.value for button in first_page.buttons] == [
+        *(f"create:master:t:{target_id}" for target_id in range(2, 7)),
+        "create:master-page:5",
+        "create:master-choice",
+    ]
+    assert [button.label for button in second_page.buttons] == [
+        "Мастер 07 · TG",
+        "Мастер 20 · TG",
+        PAGE_BACK,
+        "Отмена",
+    ]
+    assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]
+
+    response = await engine.handle(inbound(7, "create:master:t:20", callback=True))
+
+    created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
+    assert await engine.events.list_leaders(created.event_id) == [
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=20)
+    ]
+    assert response.text.startswith("✅ Игра создана.")
+    assert "Мастер: Мастер 20 · TG" in response.text
+    assert response.buttons == [Button(label=BACK, value=f"ag:manage:{created.event_id}")]
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == [
+        (
+            Platform.TELEGRAM,
+            20,
+            f"leader-grant:{created.event_id}:telegram:20:7",
+            "Вы добавлены мастером игры «Новая игра» (15.11.26).",
+            (Button(label="Управление игрой", value=f"ag:manage:{created.event_id}"),),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admin_created_game_master_notification_retry_does_not_create_a_second_game(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    engine.transport = FailOnceTransport()
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@moderator_2",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+            is_gamemaster=True,
+        )
+    )
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая игра"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
+    await engine.handle(inbound(5, "create:master-pick", callback=True))
+    pick = inbound(6, "create:master:t:2", callback=True)
+
+    with pytest.raises(RuntimeError, match="temporary transport failure"):
+        await engine.handle(pick)
+    response = await engine.handle(pick)
+
+    created = [candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра"]
+    assert len(created) == 1
+    assert await engine.events.list_leaders(created[0].event_id) == [
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2)
+    ]
+    assert response.text.startswith("✅ Игра создана.")
+    assert isinstance(engine.transport, FailOnceTransport)
+    assert [sent[2] for sent in engine.transport.sent] == [f"leader-grant:{created[0].event_id}:telegram:2:6"]
+
+
+@pytest.mark.asyncio
+async def test_admin_creation_master_picker_returns_to_question_and_rechecks_admin_role(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая игра"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
+
+    empty = await engine.handle(inbound(5, "create:master-pick", callback=True))
+    question = await engine.handle(inbound(6, "create:master-choice", callback=True))
+
+    assert empty.text == "Нет других модераторов или администраторов, которых можно выбрать мастером."
+    assert empty.buttons == [Button(label="Отмена", value="create:master-choice")]
+    assert question.text == CREATION_MASTER_QUESTION
+
+    assert isinstance(engine.admins, StaticAdminProvider)
+    engine.admins.tg_ids.clear()
+    engine.admins.tg_gamemaster_ids.add(1)
+    denied = await engine.handle(inbound(7, "create:master-self", callback=True))
+
+    assert denied.text == "Недостаточно прав."
+    assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]
 
 
 @pytest.mark.asyncio
