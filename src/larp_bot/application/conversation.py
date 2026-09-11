@@ -2767,6 +2767,7 @@ class ConversationEngine:
                 target,
                 request_id=request_id,
                 text=GAMEMASTER_NOTIFICATION,
+                buttons=[admin_menu_button()],
             )
 
         if message.identity.platform is target_platform and message.identity.platform_user_id == target_id:
