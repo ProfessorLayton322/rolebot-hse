@@ -22,6 +22,19 @@ resource "cloudflare_worker_version" "telegram_ingress" {
     content_file = "${path.module}/../../cloudflare/telegram-ingress/dist/index.js"
     content_type = "application/javascript+module"
   }]
+
+  # Per-sender Telegram update limit. namespace_id is account-wide: any other
+  # Worker binding the same ID would share these counters. `wrangler secret bulk`
+  # patches only secrets, so this binding carries over to the secret upload.
+  bindings = [{
+    type         = "ratelimit"
+    name         = "TG_USER_RATE_LIMITER"
+    namespace_id = "731001"
+    simple = {
+      limit  = var.telegram_user_rate_limit_per_minute
+      period = 60
+    }
+  }]
 }
 
 resource "cloudflare_workers_deployment" "telegram_ingress" {

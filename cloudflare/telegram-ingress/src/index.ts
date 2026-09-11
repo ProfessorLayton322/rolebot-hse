@@ -5,6 +5,7 @@ export interface Env {
   BACKEND_INLINE_CUTOFF_MS?: string;
   INGRESS_HARD_DEADLINE_MS?: string;
   MAX_BODY_BYTES?: string;
+  TG_USER_RATE_LIMITER?: RateLimit;
 }
 
 type YandexContract =
@@ -45,6 +46,31 @@ function emptyOk(): Response {
   return new Response(null, { status: 200 });
 }
 
+// Every update type this bot subscribes to (message, callback_query) carries its
+// sender in the `from` field of its single top-level payload object.
+function senderId(update: Record<string, unknown>): number | undefined {
+  for (const value of Object.values(update)) {
+    if (typeof value !== "object" || value === null) continue;
+    const from = (value as { from?: unknown }).from;
+    if (typeof from !== "object" || from === null) continue;
+    const id = (from as { id?: unknown }).id;
+    if (typeof id === "number" && Number.isSafeInteger(id)) return id;
+  }
+  return undefined;
+}
+
+async function senderIsRateLimited(update: Record<string, unknown>, env: Env): Promise<boolean> {
+  const sender = senderId(update);
+  if (!env.TG_USER_RATE_LIMITER || sender === undefined) return false;
+  try {
+    const { success } = await env.TG_USER_RATE_LIMITER.limit({ key: `telegram:${sender}` });
+    return !success;
+  } catch {
+    // A limiter outage must never drop real users' updates.
+    return false;
+  }
+}
+
 async function handle(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
@@ -62,13 +88,22 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   if (body.byteLength > maxBody) {
     return new Response("Payload Too Large", { status: 413 });
   }
+  let update: Record<string, unknown>;
   try {
     const decoded = JSON.parse(new TextDecoder().decode(body)) as unknown;
     if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
       throw new Error("not an object");
     }
+    update = decoded as Record<string, unknown>;
   } catch {
     return new Response("Bad Request", { status: 400 });
+  }
+  if (await senderIsRateLimited(update, env)) {
+    // Telegram redelivers any non-2xx response, so an over-limit update is acknowledged
+    // and dropped here before it costs anything in Yandex. No reply is sent: replies
+    // would spend the bot's shared Bot API send budget on the spammer.
+    console.warn("telegram_update_rate_limited");
+    return emptyOk();
   }
 
   const receivedAt = Date.now();

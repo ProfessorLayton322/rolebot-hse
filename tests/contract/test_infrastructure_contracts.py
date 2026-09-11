@@ -132,3 +132,20 @@ def test_user_models_do_not_contain_character_wish_source_field() -> None:
     models = (ROOT / "src/larp_bot/domain/models.py").read_text()
     user_section = models.split("class UserBase", 1)[1].split("class Event", 1)[0]
     assert "character_wish" not in user_section
+
+
+def test_rate_limits_are_wired_into_telegram_and_yandex() -> None:
+    variables = (ROOT / "infra/terraform/variables.tf").read_text()
+    cloudflare = (ROOT / "infra/terraform/cloudflare.tf").read_text()
+    webhook = (ROOT / "scripts/configure_telegram_webhook.sh").read_text()
+    ingress = (ROOT / "cloudflare/telegram-ingress/src/index.ts").read_text()
+
+    assert re.search(r'variable "webhook_rate_limit_rps" \{\s+type\s+= number\s+default = 10\n', variables)
+    assert "max_connections=5" in webhook
+    ingress_version = cloudflare.split('resource "cloudflare_worker_version" "telegram_ingress"', 1)[1]
+    ingress_version = ingress_version.split("\n}\n", 1)[0]
+    assert 'type         = "ratelimit"' in ingress_version
+    assert 'name         = "TG_USER_RATE_LIMITER"' in ingress_version
+    assert "limit  = var.telegram_user_rate_limit_per_minute" in ingress_version
+    assert "period = 60" in ingress_version
+    assert "env.TG_USER_RATE_LIMITER" in ingress

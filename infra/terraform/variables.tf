@@ -57,10 +57,20 @@ variable "worker_max_instances" {
 
 variable "webhook_rate_limit_rps" {
   type    = number
-  default = 25
+  default = 10
   validation {
     condition     = var.webhook_rate_limit_rps >= 1 && var.webhook_rate_limit_rps <= 1000
     error_message = "webhook_rate_limit_rps must be between 1 and 1000."
+  }
+}
+
+variable "telegram_user_rate_limit_per_minute" {
+  type        = number
+  description = "Telegram updates one user may send per minute before the ingress Worker drops the rest."
+  default     = 30
+  validation {
+    condition     = var.telegram_user_rate_limit_per_minute >= 1 && var.telegram_user_rate_limit_per_minute <= 1000
+    error_message = "telegram_user_rate_limit_per_minute must be between 1 and 1000."
   }
 }
 
