@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import functools
 import json
 import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from larp_bot.adapters.memory import MemoryDeferredTransport
+from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.telegram import parse_telegram_update
 from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.domain.models import BotResponse, Button
@@ -17,6 +20,7 @@ from larp_bot.functions.gateway.handler import (
     _telegram,
     _verify_cloudflare,
     _vk,
+    _vk_confirmation,
     _vk_confirmation_from_config,
     async_handler,
 )
@@ -289,3 +293,36 @@ async def test_vk_confirmation_route_does_not_initialize_container() -> None:
     assert result == confirmation_response
     confirmation.assert_awaited_once()
     container_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_vk_confirmations_share_one_cached_runtime_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if str(request.url) == RuntimeConfigProvider.TOKEN_EXCHANGE_URL:
+            return httpx.Response(200, json={"access_token": "identity-token"})
+        return httpx.Response(200, json={"values": FakeConfig().values})
+
+    monkeypatch.setenv("RUNTIME_CONFIG_URL", "https://config.example/runtime/config")
+    monkeypatch.setenv("RUNTIME_CONFIG_AUDIENCE", "https://config.example/runtime/config")
+    monkeypatch.setenv("RUNTIME_SERVICE_ACCOUNT_ID", "service-account-id")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with (
+            patch("larp_bot.functions.gateway.handler._confirmation_config", None),
+            patch(
+                "larp_bot.functions.gateway.handler.RuntimeConfigProvider",
+                functools.partial(RuntimeConfigProvider, client=client),
+            ),
+        ):
+            context = SimpleNamespace(token={"access_token": "context-token"})
+            forged = {"type": "confirmation", "group_id": 42, "secret": "forged"}
+            for _ in range(3):
+                assert (await _vk_confirmation(forged, context))["statusCode"] == 403
+            genuine = {"type": "confirmation", "group_id": 42, "secret": "vk-secret"}
+            result = await _vk_confirmation(genuine, context)
+
+    assert result["body"] == "confirmation-value"
+    # One identity exchange and one runtime-config fetch serve every callback in the cache window.
+    assert len(requests) == 2

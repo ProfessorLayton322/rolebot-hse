@@ -8,8 +8,6 @@ import os
 import time
 from typing import Any
 
-import httpx
-
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.telegram import parse_telegram_update, telegram_inline_payload
 from larp_bot.adapters.vk import parse_vk_event
@@ -19,6 +17,7 @@ from larp_bot.functions.bootstrap import AppContainer, build_container, iam_toke
 
 LOGGER = logging.getLogger("larp_bot.gateway")
 _container: AppContainer | None = None
+_confirmation_config: RuntimeConfigProvider | None = None
 # AppContainer owns async HTTP clients and their keep-alive connections. A
 # persistent Runner keeps those resources on the same event loop for every
 # invocation handled by a warm Function process.
@@ -173,24 +172,40 @@ async def _vk_confirmation_from_config(
     return _response(200, confirmation)
 
 
-async def _vk_confirmation(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    required = {
-        "config_url": "RUNTIME_CONFIG_URL",
-        "audience": "RUNTIME_CONFIG_AUDIENCE",
-        "service_account_id": "RUNTIME_SERVICE_ACCOUNT_ID",
-    }
-    missing = [environment for environment in required.values() if not os.getenv(environment)]
-    if missing:
-        raise RuntimeError(f"missing required runtime config: {', '.join(missing)}")
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        config = RuntimeConfigProvider(
+def _confirmation_config_instance(context: Any) -> RuntimeConfigProvider:
+    """Return the warm-process provider that answers VK confirmation callbacks.
+
+    It stays independent of the application container so VK can confirm the server
+    while YDB and other downstream services start. Reusing one provider keeps its
+    60-second secret cache, so repeated or forged confirmations cost at most one
+    identity exchange and one runtime-config fetch per warm process per minute.
+    """
+    global _confirmation_config
+    iam_token = iam_token_from_context(context)
+    if _confirmation_config is None:
+        required = {
+            "config_url": "RUNTIME_CONFIG_URL",
+            "audience": "RUNTIME_CONFIG_AUDIENCE",
+            "service_account_id": "RUNTIME_SERVICE_ACCOUNT_ID",
+        }
+        missing = [environment for environment in required.values() if not os.getenv(environment)]
+        if missing:
+            raise RuntimeError(f"missing required runtime config: {', '.join(missing)}")
+        # The provider's own HTTP client lives on the persistent Runner loop, like
+        # the application container's clients.
+        _confirmation_config = RuntimeConfigProvider(
             os.environ[required["config_url"]],
             os.environ[required["audience"]],
             os.environ[required["service_account_id"]],
-            client=client,
-            iam_token=iam_token_from_context(context),
+            iam_token=iam_token,
         )
-        return await _vk_confirmation_from_config(event, config)
+    elif iam_token is not None:
+        _confirmation_config.set_iam_token(iam_token)
+    return _confirmation_config
+
+
+async def _vk_confirmation(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    return await _vk_confirmation_from_config(event, _confirmation_config_instance(context))
 
 
 def _reject_obviously_unauthenticated_vk(body: bytes) -> dict[str, Any] | None:
