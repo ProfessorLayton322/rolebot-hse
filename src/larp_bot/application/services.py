@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from urllib.parse import urlsplit
@@ -235,6 +235,28 @@ class RegisteredGamesPage:
     has_next: bool
 
 
+@dataclass(frozen=True)
+class EventPage:
+    events: list[Event]
+    has_previous: bool
+    has_next: bool
+
+
+@dataclass(frozen=True)
+class GameParticipation:
+    """A waiting or confirmed registration, event-master membership, or both."""
+
+    registration: Registration | None
+    is_leader: bool
+
+
+@dataclass(frozen=True)
+class GameOverview:
+    participation: GameParticipation
+    in_main_roster: bool
+    chat_links: list[str]
+
+
 async def player_registrations_on_date(
     events: EventRepository,
     catalog: RegistrationCatalog,
@@ -370,30 +392,123 @@ class RegistrationService:
         event_limit: int = 10,
         concurrency: int = 3,
     ) -> RegisteredGamesPage:
+        accepted_registration_statuses = None if registration_statuses is None else set(registration_statuses)
+        found: dict[str, Registration] = {}
+
+        async def registered(event: Event) -> bool:
+            registration = await self.catalog.get(event, self.key(platform, user_id, event.event_id))
+            if registration is None or (
+                accepted_registration_statuses is not None
+                and registration.attendance_status not in accepted_registration_statuses
+            ):
+                return False
+            found[event.event_id] = registration
+            return True
+
+        page = await self._event_page(
+            registered,
+            statuses=statuses,
+            archived=archived,
+            after=after,
+            before=before,
+            event_limit=event_limit,
+            concurrency=concurrency,
+        )
+        return RegisteredGamesPage(
+            rows=[(event, found[event.event_id]) for event in page.events],
+            first_event=page.events[0] if page.events else None,
+            last_event=page.events[-1] if page.events else None,
+            has_previous=page.has_previous,
+            has_next=page.has_next,
+        )
+
+    async def participating_games_page(
+        self,
+        platform: Platform,
+        user_id: int,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        event_limit: int = 10,
+        concurrency: int = 3,
+    ) -> EventPage:
+        """Page the non-archived games the user plays in or leads as a master."""
+
+        async def participates(event: Event) -> bool:
+            return await self._participation(event, platform, user_id) is not None
+
+        return await self._event_page(
+            participates,
+            archived=False,
+            after=after,
+            before=before,
+            event_limit=event_limit,
+            concurrency=concurrency,
+        )
+
+    async def game_overview(self, event: Event, platform: Platform, user_id: int) -> GameOverview | None:
+        participation = await self._participation(event, platform, user_id)
+        if participation is None:
+            return None
+        registration = participation.registration
+        in_main_roster = False
+        receives_chat_links = False
+        if registration is not None:
+            registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
+            main_roster = _active_main_roster(registrations, event.player_amount)
+            in_main_roster = any(active.participant_key == registration.participant_key for active in main_roster)
+            link_recipients = _chat_link_recipient_keys(registrations, event.player_amount)
+            receives_chat_links = registration.participant_key in link_recipients
+        # Stored chat links are shown only to the players they are sent to and to the game's masters.
+        chat_links = (
+            list(dict.fromkeys(text for text in event.confirmed_notifications if is_plain_chat_link(text)))
+            if participation.is_leader or receives_chat_links
+            else []
+        )
+        return GameOverview(participation=participation, in_main_roster=in_main_roster, chat_links=chat_links)
+
+    async def _participation(self, event: Event, platform: Platform, user_id: int) -> GameParticipation | None:
+        registration, leaders = await asyncio.gather(
+            self.catalog.get(event, self.key(platform, user_id, event.event_id)),
+            self.events.list_leaders(event.event_id),
+        )
+        if registration is not None and registration.attendance_status is AttendanceStatus.CANCELLED:
+            registration = None
+        is_leader = BotIdentity(platform=platform, platform_user_id=user_id) in leaders
+        if registration is None and not is_leader:
+            return None
+        return GameParticipation(registration=registration, is_leader=is_leader)
+
+    async def _event_page(
+        self,
+        keep: Callable[[Event], Awaitable[bool]],
+        *,
+        statuses: Collection[EventStatus] | None = None,
+        archived: bool | None,
+        after: tuple[datetime, str] | None,
+        before: tuple[datetime, str] | None,
+        event_limit: int,
+        concurrency: int,
+    ) -> EventPage:
+        """Page the events that ``keep`` accepts, scanning at most ten events per repository query."""
+
         if event_limit < 1:
             raise ValueError("event page size must be positive")
         if concurrency < 1:
             raise ValueError("concurrency must be positive")
-        accepted_registration_statuses = None if registration_statuses is None else set(registration_statuses)
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def inspect(event: Event) -> tuple[Event, Registration] | None:
+        async def check(event: Event) -> bool:
             async with semaphore:
-                found = await self.catalog.get(event, self.key(platform, user_id, event.event_id))
-                if found is None or (
-                    accepted_registration_statuses is not None
-                    and found.attendance_status not in accepted_registration_statuses
-                ):
-                    return None
-                return event, found
+                return await keep(event)
 
         async def scan(
             *,
             after_cursor: tuple[datetime, str] | None = None,
             before_cursor: tuple[datetime, str] | None = None,
             match_limit: int,
-        ) -> list[tuple[Event, Registration]]:
-            matches: list[tuple[Event, Registration]] = []
+        ) -> list[Event]:
+            matches: list[Event] = []
             scan_limit = min(event_limit, 10)
             while True:
                 candidates = list(
@@ -407,7 +522,8 @@ class RegistrationService:
                 )
                 if not candidates:
                     break
-                inspected = [item for item in await asyncio.gather(*(inspect(event) for event in candidates)) if item]
+                kept = await asyncio.gather(*(check(event) for event in candidates))
+                inspected = [event for event, accepted in zip(candidates, kept, strict=True) if accepted]
                 if before_cursor is not None:
                     matches = inspected + matches
                     if len(matches) >= match_limit:
@@ -426,25 +542,13 @@ class RegistrationService:
 
         matches = await scan(after_cursor=after, before_cursor=before, match_limit=event_limit)
         if not matches:
-            return RegisteredGamesPage(
-                rows=[],
-                first_event=None,
-                last_event=None,
-                has_previous=False,
-                has_next=False,
-            )
-        first, last = matches[0][0], matches[-1][0]
+            return EventPage(events=[], has_previous=False, has_next=False)
+        first, last = matches[0], matches[-1]
         previous, following = await asyncio.gather(
             scan(before_cursor=(first.created_at, first.event_id), match_limit=1),
             scan(after_cursor=(last.created_at, last.event_id), match_limit=1),
         )
-        return RegisteredGamesPage(
-            rows=matches,
-            first_event=first,
-            last_event=last,
-            has_previous=bool(previous),
-            has_next=bool(following),
-        )
+        return EventPage(events=matches, has_previous=bool(previous), has_next=bool(following))
 
     async def enqueue_profile_updates(
         self,
@@ -868,6 +972,16 @@ def _active_main_roster(registrations: Sequence[Registration], player_amount: in
     return active[:player_amount]
 
 
+def _chat_link_recipient_keys(registrations: Sequence[Registration], player_amount: int) -> set[str]:
+    """Stored chat links belong only to confirmed players inside the active main roster."""
+
+    return {
+        registration.participant_key
+        for registration in _active_main_roster(registrations, player_amount)
+        if registration.attendance_status is AttendanceStatus.CONFIRMED
+    }
+
+
 def confirmation_success_text(event: Event, character_wish: str, *, in_main_roster: bool) -> str:
     link_text = "Мастера скоро отправят вам ссылку на чат игры!\n\n" if in_main_roster else ""
     return (
@@ -1054,11 +1168,7 @@ class ConfirmationNotificationService:
             buttons=confirmation_buttons,
         )
         registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
-        link_recipients = {
-            registration.participant_key
-            for registration in _active_main_roster(registrations, event.player_amount)
-            if registration.attendance_status is AttendanceStatus.CONFIRMED
-        }
+        link_recipients = _chat_link_recipient_keys(registrations, event.player_amount)
         delivered_notifications = [
             (index, stored_text)
             for index, stored_text in enumerate(event.confirmed_notifications)

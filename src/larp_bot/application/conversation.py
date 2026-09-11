@@ -63,6 +63,7 @@ from .ports import (
 )
 from .services import (
     EventAdministrationService,
+    GameOverview,
     RegistrationService,
     closed_game_cancellation_message,
     confirmed_notification_text,
@@ -80,6 +81,7 @@ CHARACTER_WISHES = "Пожелания по персонажу"
 CO_PLAYER_WISHES = "Пожелания по соигрокам"
 CO_PLAYER_WISH_SKIP = "wishes:co-player:skip"
 CANCEL = "❌ Отменить участие"
+MY_GAMES = "Мои игры"
 ADMIN = "🛠 Администрирование"
 BACK = "⬅️ Назад"
 CANCEL_DIALOG = "Отмена"
@@ -244,7 +246,7 @@ def yes_no_buttons() -> list[Button]:
 
 
 def main_buttons(has_admin_access: bool) -> list[Button]:
-    labels = [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL]
+    labels = [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
     if has_admin_access:
         labels.append(ADMIN)
     return [Button(label=label, value=label) for label in labels]
@@ -287,6 +289,7 @@ def _player_game_picker_text(flow: str) -> str:
         "character": "🎭 Выберите игру, для которой хотите изменить пожелания:",
         "wishes": "🎭 Выберите игру, для которой хотите изменить пожелания:",
         "cancel": "❌ Выберите игру, участие в которой хотите отменить:",
+        "mine": "Выберите игру, чтобы посмотреть информацию о ней:",
     }[flow]
 
 
@@ -297,11 +300,29 @@ def _no_games_for_action_text(flow: str) -> str:
         "character": "Сейчас нет игр, доступных для изменения пожеланий.",
         "wishes": "Нет игр, на которые вы записаны.",
         "cancel": "Сейчас нет игр, доступных для отмены участия.",
+        "mine": "Сейчас нет игр, доступных для просмотра.",
     }[flow]
 
 
 def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
+
+
+def _my_game_text(event: Event, overview: GameOverview) -> str:
+    statuses = ["Мастер"] if overview.participation.is_leader else []
+    registration = overview.participation.registration
+    if registration is not None:
+        roster = "основной состав" if overview.in_main_roster else "запас"
+        statuses.append(f"{_attendance_status_text(registration.attendance_status)}, {roster}")
+    game_date = format_game_date(event.game_date) if event.game_date is not None else "не указана"
+    status = "; ".join(statuses)
+    text = f"Игра: «{event.name}»\nДата: {game_date}\nВаш статус: {status}"
+    links = [f"Чат игры: {link}" for link in overview.chat_links]
+    if event.public_table_public_url is not None:
+        links.append(f"Таблица участников: {event.public_table_public_url}")
+    if not links:
+        return text
+    return f"{text}\n\n" + "\n".join(links)
 
 
 def co_player_wish_prompt(*, skip_value: str, same_day_warning_date: date | None = None) -> BotResponse:
@@ -601,6 +622,8 @@ class ConversationEngine:
             return await self._show_registered(user, "wishes")
         if value == CANCEL:
             return await self._show_registered(user, "cancel")
+        if value == MY_GAMES:
+            return await self._show_my_games(user)
         if value in {ADMIN, ADMIN_MENU}:
             return await self._admin_menu(user)
         if value.startswith("select:"):
@@ -894,6 +917,7 @@ class ConversationEngine:
             "character": "w",
             "wishes": "g",
             "cancel": "x",
+            "mine": "m",
             "admin-status": "s",
             "admin-archive": "a",
             "admin-delete": "d",
@@ -927,6 +951,7 @@ class ConversationEngine:
                 "w": "character",
                 "g": "wishes",
                 "x": "cancel",
+                "m": "mine",
                 "s": "admin-status",
                 "a": "admin-archive",
                 "d": "admin-delete",
@@ -942,6 +967,10 @@ class ConversationEngine:
             if flow.startswith("admin-") and not await self._has_admin_access(user):
                 return BotResponse(text="Недостаточно прав.")
             cursor = (datetime.fromtimestamp(int(micros) / 1_000_000, UTC), event_id)
+            if kind == "u" and flow == "mine":
+                if direction == "p":
+                    return await self._show_my_games(user, before=cursor)
+                return await self._show_my_games(user, after=cursor)
             if kind == "u":
                 if direction == "p":
                     return await self._show_registered(user, flow, before=cursor)
@@ -1029,6 +1058,46 @@ class ConversationEngine:
                 dialog_exit_button(label="Не подтверждать сейчас"),
             ],
         )
+
+    async def _show_my_games(
+        self,
+        user: User,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+    ) -> BotResponse:
+        identity = self._identity(user)
+        page = await self.registrations.participating_games_page(
+            identity.platform,
+            identity.platform_user_id,
+            after=after,
+            before=before,
+            event_limit=PAGE_SIZE,
+        )
+        if not page.events:
+            return BotResponse(text=_no_games_for_action_text("mine"))
+        if len(page.events) == 1 and not page.has_previous and not page.has_next:
+            return await self._my_game_page(user, page.events[0], from_list=False)
+        buttons = _event_buttons(page.events, "mine")
+        buttons.extend(
+            _pagination_buttons(
+                previous=self._event_cursor("u", "p", "mine", page.events[0]) if page.has_previous else None,
+                following=self._event_cursor("u", "n", "mine", page.events[-1]) if page.has_next else None,
+                cancel=CANCEL_DIALOG,
+            )
+        )
+        return BotResponse(text=_player_game_picker_text("mine"), buttons=buttons)
+
+    async def _my_game_page(self, user: User, event: Event, *, from_list: bool) -> BotResponse:
+        if event.archived_at is not None:
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        identity = self._identity(user)
+        overview = await self.registrations.game_overview(event, identity.platform, identity.platform_user_id)
+        if overview is None:
+            return BotResponse(text="Вы больше не участвуете в этой игре.")
+        # A lone game skips the list, so a way back to it would only reopen this page.
+        buttons = [Button(label=BACK, value=MY_GAMES)] if from_list else []
+        return BotResponse(text=_my_game_text(event, overview), buttons=[*buttons, main_menu_button()])
 
     async def _show_registered(
         self,
@@ -1171,6 +1240,8 @@ class ConversationEngine:
             "admin-leader-add",
         }:
             return await self._admin_select(user, message, event, flow)
+        if flow == "mine":
+            return await self._my_game_page(user, event, from_list=True)
         registration = await self.registrations.get_registration(event_id, platform, uid)
         if registration is None:
             return BotResponse(text="Сначала запишитесь на эту игру.")
