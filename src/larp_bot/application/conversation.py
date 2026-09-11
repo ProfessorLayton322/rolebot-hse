@@ -48,8 +48,10 @@ from larp_bot.domain.models import (
 
 from .deadlines import (
     NEAREST_THURSDAY,
+    NEXT_SATURDAY,
     closest_thursday_19,
     format_confirmation_deadline,
+    next_saturday_game_date,
     parse_confirmation_deadline,
 )
 from .navigation import ADMIN_MENU, MAIN_MENU, MAIN_MENU_LABEL, admin_menu_button, main_menu_button
@@ -435,6 +437,14 @@ def _confirmation_deadline_response(event_id: str, *, invalid: bool = False) -> 
             Button(label=NEAREST_THURSDAY, value="admin:deadline:nearest-thursday"),
             game_management_button(event_id),
         ],
+    )
+
+
+def _game_date_response(*, invalid: bool = False) -> BotResponse:
+    prefix = "Некорректная дата. Попробуйте ещё раз.\n\n" if invalid else ""
+    return BotResponse(
+        text=f"{prefix}Введите дату игры строго в формате DD.MM.YY или нажмите «{NEXT_SATURDAY}».",
+        buttons=[Button(label=NEXT_SATURDAY, value="admin:date:next-saturday")],
     )
 
 
@@ -2453,12 +2463,15 @@ class ConversationEngine:
                 return BotResponse(text="Название игры не должно превышать 200 символов. Введите название игры:")
             user.dialog_state = "ADMIN_CREATE_DATE"
             user.dialog_context = {"event_name": clean_name}
-            return BotResponse(text="Введите дату игры строго в формате DD.MM.YY:")
+            return _game_date_response()
         if user.dialog_state == "ADMIN_CREATE_DATE":
-            try:
-                game_date = parse_game_date(value)
-            except ValueError:
-                return BotResponse(text="Введите корректную дату игры строго в формате DD.MM.YY:")
+            if value == "admin:date:next-saturday":
+                game_date = next_saturday_game_date()
+            else:
+                try:
+                    game_date = parse_game_date(value)
+                except ValueError:
+                    return _game_date_response(invalid=True)
             user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
             user.dialog_context["game_date"] = game_date.isoformat()
             return BotResponse(text=f"Введите количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):")
