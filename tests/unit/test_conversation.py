@@ -70,6 +70,7 @@ from larp_bot.application.conversation import (
     STATUS_REGISTRATION,
     UNARCHIVE_GAME,
     UNSUPPORTED_CONTENT_RESPONSE,
+    VENUE_URL,
     ConversationEngine,
 )
 from larp_bot.application.services import (
@@ -1243,7 +1244,7 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert [button.value for button in full_name_prompt.buttons] == ["Отмена"]
     assert invalid_full_name.text == "Введите ФИО кириллицей, либо фамилию имя, если отчества нету"
     assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
-    assert pass_prompt.text == "Нужен ли вам пропуск для входа на место проведения игры?"
+    assert pass_prompt.text == f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_URL})?"
     assert "страницу VK" in contact_prompt.text
     assert "Профиль успешно заполнен" in saved.text
     assert profile is not None
@@ -2641,6 +2642,8 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
     assert "могут записываться, но ещё не могут подтверждать" in status_prompt.text
     assert "могут записываться и подтверждать" in status_prompt.text
     assert "не могут ни записываться, ни подтверждать" in status_prompt.text
+    assert "Закрытую регистрацию можно открыть снова" in status_prompt.text
+    assert "игровая сессия уже собрана" in status_prompt.text
     assert [button.label for button in status_prompt.buttons[:3]] == [
         STATUS_REGISTRATION,
         STATUS_CONFIRMATION,
@@ -2672,6 +2675,23 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
             payload = publisher.commands[-1].payload
             assert isinstance(payload, ConfirmationDeadlinePayload)
             assert payload.deadline.strftime("%d.%m.%y %H:%M") == "10.09.26 19:00"
+
+
+@pytest.mark.asyncio
+async def test_event_master_sees_registration_closing_disclaimer(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+
+    status_prompt = await engine.handle(inbound(1, f"ag:status:{event.event_id}", callback=True))
+    queued = await engine.handle(inbound(2, "admin:status:closed", callback=True))
+
+    assert "Закрытую регистрацию можно открыть снова" in status_prompt.text
+    assert "игровая сессия уже собрана" in status_prompt.text
+    assert queued.deferred
+    assert publisher.commands[-1].operation is Operation.CLOSE_EVENT
 
 
 @pytest.mark.asyncio
