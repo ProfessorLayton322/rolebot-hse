@@ -718,21 +718,24 @@ async def test_confirmation_sift_notifies_promoted_and_demoted_players_exactly_o
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("operation", "expected_text"),
+    ("operation", "expected_text", "expected_completion_text"),
     [
         (
             Operation.OPEN_CONFIRMATION,
             "Подтверждение участия в игре «Лесной предел» открыто! Подтвердите участие до 10.09.26 19:00 (мск).",
+            "Установлен Статус «Подтверждение»",
         ),
         (
             Operation.SEND_CONFIRMATION_REMINDER,
             "Напоминаем: подтвердите участие в игре «Лесной предел» до 10.09.26 19:00 (мск).",
+            "Напоминание о подтверждении отправлено",
         ),
     ],
 )
-async def test_confirmation_notifications_go_only_to_waiting_players(
+async def test_confirmation_notifications_go_to_waiting_players_before_master_acknowledgement(
     operation: Operation,
     expected_text: str,
+    expected_completion_text: str,
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -790,15 +793,18 @@ async def test_confirmation_notifications_go_only_to_waiting_players(
     )
 
     assert await worker.run() == 1
-    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == {
+    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent[:-1]} == {
         (Platform.TELEGRAM, 2, expected_text),
         (Platform.VK, 3, expected_text),
     }
+    assert transport.sent[-1][0:2] == (Platform.TELEGRAM, 1)
+    assert transport.sent[-1][3] == expected_completion_text
     assert all(
         [(button.label, button.value) for button in sent[4]]
         == [(CONFIRM_PARTICIPATION, f"select:confirm:{event.event_id}")]
-        for sent in transport.sent
+        for sent in transport.sent[:-1]
     )
+    assert transport.sent[-1][4] == ()
     for waiting_user in waiting_users:
         platform = Platform.TELEGRAM if isinstance(waiting_user, TelegramUser) else Platform.VK
         uid = waiting_user.tg_id if isinstance(waiting_user, TelegramUser) else waiting_user.vk_id
@@ -991,11 +997,14 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
             (Platform.TELEGRAM, 3, expected_text),
             (Platform.VK, 4, expected_text),
         }
-    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent} == expected_recipients
+    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent[:-1]} == expected_recipients
     assert all(
         [(button.label, button.value) for button in sent[4]] == [(MAIN_MENU_LABEL, MAIN_MENU)]
-        for sent in transport.sent
+        for sent in transport.sent[:-1]
     )
+    assert transport.sent[-1][0:2] == (Platform.TELEGRAM, 1)
+    assert transport.sent[-1][3] == "Уведомление подтвердившим участие отправлено"
+    assert transport.sent[-1][4] == ()
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
     assert stored_event.confirmed_notifications == [message]
@@ -1072,6 +1081,8 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
 
     assert await worker.run() == 3
     assert [(sent[1], sent[3]) for sent in transport.sent] == [
+        (1, "Уведомление подтвердившим участие отправлено"),
+        (1, "Уведомление подтвердившим участие отправлено"),
         (
             player.tg_id,
             f"✅ Участие в игре «{event.name}» подтверждено.\n\n"

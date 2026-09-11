@@ -81,7 +81,7 @@ class OrderedWorker:
                 group_id = command.queue_group_id
                 if group_id in failed_groups:
                     continue
-                notification_delivered = False
+                command_response_delivered = False
                 # Profile projections are background maintenance. Keep stale
                 # commands (for example, when a game was archived meanwhile)
                 # silent even when worker-time validation rejects them.
@@ -120,7 +120,6 @@ class OrderedWorker:
                         if self.notifications is None:
                             raise RuntimeError("confirmation notification service is not configured")
                         await self.notifications.notify(command)
-                        notification_delivered = True
                     elif (
                         notifications_enabled
                         and command.operation is Operation.CONFIRM
@@ -140,7 +139,7 @@ class OrderedWorker:
                                 command,
                                 event_id=result.replaced_event_id,
                             )
-                        notification_delivered = True
+                        command_response_delivered = True
                     elif notifications_enabled and command.operation in {
                         Operation.CANCEL,
                         Operation.REMOVE_PARTICIPANT,
@@ -173,7 +172,7 @@ class OrderedWorker:
                         },
                     )
                     continue
-                if notifications_enabled and not notification_delivered:
+                if notifications_enabled and not command_response_delivered:
                     await self._deliver_once(raw, text, buttons)
                 await self.consumer.delete(raw.receipt_handle)
                 LOGGER.info(
