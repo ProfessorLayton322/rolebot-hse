@@ -238,7 +238,7 @@ sequenceDiagram
     E->>API: Bot API
 ```
 
-Ingress accepts only POST, caps the body at 256 KiB, validates `X-Telegram-Bot-Api-Secret-Token`, and signs timestamp, request ID, method, path, and body hash. Defaults are a 1500 ms backend inline cutoff and 2500 ms ingress hard deadline. If Yandex starts after its deadline, it selects egress. If ingress reaches its hard deadline, it acknowledges Telegram with empty HTTP 200 while observing the already-started upstream request. Durable registration correctness exists only in Yandex FIFO, never in `waitUntil()`.
+Ingress accepts only POST, caps the body at 256 KiB, validates `X-Telegram-Bot-Api-Secret-Token`, drops updates from senders over the per-user limit (see [Rate limiting and abuse protection](#rate-limiting-and-abuse-protection)), and signs timestamp, request ID, method, path, and body hash. Defaults are a 1500 ms backend inline cutoff and 2500 ms ingress hard deadline. If Yandex starts after its deadline, it selects egress. If ingress reaches its hard deadline, it acknowledges Telegram with empty HTTP 200 while observing the already-started upstream request. Durable registration correctness exists only in Yandex FIFO, never in `waitUntil()`.
 
 Egress accepts only `/telegram/send`, a ±60 second signature, a matching request ID, and `sendMessage` (the only Bot API method used by this application). It constructs the Bot API URL itself. One logical answer is either inline or egress-delivered, never intentionally both.
 
@@ -255,7 +255,7 @@ VK Callback API posts directly through API Gateway/SWS to the same gateway Funct
 - Masters and bot administrators can change status, send participant notifications, remove waiting or confirmed players, open the three event-table links, manage the game's masters, or archive that event. All privileged users can create games. Admins can browse and fully control every game without master membership, while moderators see only non-archived games and need per-game master membership to act.
 - Event IDs and participant state are reloaded server-side; callback values are never trusted as authorization.
 - Profile/pass data stays in private YDB and structured logs omit request bodies, email, legal names, and credentials.
-- Smart Web Security in API mode and Advanced Rate Limiter enforce a configurable global 25 requests/second. It is intentionally not grouped by Cloudflare source IP.
+- Smart Web Security in API mode and Advanced Rate Limiter enforce a configurable global 10 requests/second. It is intentionally not grouped by Cloudflare source IP. The ingress Worker additionally limits each Telegram user; see [Rate limiting and abuse protection](#rate-limiting-and-abuse-protection).
 - Function scaling defaults to three instances per function, one request per instance.
 - All application secrets are installed as encrypted Worker bindings with `wrangler secret bulk` after Terraform. Yandex Functions receive only non-secret endpoint and identity configuration; secret values exist only in Worker bindings and short-lived Function memory.
 - `.env*`, state, plans, build output, Wrangler state, and Python/Node caches are ignored.
@@ -451,6 +451,7 @@ setWebhook(
   url=<Cloudflare ingress URL>,
   secret_token=<TG_WEBHOOK_SECRET>,
   allowed_updates=[message, callback_query],
+  max_connections=5,
   drop_pending_updates=false
 )
 ```
@@ -491,7 +492,7 @@ Terraform manages:
 - one standard-queue Function trigger (never a FIFO trigger);
 - one API Gateway with two POST routes;
 - Smart Web Security and Advanced Rate Limiter profiles;
-- two Cloudflare Worker objects, versions, deployments, and workers.dev bindings.
+- two Cloudflare Worker objects, versions, deployments, and workers.dev bindings, plus the ingress Worker's per-user `ratelimit` binding.
 
 Run manually only after building artifacts:
 
@@ -517,7 +518,7 @@ terraform plan
 
 Python tests cover profile differences, absence of global character wishes, the freely selectable three-state game model, required and editable player capacity, main/reserve signup responses, fixed green reserve rows in both workbooks, retry-safe promotion notifications after cancellation and master removal, signup before confirmation opens, ordered status and capacity changes, per-event isolation, creator/admin master seeding, master delegation and worker-time authorization, privileged read access, dual master/public workbook projection and contact removal, blank vs explicit wishes, atomic confirm, preservation on edit/cancel/re-enlist, persisted confirmed-only broadcasts, notification submenus and previews, all-confirmed information disclaimers, confirmed-roster chat-link limits and promotion replay, VK invite parsing, master-only paginated player removal with profile-name confirmation and full table refresh, duplicate operation IDs, formula injection, permanent game archival, exact-name archival, pagination boundaries, the `Мои игры` list and game pages including chat-link visibility, unsupported Telegram/VK media rejection without dialogue advancement, HMAC/body/timestamp validation, Telegram inline/deferred exclusivity, VK confirmation/authentication, and worker sequencing.
 
-Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the five-table YDB model, no FIFO native trigger, and no direct Telegram endpoint under `src/larp_bot`.
+Worker tests cover fast inline, explicit deferred, hard timeout, webhook auth, the per-user Telegram rate limit (acknowledge-and-drop, per-sender keys, fail-open), egress HMAC freshness, method allowlisting, Yandex OIDC verification/runtime-config isolation, and the only direct Telegram connection. CI additionally checks Terraform formatting/validation, dependency vulnerabilities, secret leakage, the five-table YDB model, no FIFO native trigger, the rate-limit wiring, and no direct Telegram endpoint under `src/larp_bot`.
 
 ## Observability
 
@@ -530,9 +531,51 @@ Telegram update -> ingress request ID -> gateway update ID -> FIFO operation ID
 
 Search Yandex Logging by operation/event ID. Cloudflare logs should contain request IDs, status, and timing only.
 
-## Rate limits and cost control
+## Rate limiting and abuse protection
 
-`webhook_rate_limit_rps` defaults to 25 globally across both gateway routes. Increase only after reviewing real Callback/Telegram rates and Function/YDB quotas. Do not group by Cloudflare egress IP. `gateway_max_instances` and `worker_max_instances` default to three. YDB throttles at 20 RCU and has no provisioned capacity. Logs retain 72 hours. FIFO messages retain 14 days; kicks retain one day. No provisioned Function instances are enabled.
+Every paid layer bills per request, so unwanted traffic should be stopped as early and as cheaply as possible. Two kinds of abuse matter:
+
+- **Unauthenticated junk** sent to public URLs. The ingress Worker rejects it with 403 before Yandex is involved. The API Gateway URL has no such filter: junk passes Smart Web Security (SWS) and invokes the gateway Function, which rejects it only after both have billed it. The URL not being published is currently its main protection.
+- **Real accounts spamming** messages or buttons. They pass every authentication check by design; only rate limits stop them.
+
+### What is in place
+
+| Layer | Limit | When exceeded | Configured in |
+|---|---|---|---|
+| Telegram webhook | `max_connections=5` concurrent deliveries | Telegram queues further updates and keeps them up to 24 hours | `scripts/configure_telegram_webhook.sh` |
+| Ingress Worker, per Telegram user | `telegram_user_rate_limit_per_minute` updates per sender per 60 s (default 30) | Update acknowledged with an empty HTTP 200 and dropped before Yandex | `infra/terraform/cloudflare.tf`, `cloudflare/telegram-ingress/src/index.ts` |
+| SWS Advanced Rate Limiter | `webhook_rate_limit_rps` requests/second (default 10), shared by both routes | HTTP 429; Telegram and VK retry later | `infra/terraform/security.tf` |
+| Function scaling policies | `gateway_max_instances` / `worker_max_instances` instances (default 3) and one concurrent call per availability zone | HTTP 429 from Cloud Functions | `infra/terraform/functions.tf` |
+| Serverless YDB | 20 RCU throttle, 5 GB storage, no provisioned capacity | Queries are throttled | `infra/terraform/ydb.tf` |
+| Retention | Logs 72 hours, FIFO messages 14 days, kicks one day | Older data is deleted | `infra/terraform/logging.tf`, `infra/terraform/ymq.tf` |
+
+No provisioned Function instances are enabled. Raise `webhook_rate_limit_rps` only after reviewing real Callback/Telegram rates and Function/YDB quotas, and do not group it by source IP: all Telegram traffic arrives from Cloudflare.
+
+How the Telegram per-user limit behaves:
+
+- It applies only to Telegram. VK callbacks go straight to API Gateway and are bounded only by the shared SWS limit and the scaling policies.
+- The key is the sender's Telegram ID (`from.id` of the message or button press). Unauthenticated requests and updates without a sender are never counted.
+- An over-limit update gets an empty HTTP 200 because Telegram redelivers anything else, so a 429 would multiply the spam. The bot stays silent: replies would spend its shared Bot API send budget on the spammer. The Worker logs only the static line `telegram_update_rate_limited`, without the user ID.
+- Counting is approximate. Cloudflare keeps counters per data-center location and updates them eventually. Telegram sends every webhook from two published networks, so updates usually land in the same location.
+- `namespace_id = "731001"` is account-wide. Another Worker in the same Cloudflare account that binds the same ID would share these counters.
+- It fails open. If the binding is missing (for example under local `wrangler dev`) or `limit()` throws, updates are forwarded as before. Check that the ingress Worker's Bindings page in the Cloudflare dashboard lists `TG_USER_RATE_LIMITER`.
+
+Billing notes (Yandex and Cloudflare price lists, September 2026):
+
+- SWS does not bill requests blocked by a rule or by the rate limiter. It bills every request it lets through, including junk the Function then rejects. The first 10,000 requests per month are free, then 27,450 ₽ per million including VAT up to one million. That makes SWS the most expensive per-request layer at this bot's volume.
+- API Gateway (first 100,000 requests per month free) and Cloud Functions bill per request or invocation.
+- The Workers Free plan allows 100,000 requests per day across the account. After that it returns Error 1027 until 00:00 UTC. That is an outage, not a charge.
+
+### What could be done further
+
+In rough order of value per effort:
+
+1. **Budget alert.** Create a Yandex Billing budget with low thresholds in the console. Budgets only notify and never stop resources. Provider `0.222.0` has no budget resource, so this cannot live in this Terraform.
+2. **Let SWS block junk instead of billing it.** Add DENY security rules that SWS can evaluate itself: a static header added by the ingress Worker on `/webhooks/telegram`, and a query key in the VK callback URL on `/webhooks/vk`. Confirm that VK keeps the query string before relying on it. Blocked requests are free.
+3. **Split the rate limiter per route.** A separate rule per path stops junk on `/webhooks/vk` from using up Telegram's share. The documented form for plain counting is `static_quota`, and the current rule is a `dynamic_quota` without grouping, so check that the console shows it as *without grouping*.
+4. **Cache the VK confirmation path.** `_vk_confirmation` in `src/larp_bot/functions/gateway/handler.py` builds a fresh `RuntimeConfigProvider` for every `confirmation` callback. Any request with a string `secret` and integer `group_id` therefore costs a Yandex token exchange plus an egress Worker request before the secret is compared. A cached provider would limit this to one fetch per warm instance per minute. Without it, junk confirmations can use up the Workers Free plan quota.
+5. **Per-user limit for VK.** Either count updates on the user row the gateway already loads, which saves only downstream work, or put VK behind a Cloudflare Worker as Telegram is.
+6. **Custom domain for the Workers.** Cloudflare WAF rate-limiting rules attach to a zone you own, not to `workers.dev`. The Workers Paid plan turns the Error 1027 lockout into a small per-request charge ($0.30 per million requests beyond 10 million per month).
 
 ## Troubleshooting
 
@@ -559,6 +602,7 @@ The implementation was checked against current official documentation in August 
 - API Gateway supports Smart Web Security/ARL integration through `x-yc-apigateway.smartWebSecurity`.
 - Cloudflare provider v5 supports Worker/version/deployment resources; Worker secrets are safer via Wrangler after Terraform.
 - Telegram `setWebhook` supports `secret_token` and Bot API method responses in webhook HTTP 200 bodies.
+- Cloudflare's Workers `ratelimit` binding is generally available, accepts 10- or 60-second periods, and is configured through `cloudflare_worker_version` bindings in provider v5 (checked September 2026).
 - Yandex Workload Identity Federation supports exchanging GitHub OIDC JWTs for short-lived service-account IAM tokens, and Yandex service accounts can exchange IAM tokens for audience-bound ID tokens used with external OIDC consumers.
 
 One provider constraint deserves attention: Terraform's Yandex Message Queue resource uses SQS-compatible static credentials. Terraform generates a dedicated, least-privilege key, so its secret necessarily exists in encrypted remote Terraform state. It is never a normal output, source value, Function environment variable, or GitHub Secret; CI copies the sensitive output straight to the egress Worker. Protect/version the state bucket and rotate this key. All other application secrets and Cloudflare secret bindings remain outside Terraform state.
