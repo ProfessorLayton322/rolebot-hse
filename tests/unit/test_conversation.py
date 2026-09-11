@@ -2009,10 +2009,20 @@ async def test_admin_lists_and_removes_moderators_with_pagination_and_notificati
 
 
 @pytest.mark.asyncio
-async def test_created_game_keeps_links_in_its_leader_only_tables_action(
-    disk_store: MemoryDiskStore, event: Event
-) -> None:
-    engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
+async def test_created_game_confirmation_includes_all_table_links(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    creator = await users.get(Platform.TELEGRAM, 1)
+    assert isinstance(creator, TelegramUser)
+    creator.needs_pass = True
+    creator.pass_details = PassDetails(
+        surname_cyrillic="Иванов",
+        name_cyrillic="Иван",
+        patronym_cyrillic="-",
+        foreigner=False,
+        mobile_phone="+7 999 123-45-67",
+        email="creator@example.com",
+    )
+    await users.save(creator)
 
     prompt = await engine.handle(inbound(1, "➕ Создать игру"))
     assert prompt.text == "Введите название игры:"
@@ -2040,13 +2050,24 @@ async def test_created_game_keeps_links_in_its_leader_only_tables_action(
     assert created.player_amount == 24
     assert created.public_table_resource_path is not None
     assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
+    assert created.pass_table_resource_path == f"disk:/larp-bot/passes/{created.event_id}.xlsx"
+    assert created.pass_table_public_url is not None
     for path in (created.master_table_resource_path, created.public_table_resource_path):
         workbook = load_workbook(BytesIO(disk_store.files[path]))
         try:
             assert workbook.active.cell(26, 1).value == "ЗАПАС"
         finally:
             workbook.close()
-    assert "https://disk.example/public/" not in response.text
+    pass_workbook = load_workbook(BytesIO(disk_store.files[created.pass_table_resource_path]))
+    try:
+        assert pass_workbook.active.cell(2, 1).value == "Иванов"
+    finally:
+        pass_workbook.close()
+    assert response.text.count("https://disk.example/public/") == 3
+    assert MASTER_TABLE_DISCLAIMER in response.text
+    assert "Публичная таблица (без контактов Telegram и VK)" in response.text
+    assert "Административная таблица" in response.text
+    assert "Таблица пропусков" in response.text
     assert response.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{created.event_id}")]
     assert await engine.events.list_leaders(created.event_id) == [
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)
@@ -2080,6 +2101,7 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
     response = await engine.handle(inbound(4, "20"))
 
     assert response.text.startswith("✅ Игра создана.")
+    assert response.text.count("https://disk.example/public/") == 3
     created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
     leaders = await engine.events.list_leaders(created.event_id)
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
@@ -2137,6 +2159,7 @@ async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_fir
     ]
     assert response.text.startswith("✅ Игра создана.")
     assert "Мастер: Мастер 20 · TG" in response.text
+    assert response.text.count("https://disk.example/public/") == 3
     assert response.buttons == [Button(label=BACK, value=f"ag:manage:{created.event_id}")]
     assert isinstance(engine.transport, MemoryDeferredTransport)
     assert engine.transport.sent == [
