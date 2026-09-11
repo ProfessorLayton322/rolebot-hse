@@ -724,12 +724,24 @@ class EventAdministrationService:
             raise ValueError("У игры должен быть хотя бы один мастер")
         event_id = str(uuid4())
         master_path, public_path = event_table_paths(event_id, clean_name)
-        created_paths: list[str] = []
+        pass_path = f"disk:/larp-bot/passes/{event_id}.xlsx"
+        created_event_paths: list[str] = []
+        pass_table_created = False
         try:
             master_url = await self.showcase.create_event_workbook(master_path, player_amount=player_amount)
-            created_paths.append(master_path)
+            created_event_paths.append(master_path)
             public_url = await self.showcase.create_public_event_workbook(public_path, player_amount=player_amount)
-            created_paths.append(public_path)
+            created_event_paths.append(public_path)
+            leader_keys = {(leader.platform, leader.platform_user_id) for leader in leaders}
+            leader_pass_profiles = []
+            for user in await self.users.list_all():
+                identity = (
+                    (Platform.TELEGRAM, user.tg_id) if isinstance(user, TelegramUser) else (Platform.VK, user.vk_id)
+                )
+                if identity in leader_keys and user.needs_pass is True and user.pass_details is not None:
+                    leader_pass_profiles.append(user.pass_details)
+            pass_url = await self.showcase.create_pass_table(pass_path, leader_pass_profiles)
+            pass_table_created = True
             event = Event(
                 event_id=event_id,
                 name=clean_name,
@@ -739,11 +751,14 @@ class EventAdministrationService:
                 public_registration_url=master_url,
                 public_table_resource_path=public_path,
                 public_table_public_url=public_url,
+                pass_table_resource_path=pass_path,
+                pass_table_public_url=pass_url,
             )
             await self.events.create(event, leaders)
         except Exception:
             await asyncio.gather(
-                *(self.showcase.delete_event_workbook(path) for path in created_paths),
+                *(self.showcase.delete_event_workbook(path) for path in created_event_paths),
+                *([self.showcase.delete_pass_table(pass_path)] if pass_table_created else []),
                 return_exceptions=True,
             )
             raise

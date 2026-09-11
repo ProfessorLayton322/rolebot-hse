@@ -2057,7 +2057,8 @@ class ConversationEngine:
                 f"Количество игроков: {event.player_amount}\n\n"
                 f"{master_line}"
                 f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
-                "но пока не могут подтверждать участие."
+                "но пока не могут подтверждать участие.\n\n"
+                f"{event_table_links(event)}"
             ),
             buttons=[game_management_button(event.event_id)],
         )
