@@ -613,9 +613,11 @@ class ConversationEngine:
             if is_profile_complete(user):
                 contact = user.vk_url if isinstance(user, TelegramUser) else user.telegram_handle
                 contact_label = "VK" if isinstance(user, TelegramUser) else "Telegram"
+                role = await self._user_role_label(user)
                 return BotResponse(
                     text=(
-                        f"Профиль\n\nИмя: {user.full_name}\n{contact_label}: {contact or 'не указан'}\n"
+                        f"Профиль\n\nИмя: {user.full_name}\nСтатус: {role}\n"
+                        f"{contact_label}: {contact or 'не указан'}\n"
                         f"Кросспол: {_bool_text(user.crossplay)}\n"
                         f"Нужен пропуск: {_bool_text(user.needs_pass)}"
                     ),
@@ -1767,6 +1769,18 @@ class ConversationEngine:
     async def _is_admin(self, user: User) -> bool:
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         return await self.admins.is_admin(platform, user_id(user))
+
+    async def _user_role_label(self, user: User) -> str:
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        is_admin, is_configured_moderator = await asyncio.gather(
+            self.admins.is_admin(platform, user_id(user)),
+            self.admins.is_gamemaster(platform, user_id(user)),
+        )
+        if is_admin:
+            return "Администратор"
+        if user.is_gamemaster or is_configured_moderator:
+            return "Модератор"
+        return "Игрок"
 
     async def _has_admin_access(self, user: User) -> bool:
         if await self._is_admin(user):

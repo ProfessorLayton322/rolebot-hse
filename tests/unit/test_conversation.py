@@ -1304,6 +1304,51 @@ async def test_profile_completion_queues_experience_lookup_without_asking_the_pl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admin", "gamemaster", "expected_status"),
+    [
+        (False, False, "Игрок"),
+        (False, True, "Модератор"),
+        (True, True, "Администратор"),
+    ],
+)
+async def test_profile_shows_bot_user_status_with_admin_precedence(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    *,
+    admin: bool,
+    gamemaster: bool,
+    expected_status: str,
+) -> None:
+    engine, _, _, _ = await engine_setup(
+        disk_store,
+        event,
+        admin=admin,
+        gamemaster=gamemaster,
+    )
+
+    shown = await engine.handle(inbound(1, PROFILE))
+
+    assert f"Статус: {expected_status}" in shown.text
+
+
+@pytest.mark.asyncio
+async def test_profile_shows_persisted_moderator_status(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    moderator = await users.get(Platform.TELEGRAM, 1)
+    assert moderator is not None
+    moderator.is_gamemaster = True
+    await users.save(moderator)
+
+    shown = await engine.handle(inbound(1, PROFILE))
+
+    assert "Статус: Модератор" in shown.text
+
+
+@pytest.mark.asyncio
 async def test_profile_save_queues_one_background_sync_instead_of_scanning_games(
     disk_store: MemoryDiskStore,
     event: Event,
