@@ -156,6 +156,7 @@ ADMIN_STATUS_CHOICES = {
     "admin:status:closed": (STATUS_CLOSED, Operation.CLOSE_EVENT),
 }
 MASTER_TABLE_DISCLAIMER = "⚠️ Только для мастеров этой игры. Не пересылайте эту ссылку игрокам!"
+VENUE_URL = "https://www.hse.ru/buildinghse/dining/stbasm"
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
@@ -415,7 +416,9 @@ def _admin_status_response(
             "Выберите новый Статус:\n\n"
             f"{STATUS_REGISTRATION} — игроки могут записываться, но ещё не могут подтверждать участие.\n\n"
             f"{STATUS_CONFIRMATION} — игроки могут записываться и подтверждать участие.\n\n"
-            f"{STATUS_CLOSED} — игроки не могут ни записываться, ни подтверждать участие."
+            f"{STATUS_CLOSED} — игроки не могут ни записываться, ни подтверждать участие. "
+            "Закрытую регистрацию можно открыть снова, но закрывайте её только после того, "
+            "как игровая сессия уже собрана."
         ),
         buttons=[Button(label=label, value=value) for value, (label, _) in ADMIN_STATUS_CHOICES.items()]
         + [game_management_button(event_id)],
@@ -728,7 +731,7 @@ class ConversationEngine:
             context["full_name"] = surname_and_name(value)
             user.dialog_state = "PROFILE_NEEDS_PASS"
             return BotResponse(
-                text="Нужен ли вам пропуск для входа на место проведения игры?",
+                text=f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_URL})?",
                 buttons=yes_no_buttons(),
             )
         if state == "PROFILE_NEEDS_PASS":
