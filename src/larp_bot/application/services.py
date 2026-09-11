@@ -69,13 +69,6 @@ class OperationNotAllowed(DomainError):
     pass
 
 
-def closed_game_cancellation_message(event_name: str, game_date: date | None = None) -> str:
-    return (
-        f"Регистрация на игру {event_reference(event_name, game_date)} закрыта, и состав зафиксирован. "
-        "Отменить участие через бота уже нельзя."
-    )
-
-
 def same_day_signup_warning(game_date: date) -> str:
     return (
         "Важно: вы уже записаны на другую игру, которая проводится "
@@ -90,6 +83,21 @@ class MutationResult:
     notifications_enabled: bool = True
     buttons: tuple[Button, ...] | None = None
     replaced_event_id: str | None = None
+
+
+SIFT_PROMOTED_PREFIX = "promoted:"
+SIFT_DEMOTED_PREFIX = "demoted:"
+
+
+def _sift_snapshot_entry(prefix: str, participant_key: str) -> str:
+    return f"{prefix}{participant_key}"
+
+
+def _parse_sift_snapshot_entry(value: str) -> tuple[str, str] | None:
+    for prefix in (SIFT_PROMOTED_PREFIX, SIFT_DEMOTED_PREFIX):
+        if value.startswith(prefix):
+            return prefix, value.removeprefix(prefix)
+    return None
 
 
 def event_slug(name: str) -> str:
@@ -620,8 +628,6 @@ class RegistrationService:
         event = await self._event(event_id)
         if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
             raise OperationNotAllowed("Регистрация на эту игру закрыта")
-        if operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed(closed_game_cancellation_message(event.name, event.game_date))
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
@@ -1405,10 +1411,7 @@ class ConfirmationNotificationService:
         return len(links)
 
     async def notify_removed_participants(self, command: OrderedRegistrationCommand) -> int:
-        if command.operation not in {
-            Operation.REMOVE_PARTICIPANT,
-            Operation.REMOVE_WAITING_PARTICIPANTS,
-        }:
+        if command.operation is not Operation.REMOVE_PARTICIPANT:
             raise ValueError("command does not remove participants")
         event = await self.events.get(command.event_id)
         if event is None:
@@ -1424,14 +1427,7 @@ class ConfirmationNotificationService:
             if key in participant_keys:
                 recipients[key] = NotificationRecipient(platform, uid, user)
 
-        if command.operation is Operation.REMOVE_PARTICIPANT:
-            text = f"Ваша запись на игру {event_reference(event.name, event.game_date)} удалена."
-        else:
-            text = (
-                f"Ваша запись на игру {event_reference(event.name, event.game_date)} удалена, "
-                "потому что вы не подтвердили "
-                "и не отменили участие до указанного срока."
-            )
+        text = f"Ваша запись на игру {event_reference(event.name, event.game_date)} удалена."
 
         delivered = 0
         notified_keys = set(event.participant_removal_notified_keys)
@@ -1463,6 +1459,89 @@ class ConfirmationNotificationService:
                 recipient.platform,
                 recipient.user_id,
                 request_id,
+                [main_menu_button()],
+            )
+            delivered += 1
+        return delivered
+
+    async def notify_sifted_participants(self, command: OrderedRegistrationCommand) -> int:
+        if command.operation is not Operation.REMOVE_WAITING_PARTICIPANTS:
+            raise ValueError("command does not sift participants")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.last_participant_removal_operation_id != command.operation_id:
+            return 0
+
+        users_by_key: dict[str, NotificationRecipient] = {}
+        for user in await self.users.list_all():
+            platform, uid = self._identity(user)
+            key = participant_key(self.participant_secret, platform, uid, event.event_id)
+            users_by_key[key] = NotificationRecipient(platform, uid, user)
+
+        delivered = 0
+        notified_entries = set(event.participant_removal_notified_keys)
+        chat_links = [text for text in event.confirmed_notifications if is_plain_chat_link(text)]
+        for snapshot_entry in event.participant_removal_keys:
+            if snapshot_entry in notified_entries:
+                continue
+            parsed = _parse_sift_snapshot_entry(snapshot_entry)
+            if parsed is None:
+                LOGGER.warning(
+                    "confirmation_sift_snapshot_invalid",
+                    extra={"event_id": event.event_id, "operation_id": command.operation_id},
+                )
+                continue
+            transition, key = parsed
+            recipient = users_by_key.get(key)
+            if recipient is None:
+                LOGGER.warning(
+                    "confirmation_sift_recipient_missing",
+                    extra={"event_id": event.event_id, "operation_id": command.operation_id},
+                )
+                continue
+            if transition == SIFT_PROMOTED_PREFIX:
+                messages = [
+                    (
+                        "Вы перешли из запаса в основной состав игры "
+                        f"{event_reference(event.name, event.game_date)}.\n\n"
+                        "Посмотрите актуальный состав игроков: "
+                        f"{event.public_table_public_url}"
+                    ),
+                    *(confirmed_notification_text(event.name, link, event.game_date) for link in chat_links),
+                ]
+                transition_name = "promotion"
+            else:
+                messages = [
+                    (
+                        "Вы не усепели подтвердить или отменить ваше участие в игре "
+                        f"«{event.name}». Мы были вынуждены переместить вашу заявку в запас"
+                    )
+                ]
+                transition_name = "demotion"
+            last_request_id = ""
+            for index, text in enumerate(messages):
+                last_request_id = (
+                    f"{command.operation_id}:confirmation-sift:{transition_name}:"
+                    f"{recipient.platform.value}:{recipient.user_id}:{index}"
+                )
+                await self.transport.send(
+                    platform=recipient.platform,
+                    user_id=recipient.user_id,
+                    request_id=last_request_id,
+                    text=text,
+                    buttons=[main_menu_button()],
+                )
+            await self.events.mark_participant_removal_delivered(
+                event.event_id,
+                command.operation_id,
+                snapshot_entry,
+            )
+            notified_entries.add(snapshot_entry)
+            await self.users.claim_delivery(
+                recipient.platform,
+                recipient.user_id,
+                last_request_id,
                 [main_menu_button()],
             )
             delivered += 1
@@ -1594,9 +1673,6 @@ class OrderedMutationService:
                 raise OperationNotAllowed("Игра больше не активна; запись и изменение данных недоступны.")
             raise OperationNotAllowed("Игра уже архивирована")
 
-        if command.operation is Operation.CANCEL and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed(closed_game_cancellation_message(event.name, event.game_date))
-
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
@@ -1660,26 +1736,60 @@ class OrderedMutationService:
         event = await self.catalog.ensure_migrated(event)
         if command.operation is Operation.REMOVE_WAITING_PARTICIPANTS:
             if event.last_participant_removal_operation_id == command.operation_id:
-                participant_keys = event.participant_removal_keys
+                snapshot = event.participant_removal_keys
             else:
-                participant_keys = [
-                    registration.participant_key
+                registrations = [
+                    registration
                     for registration in await self.catalog.registrations.list_for_event(event.event_id)
-                    if registration.attendance_status is AttendanceStatus.WAITING
+                    if registration.attendance_status is not AttendanceStatus.CANCELLED
+                ]
+                registrations.sort(key=lambda row: (row.created_at, row.participant_key))
+                before_main = {row.participant_key for row in registrations[: event.player_amount]}
+                reordered = sorted(
+                    registrations,
+                    key=lambda row: (
+                        row.attendance_status is not AttendanceStatus.CONFIRMED,
+                        row.created_at,
+                        row.participant_key,
+                    ),
+                )
+                after_main = {row.participant_key for row in reordered[: event.player_amount]}
+                promoted_keys = [
+                    row.participant_key for row in reordered if row.participant_key in after_main - before_main
+                ]
+                demoted_keys = [
+                    row.participant_key for row in registrations if row.participant_key in before_main - after_main
+                ]
+                snapshot = [
+                    *(_sift_snapshot_entry(SIFT_PROMOTED_PREFIX, key) for key in promoted_keys),
+                    *(_sift_snapshot_entry(SIFT_DEMOTED_PREFIX, key) for key in demoted_keys),
                 ]
                 await self.events.set_participant_removal(
                     event.event_id,
                     command.operation_id,
-                    participant_keys,
+                    snapshot,
                 )
-            await self.catalog.registrations.remove_many(
-                event.event_id,
-                participant_keys=participant_keys,
+            active_registrations = [
+                registration
+                for registration in await self.catalog.registrations.list_for_event(event.event_id)
+                if registration.attendance_status is not AttendanceStatus.CANCELLED
+            ]
+            reordered = sorted(
+                active_registrations,
+                key=lambda row: (
+                    row.attendance_status is not AttendanceStatus.CONFIRMED,
+                    row.created_at,
+                    row.participant_key,
+                ),
             )
+            if [row.participant_key for row in active_registrations] != [row.participant_key for row in reordered]:
+                await self.catalog.registrations.sift_waiting_to_end(event.event_id)
             await self.catalog.refresh(event)
-            await self._refresh_pass_table(event)
-            count = len(participant_keys)
-            return MutationResult(f"Удалено не подтвердивших участие: {count}")
+            promoted_count = sum(entry.startswith(SIFT_PROMOTED_PREFIX) for entry in snapshot)
+            demoted_count = sum(entry.startswith(SIFT_DEMOTED_PREFIX) for entry in snapshot)
+            return MutationResult(
+                f"Заявки пересортированы: в основной состав перемещено {promoted_count}, в запас — {demoted_count}"
+            )
 
         assert command.participant_key is not None
         if command.operation is Operation.UPDATE_PROFILE:

@@ -610,17 +610,24 @@ async def test_reserve_promotion_is_notified_exactly_once_after_cancel_or_remova
 
 
 @pytest.mark.asyncio
-async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
+async def test_confirmation_sift_notifies_promoted_and_demoted_players_exactly_once(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
     secret = "participant-secret"
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    event.player_amount = 2
+    event.confirmed_notifications = ["https://t.me/+GameChat_123"]
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     await add_command_author_as_leader(events, event)
     users = MemoryUserRepository()
-    players = [TelegramUser(tg_id=2), VkUser(vk_id=3), TelegramUser(tg_id=4)]
+    players: list[TelegramUser | VkUser] = [
+        TelegramUser(tg_id=2),
+        VkUser(vk_id=3),
+        TelegramUser(tg_id=4),
+    ]
     await users.save(TelegramUser(tg_id=1))
     for player in players:
         await users.save(player)
@@ -636,6 +643,7 @@ async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
                 participant_key=key,
                 display_name=f"Waiting {index}",
                 wish_play="A",
+                created_at=base + timedelta(seconds=index),
             )
             for index, key in enumerate(waiting_keys)
         ]
@@ -646,6 +654,7 @@ async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
                 display_name="Confirmed",
                 wish_play="A",
                 attendance_status=AttendanceStatus.CONFIRMED,
+                created_at=base + timedelta(seconds=2),
             )
         ]
     )
@@ -666,24 +675,45 @@ async def test_bulk_removal_notifies_each_waiting_player_exactly_once(
     worker = OrderedWorker(consumer, mutations, users, transport, notifications, max_seconds=2)
     assert await worker.run() == 1
 
-    notification = (
-        f"Ваша запись на игру «{event.name}» удалена, потому что вы не подтвердили "
-        "и не отменили участие до указанного срока."
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    promotion = (
+        f"Вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+        f"Посмотрите актуальный состав игроков: {stored_event.public_table_public_url}"
+    )
+    demotion = (
+        f"Вы не усепели подтвердить или отменить ваше участие в игре «{event.name}». "
+        "Мы были вынуждены переместить вашу заявку в запас"
     )
     assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
-        (Platform.TELEGRAM, 2, notification),
-        (Platform.VK, 3, notification),
-        (Platform.TELEGRAM, 1, "Удалено не подтвердивших участие: 2"),
+        (Platform.TELEGRAM, 4, promotion),
+        (
+            Platform.TELEGRAM,
+            4,
+            confirmed_notification_text(event.name, event.confirmed_notifications[0]),
+        ),
+        (Platform.VK, 3, demotion),
+        (
+            Platform.TELEGRAM,
+            1,
+            "Заявки пересортированы: в основной состав перемещено 1, в запас — 1",
+        ),
     ]
     assert await tables.get(event.event_id, confirmed_key) is not None
-    assert [await tables.get(event.event_id, key) for key in waiting_keys] == [None, None]
+    assert all(
+        registration is not None for registration in [await tables.get(event.event_id, key) for key in waiting_keys]
+    )
+    assert [row.participant_key for row in await tables.list_for_event(event.event_id)] == [
+        confirmed_key,
+        *waiting_keys,
+    ]
 
-    await users.claim_delivery(Platform.TELEGRAM, 2, "unrelated-telegram-delivery")
+    await users.claim_delivery(Platform.TELEGRAM, 4, "unrelated-telegram-delivery")
     await users.claim_delivery(Platform.VK, 3, "unrelated-vk-delivery")
     retry = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
     retry_worker = OrderedWorker(retry, mutations, users, transport, notifications, max_seconds=2)
     assert await retry_worker.run() == 1
-    assert len(transport.sent) == 3
+    assert len(transport.sent) == 4
 
 
 @pytest.mark.asyncio

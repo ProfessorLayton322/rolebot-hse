@@ -65,7 +65,6 @@ from .services import (
     EventAdministrationService,
     GameOverview,
     RegistrationService,
-    closed_game_cancellation_message,
     confirmed_notification_text,
     event_master_records,
     event_masters_text,
@@ -104,7 +103,8 @@ LEGACY_SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтверди
 LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
 REMOVE_PLAYER = "🗑 Удалить игрока"
 MANAGE_PLAYERS = "Управление игроками"
-REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
+REMOVE_WAITING_PLAYERS = "Убрать не подтвердившихся в запас"
+LEGACY_REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
@@ -179,6 +179,7 @@ ADMIN_ACTIONS = frozenset(
         REMOVE_PLAYER,
         MANAGE_PLAYERS,
         REMOVE_WAITING_PLAYERS,
+        LEGACY_REMOVE_WAITING_PLAYERS,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
         MANAGE_MODERATORS,
@@ -1138,7 +1139,7 @@ class ConversationEngine:
             archived = False
             registration_statuses = frozenset({AttendanceStatus.WAITING})
         else:
-            event_statuses = REGISTRATION_OPEN_STATUSES if flow == "cancel" else None
+            event_statuses = None
             archived = False if flow in {"cancel", "wishes"} else None
             registration_statuses = (
                 frozenset({AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED})
@@ -1157,11 +1158,7 @@ class ConversationEngine:
         )
         matches = page.rows
         actionable_matches = matches
-        if flow == "cancel":
-            actionable_matches = [
-                item for item in matches if item[0].archived_at is None and item[0].status is not EventStatus.CLOSED
-            ]
-        elif flow == "character":
+        if flow == "character":
             actionable_matches = [
                 item
                 for item in matches
@@ -1270,8 +1267,6 @@ class ConversationEngine:
             "wishes",
         }:
             return BotResponse(text="Сначала снова запишитесь на эту игру.")
-        if flow == "cancel" and event.status is EventStatus.CLOSED:
-            return BotResponse(text=closed_game_cancellation_message(event.name, event.game_date))
         if flow == "confirm" and event.status is not EventStatus.CONFIRMATION_OPEN:
             if event.status is EventStatus.CREATED:
                 return BotResponse(
@@ -1627,8 +1622,6 @@ class ConversationEngine:
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
-        if event.status is EventStatus.CLOSED:
-            return BotResponse(text=closed_game_cancellation_message(event.name, event.game_date))
         await self.registrations.enqueue(
             operation=Operation.CANCEL,
             event_id=str(context["event_id"]),
@@ -3247,11 +3240,13 @@ class ConversationEngine:
         prefix = f"{invalid}\n\n" if invalid else ""
         return BotResponse(
             text=(
-                f"{prefix}⚠️ Вы действительно хотите удалить всех игроков, которые не подтвердили участие "
-                f"в игре {event_reference(event.name, event.game_date)}?\n\nБудет удалено игроков: {count}."
+                f"{prefix}Переместить подтверждённых игроков вверх списка, а не подтвердивших участие "
+                f"в игре {event_reference(event.name, event.game_date)} — вниз?\n\n"
+                f"Не подтвердили участие: {count}. Игроки, которые пересекут границу основного состава, "
+                "получат уведомления."
             ),
             buttons=[
-                Button(label="Да, удалить", value=f"admin:remove-waiting:confirm:{token}"),
+                Button(label="Да, пересортировать", value=f"admin:remove-waiting:confirm:{token}"),
                 Button(label="Нет", value=f"ag:players:{event.event_id}"),
             ],
         )
@@ -3269,7 +3264,7 @@ class ConversationEngine:
             return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
         token = str(user.dialog_context["remove_waiting_token"])
         if value != f"admin:remove-waiting:confirm:{token}":
-            return await self._remove_waiting_confirmation(user, event, invalid="Удаление не подтверждено.")
+            return await self._remove_waiting_confirmation(user, event, invalid="Пересортировка не подтверждена.")
         current_count = await self.administration.waiting_registration_count(event_id)
         expected_count = int(user.dialog_context["remove_waiting_count"])
         if current_count != expected_count:
@@ -3289,7 +3284,7 @@ class ConversationEngine:
             idempotency_key=f"{message.update_id}:{Operation.REMOVE_WAITING_PARTICIPANTS.value}",
         )
         return BotResponse(
-            text="⏳ Удаление не подтвердивших участие принято в обработку.",
+            text="⏳ Пересортировка заявок принята в обработку.",
             buttons=[player_management_button(event_id)],
             deferred=True,
             command_enqueued=True,
@@ -3769,6 +3764,7 @@ class ConversationEngine:
             REMOVE_PLAYER,
             MANAGE_PLAYERS,
             REMOVE_WAITING_PLAYERS,
+            LEGACY_REMOVE_WAITING_PLAYERS,
             ADD_EVENT_LEADER,
             ARCHIVE_GAME,
             LEGACY_DELETE_GAME,

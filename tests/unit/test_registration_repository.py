@@ -456,3 +456,37 @@ async def test_ydb_registration_remove_many_uses_event_and_selected_keys() -> No
     assert "participant_key IN $participant_keys" in query
     assert "DELETE FROM `registrations`" in query
     assert params == {"$event_id": "event-a1", "$participant_keys": keys}
+
+
+@pytest.mark.asyncio
+async def test_ydb_registration_sift_moves_all_waiting_rows_with_one_update() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key=key,
+            display_name=name,
+            wish_play="Anyone",
+            created_at=base + timedelta(seconds=index),
+        )
+        for index, (key, name) in enumerate([("a" * 43, "First"), ("b" * 43, "Second")])
+    ]
+    stored_rows = []
+    for registration in registrations:
+        row = registration.model_dump()
+        row["attendance_status"] = registration.attendance_status.value
+        stored_rows.append(row)
+    executor = RecordingExecutor([stored_rows, []])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    await repository.sift_waiting_to_end("event-a1")
+
+    query, params = executor.queries[1]
+    assert query.count("UPDATE `registrations`") == 1
+    assert "SET created_at = created_at + $shift" in query
+    assert "event_id = $event_id AND attendance_status = $waiting_status" in query
+    assert params == {
+        "$event_id": "event-a1",
+        "$waiting_status": AttendanceStatus.WAITING.value,
+        "$shift": 1_000_001,
+    }
