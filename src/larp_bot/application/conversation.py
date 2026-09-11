@@ -158,7 +158,7 @@ ADMIN_STATUS_CHOICES = {
     "admin:status:closed": (STATUS_CLOSED, Operation.CLOSE_EVENT),
 }
 MASTER_TABLE_DISCLAIMER = "⚠️ Только для мастеров этой игры. Не пересылайте эту ссылку игрокам!"
-VENUE_URL = "https://www.hse.ru/buildinghse/dining/stbasm"
+VENUE_ADDRESS = "Старая Басманная улица, д, 21/4"
 # Keep buttons sent immediately before this rollout useful; they now open the
 # unrestricted status picker instead of applying their former transition.
 LEGACY_STATUS_ACTIONS = frozenset({"🔓 Открыть подтверждения", "🔒 Закрыть подтверждения", "🔒 Закрыть регистрацию"})
@@ -743,7 +743,7 @@ class ConversationEngine:
             context["full_name"] = surname_and_name(value)
             user.dialog_state = "PROFILE_NEEDS_PASS"
             return BotResponse(
-                text=f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_URL})?",
+                text=f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_ADDRESS})?",
                 buttons=yes_no_buttons(),
             )
         if state == "PROFILE_NEEDS_PASS":
