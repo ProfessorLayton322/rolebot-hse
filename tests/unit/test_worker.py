@@ -22,6 +22,7 @@ from larp_bot.application.services import (
     ConfirmationNotificationService,
     OrderedMutationService,
     RegistrationCatalog,
+    confirmation_success_text,
     confirmed_notification_text,
     is_plain_chat_link,
 )
@@ -49,6 +50,11 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 from tests.conftest import MemoryDiskStore
+
+NO_MASTERS_SECTION = (
+    "Если вы решите не участвовать в игре, пожалуйста сообщите об этом мастерам. "
+    "Если вы не придете на игру, ничего нам не сообщив, к вам могут быть применены санкции Ролевого Клуба"
+)
 
 
 class FakeConsumer:
@@ -327,7 +333,8 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
         "Сейчас вы в основном составе.\n\n"
         f"Актуальный список записавшихся и состав можно посмотреть здесь: {link}\n\n"
         "Когда будете уверены, что сможете прийти на игру, подтвердите участие до 10.09.26 19:00 (мск).\n\n"
-        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре».\n\n"
+        f"{NO_MASTERS_SECTION}"
     )
     assert transport.sent[1][3] == (
         f"Вы записались на игру «{event.name}»!\n\n"
@@ -335,7 +342,8 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
         "Если вы перейдёте в основной состав, бот сообщит об этом отдельным сообщением.\n\n"
         f"Актуальный список записавшихся и состав можно посмотреть здесь: {link}\n\n"
         "Когда будете уверены, что сможете прийти на игру, подтвердите участие до 10.09.26 19:00 (мск).\n\n"
-        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре».\n\n"
+        f"{NO_MASTERS_SECTION}"
     )
     assert all(
         [(button.label, button.value) for button in sent[4]]
@@ -386,9 +394,110 @@ async def test_enlist_delivery_uses_closed_confirmation_text_and_keeps_default_b
         f"{stored_event.public_table_public_url}\n\n"
         "Подтверждение участия пока не открыто. Мы обязательно пришлём вам уведомление, "
         "когда можно будет подтвердиться.\n\n"
-        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре».\n\n"
+        f"{NO_MASTERS_SECTION}"
     )
     assert transport.sent[0][4] == (Button(label=MAIN_MENU_LABEL, value=MAIN_MENU),)
+
+
+@pytest.mark.asyncio
+async def test_signup_and_confirmation_list_masters_and_warn_about_no_shows(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    catalog = RegistrationCatalog(events, MemoryRegistrationRepository(), showcase)
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="Иван Иванов",
+            vk_url="https://vk.com/id1",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=False,
+        )
+    )
+    await users.save(TelegramUser(tg_id=21, full_name="Смирнова Анна Петровна", telegram_handle="@anna_master"))
+    await users.save(VkUser(vk_id=42, full_name="Орлов Борис"))
+    await users.save(TelegramUser(tg_id=23, full_name="Жукова Вера"))
+    # VK master 77 has no bot profile and Telegram master 23 has no public username.
+    for platform, master_id in ((Platform.TELEGRAM, 21), (Platform.VK, 42), (Platform.TELEGRAM, 23), (Platform.VK, 77)):
+        await events.add_leader(event.event_id, BotIdentity(platform=platform, platform_user_id=master_id))
+    key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    payloads: list[tuple[Operation, EnlistPayload | CharacterWishPayload]] = [
+        (Operation.ENLIST, EnlistPayload(display_name="Иван Иванов", wish_play="A")),
+        (Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")),
+    ]
+    consumer = FakeConsumer(
+        [
+            QueueEnvelope(
+                command=OrderedRegistrationCommand(
+                    operation_id=str(uuid4()),
+                    event_id=event.event_id,
+                    operation=operation,
+                    platform=Platform.TELEGRAM,
+                    platform_user_id=1,
+                    participant_key=key,
+                    payload=payload,
+                    reply_context=ReplyContext(buttons=[Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]),
+                ),
+                receipt_handle=f"receipt-{index}",
+            )
+            for index, (operation, payload) in enumerate(payloads)
+        ]
+    )
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog, users, secret),
+        users,
+        transport,
+        ConfirmationNotificationService(events, catalog, users, transport, secret),
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 2
+    masters = (
+        "Мастера игры:\n"
+        "https://vk.com/id77\n"
+        "Жукова Вера\n"
+        "Орлов Борис — https://vk.com/id42\n"
+        "Смирнова Анна — https://t.me/anna_master\n\n"
+        "Если вы решите не участвовать в игре, пожалуйста сообщите об этом мастерам: "
+        "https://vk.com/id77 https://vk.com/id42 https://t.me/anna_master . "
+        "Если вы не придете на игру, ничего нам не сообщив, к вам могут быть применены санкции Ролевого Клуба"
+    )
+    signup, confirmation = (sent[3] for sent in transport.sent)
+    assert signup.startswith(f"Вы записались на игру «{event.name}»!\n\nСейчас вы в основном составе.\n\n")
+    assert signup.endswith(f"«🎭 Пожелания по игре».\n\n{masters}")
+    assert confirmation == (
+        f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
+        "Мастера скоро отправят вам ссылку на чат игры!\n\n"
+        "Пожелания по персонажу:\nDoctor\n\n"
+        "Позже их можно изменить через «🎭 Пожелания по игре».\n\n"
+        f"{masters}"
+    )
+
+
+def test_confirmation_text_shortens_only_the_wish_echo_to_fit_the_message_limit(event: Event) -> None:
+    wish = "🎭" * 3000
+    masters = [(BotIdentity(platform=Platform.VK, platform_user_id=42), VkUser(vk_id=42, full_name="Орлов Борис"))]
+
+    text = confirmation_success_text(event, wish, in_main_roster=True, masters=masters)
+
+    echo = text.split("Пожелания по персонажу:\n", 1)[1].split("\n\nПозже их можно изменить", 1)[0]
+    assert 4095 <= len(text.encode("utf-16-le")) // 2 <= 4096
+    assert echo.endswith("…")
+    assert wish.startswith(echo.removesuffix("…"))
+    assert text.endswith(
+        "Орлов Борис — https://vk.com/id42\n\n"
+        "Если вы решите не участвовать в игре, пожалуйста сообщите об этом мастерам: https://vk.com/id42 . "
+        "Если вы не придете на игру, ничего нам не сообщив, к вам могут быть применены санкции Ролевого Клуба"
+    )
 
 
 @pytest.mark.asyncio
@@ -938,7 +1047,8 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
             f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
             "Мастера скоро отправят вам ссылку на чат игры!\n\n"
             "Пожелания по персонажу:\nDoctor\n\n"
-            "Позже их можно изменить через «🎭 Пожелания по игре».",
+            "Позже их можно изменить через «🎭 Пожелания по игре».\n\n"
+            f"{NO_MASTERS_SECTION}",
         ),
         (
             player.tg_id,
@@ -1039,7 +1149,8 @@ async def test_confirmed_reserve_gets_information_then_chat_link_after_cancellat
     assert reserve_messages[:2] == [
         f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
         "Пожелания по персонажу:\nDoctor\n\n"
-        "Позже их можно изменить через «🎭 Пожелания по игре».",
+        "Позже их можно изменить через «🎭 Пожелания по игре».\n\n"
+        f"{NO_MASTERS_SECTION}",
         "Сообщение от мастеров игры «Лесной предел»:\n\nСбор в 18:30",
     ]
     assert not any("ссылку на чат" in text for text in reserve_messages[:2])

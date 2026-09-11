@@ -67,6 +67,8 @@ from .services import (
     RegistrationService,
     closed_game_cancellation_message,
     confirmed_notification_text,
+    event_master_records,
+    event_masters_text,
     is_plain_chat_link,
     same_day_signup_warning,
 )
@@ -308,7 +310,11 @@ def _event_buttons(events: list[Event], flow: str) -> list[Button]:
     return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
 
 
-def _my_game_text(event: Event, overview: GameOverview) -> str:
+def _my_game_text(
+    event: Event,
+    overview: GameOverview,
+    masters: list[tuple[BotIdentity, User | None]],
+) -> str:
     statuses = ["Мастер"] if overview.participation.is_leader else []
     registration = overview.participation.registration
     if registration is not None:
@@ -317,6 +323,9 @@ def _my_game_text(event: Event, overview: GameOverview) -> str:
     game_date = format_game_date(event.game_date) if event.game_date is not None else "не указана"
     status = "; ".join(statuses)
     text = f"Игра: «{event.name}»\nДата: {game_date}\nВаш статус: {status}"
+    masters_text = event_masters_text(masters)
+    if masters_text:
+        text = f"{text}\n\n{masters_text}"
     links = [f"Чат игры: {link}" for link in overview.chat_links]
     if event.public_table_public_url is not None:
         links.append(f"Таблица участников: {event.public_table_public_url}")
@@ -1092,12 +1101,15 @@ class ConversationEngine:
         if event.archived_at is not None:
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
         identity = self._identity(user)
-        overview = await self.registrations.game_overview(event, identity.platform, identity.platform_user_id)
+        overview, masters = await asyncio.gather(
+            self.registrations.game_overview(event, identity.platform, identity.platform_user_id),
+            self._event_master_records(event.event_id),
+        )
         if overview is None:
             return BotResponse(text="Вы больше не участвуете в этой игре.")
         # A lone game skips the list, so a way back to it would only reopen this page.
         buttons = [Button(label=BACK, value=MY_GAMES)] if from_list else []
-        return BotResponse(text=_my_game_text(event, overview), buttons=[*buttons, main_menu_button()])
+        return BotResponse(text=_my_game_text(event, overview, masters), buttons=[*buttons, main_menu_button()])
 
     async def _show_registered(
         self,
@@ -1710,19 +1722,7 @@ class ConversationEngine:
         )
 
     async def _event_master_records(self, event_id: str) -> list[tuple[BotIdentity, User | None]]:
-        identities = list(await self.events.list_leaders(event_id))
-        profiles = await asyncio.gather(
-            *(self.users.get(identity.platform, identity.platform_user_id) for identity in identities)
-        )
-        records = list(zip(identities, profiles, strict=True))
-        return sorted(
-            records,
-            key=lambda record: (
-                ((record[1].full_name or "") if record[1] is not None else "").casefold(),
-                record[0].platform.value,
-                record[0].platform_user_id,
-            ),
-        )
+        return await event_master_records(self.events, self.users, event_id)
 
     async def _notify_status_change(
         self,

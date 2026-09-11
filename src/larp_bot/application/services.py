@@ -982,17 +982,114 @@ def _chat_link_recipient_keys(registrations: Sequence[Registration], player_amou
     }
 
 
-def confirmation_success_text(event: Event, character_wish: str, *, in_main_roster: bool) -> str:
-    link_text = "Мастера скоро отправят вам ссылку на чат игры!\n\n" if in_main_roster else ""
-    return (
-        f"✅ Участие в игре {event_reference(event.name, event.game_date)} подтверждено.\n\n"
-        f"{link_text}"
-        f"Пожелания по персонажу:\n{character_wish}\n\n"
-        "Позже их можно изменить через «🎭 Пожелания по игре»."
+# Telegram rejects longer message texts and counts them in UTF-16 code units.
+MAX_MESSAGE_LENGTH = 4096
+MASTER_NO_SHOW_WARNING = (
+    "Если вы не придете на игру, ничего нам не сообщив, к вам могут быть применены санкции Ролевого Клуба"
+)
+
+
+def _message_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+async def event_master_records(
+    events: EventRepository,
+    users: UserRepository | None,
+    event_id: str,
+) -> list[tuple[BotIdentity, User | None]]:
+    """Load a game's masters with their bot profiles, ordered by name."""
+
+    identities = list(await events.list_leaders(event_id))
+    profiles: Sequence[User | None] = (
+        await asyncio.gather(*(users.get(identity.platform, identity.platform_user_id) for identity in identities))
+        if users is not None
+        else [None] * len(identities)
+    )
+    records = list(zip(identities, profiles, strict=True))
+    return sorted(
+        records,
+        key=lambda record: (
+            ((record[1].full_name or "") if record[1] is not None else "").casefold(),
+            record[0].platform.value,
+            record[0].platform_user_id,
+        ),
     )
 
 
-def enlistment_success_text(event: Event, queue_position: int, *, same_day_warning: bool = False) -> str:
+def master_profile_url(identity: BotIdentity, profile: User | None) -> str | None:
+    """Link the profile on the platform where the master uses the bot."""
+
+    if identity.platform is Platform.VK:
+        return f"https://vk.com/id{identity.platform_user_id}"
+    if isinstance(profile, TelegramUser) and profile.telegram_handle is not None:
+        return f"https://t.me/{profile.telegram_handle.removeprefix('@')}"
+    # A Telegram account without a public username has no plain-text link.
+    return None
+
+
+def event_masters_text(masters: Sequence[tuple[BotIdentity, User | None]]) -> str:
+    lines = []
+    for identity, profile in masters:
+        name = surname_and_name(profile.full_name) if profile is not None and profile.full_name else None
+        parts = [part for part in (name, master_profile_url(identity, profile)) if part is not None]
+        if parts:
+            lines.append(" — ".join(parts))
+    return "Мастера игры:\n" + "\n".join(lines) if lines else ""
+
+
+def master_contacts_section(masters: Sequence[tuple[BotIdentity, User | None]]) -> str:
+    """Name the masters and ask players to warn them before skipping the game."""
+
+    profiles = [url for identity, profile in masters if (url := master_profile_url(identity, profile)) is not None]
+    contacts = f": {' '.join(profiles)} ." if profiles else "."
+    disclaimer = (
+        f"Если вы решите не участвовать в игре, пожалуйста сообщите об этом мастерам{contacts} {MASTER_NO_SHOW_WARNING}"
+    )
+    masters_text = event_masters_text(masters)
+    return f"{masters_text}\n\n{disclaimer}" if masters_text else disclaimer
+
+
+def confirmation_success_text(
+    event: Event,
+    character_wish: str,
+    *,
+    in_main_roster: bool,
+    masters: Sequence[tuple[BotIdentity, User | None]],
+) -> str:
+    link_text = "Мастера скоро отправят вам ссылку на чат игры!\n\n" if in_main_roster else ""
+
+    def compose(wish: str) -> str:
+        return (
+            f"✅ Участие в игре {event_reference(event.name, event.game_date)} подтверждено.\n\n"
+            f"{link_text}"
+            f"Пожелания по персонажу:\n{wish}\n\n"
+            "Позже их можно изменить через «🎭 Пожелания по игре».\n\n"
+            f"{master_contacts_section(masters)}"
+        )
+
+    text = compose(character_wish)
+    excess = _message_length(text) - MAX_MESSAGE_LENGTH
+    if excess <= 0:
+        return text
+    # Only the echo is shortened; the stored wish stays complete and the master contacts still fit.
+    budget = _message_length(character_wish) - excess - 1
+    kept: list[str] = []
+    for character in character_wish:
+        budget -= _message_length(character)
+        if budget < 0:
+            break
+        kept.append(character)
+    return compose("".join(kept).rstrip() + "…")
+
+
+def enlistment_success_text(
+    event: Event,
+    queue_position: int,
+    *,
+    masters: Sequence[tuple[BotIdentity, User | None]],
+    same_day_warning: bool = False,
+) -> str:
     if event.public_table_public_url is None:
         raise RuntimeError("public game table is not initialized")
     if queue_position <= event.player_amount:
@@ -1028,8 +1125,8 @@ def enlistment_success_text(event: Event, queue_position: int, *, same_day_warni
         "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
     )
     if same_day_warning and event.game_date is not None:
-        return f"{text}\n\n{same_day_signup_warning(event.game_date)}"
-    return text
+        text = f"{text}\n\n{same_day_signup_warning(event.game_date)}"
+    return f"{text}\n\n{master_contacts_section(masters)}"
 
 
 class ConfirmationNotificationService:
@@ -1697,7 +1794,12 @@ class OrderedMutationService:
                 )
             buttons = (confirmation_button(event.event_id),) if event.status is EventStatus.CONFIRMATION_OPEN else None
             return MutationResult(
-                enlistment_success_text(event, queue_position, same_day_warning=same_day_warning),
+                enlistment_success_text(
+                    event,
+                    queue_position,
+                    masters=await event_master_records(self.events, self.users, event.event_id),
+                    same_day_warning=same_day_warning,
+                ),
                 buttons=buttons,
             )
 
@@ -1812,6 +1914,7 @@ class OrderedMutationService:
                     event,
                     command.payload.character_wish,
                     in_main_roster=command.participant_key in main_roster_keys,
+                    masters=await event_master_records(self.events, self.users, event.event_id),
                 ),
                 replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
             )

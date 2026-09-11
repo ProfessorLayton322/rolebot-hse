@@ -2976,6 +2976,7 @@ async def test_my_games_lists_player_and_master_games_with_status_and_links(disk
         "Игра: «Game 1»\n"
         "Дата: 02.10.26\n"
         "Ваш статус: Мастер\n\n"
+        "Мастера игры:\nИван Иванов\n\n"
         f"Чат игры: {chat}\n"
         "Таблица участников: https://disk.example/public/my-game-0001"
     )
@@ -3026,3 +3027,26 @@ async def test_my_games_pages_hold_five_games(disk_store: MemoryDiskStore) -> No
     assert game_labels(second.buttons) == [f"Game {PAGE_SIZE}"]
     assert PAGE_FORWARD not in {button.label for button in second.buttons}
     assert game_labels(returned.buttons) == game_labels(first.buttons)
+
+
+@pytest.mark.asyncio
+async def test_my_game_page_lists_master_names_and_profiles(disk_store: MemoryDiskStore) -> None:
+    game = my_games_event(0)
+    engine, users, _, tables = await engine_setup(disk_store, game)
+    await tables.import_missing([my_games_registration(engine, game)])
+    await users.save(TelegramUser(tg_id=21, full_name="Смирнова Анна Петровна", telegram_handle="@anna_master"))
+    await users.save(VkUser(vk_id=42, full_name="Орлов Борис"))
+    for platform, master_id in ((Platform.TELEGRAM, 21), (Platform.VK, 42)):
+        await engine.events.add_leader(game.event_id, BotIdentity(platform=platform, platform_user_id=master_id))
+
+    response = await engine.handle(inbound(1, MY_GAMES))
+
+    assert response.text == (
+        "Игра: «Game 0»\n"
+        "Дата: 01.10.26\n"
+        "Ваш статус: Ожидает подтверждения, основной состав\n\n"
+        "Мастера игры:\n"
+        "Орлов Борис — https://vk.com/id42\n"
+        "Смирнова Анна — https://t.me/anna_master\n\n"
+        "Таблица участников: https://disk.example/public/my-game-0000"
+    )
