@@ -1599,6 +1599,32 @@ class YdbRegistrationRepository:
         )
         return True
 
+    async def sift_waiting_to_end(self, event_id: str) -> None:
+        active = [
+            registration
+            for registration in await self.list_for_event(event_id)
+            if registration.attendance_status is not AttendanceStatus.CANCELLED
+        ]
+        if not active:
+            return
+        created_times = [registration.created_at for registration in active]
+        shift = max(created_times) - min(created_times) + timedelta(microseconds=1)
+        shift_microseconds = shift // timedelta(microseconds=1)
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $waiting_status AS Utf8;
+            DECLARE $shift AS Interval;
+            UPDATE `registrations`
+            SET created_at = created_at + $shift
+            WHERE event_id = $event_id AND attendance_status = $waiting_status;
+            """,
+            {
+                "$event_id": event_id,
+                "$waiting_status": AttendanceStatus.WAITING.value,
+                "$shift": shift_microseconds,
+            },
+        )
+
     async def remove(self, event_id: str, *, participant_key: str) -> bool:
         await self.db.query(
             """

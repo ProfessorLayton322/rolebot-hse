@@ -827,7 +827,7 @@ async def test_game_archived_during_cancellation_is_not_enqueued(disk_store: Mem
 
 
 @pytest.mark.asyncio
-async def test_closed_game_neither_offers_nor_accepts_cancellation(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_closed_game_still_offers_and_accepts_cancellation(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, _, publisher, tables = await engine_setup(disk_store, event)
     key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
     await tables.enlist(
@@ -843,23 +843,19 @@ async def test_closed_game_neither_offers_nor_accepts_cancellation(disk_store: M
     await engine.handle(inbound(2, f"select:cancel:{event.event_id}", callback=True))
     await engine.events.set_status(event.event_id, EventStatus.CLOSED)
 
-    rejected = await engine.handle(inbound(3, "cancel:yes", callback=True))
-    hidden = await engine.handle(inbound(4, CANCEL))
-    stale = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
+    accepted = await engine.handle(inbound(3, "cancel:yes", callback=True))
+    still_visible = await engine.handle(inbound(4, CANCEL))
+    selected_again = await engine.handle(inbound(5, f"select:cancel:{event.event_id}", callback=True))
 
-    closed_text = (
-        f"Регистрация на игру «{event.name}» закрыта, и состав зафиксирован. Отменить участие через бота уже нельзя."
-    )
-    assert rejected.text == closed_text
-    assert not any(button.value == f"select:cancel:{event.event_id}" for button in hidden.buttons)
-    assert hidden.text == "Сейчас нет игр, доступных для отмены участия."
-    assert hidden.buttons == [Button(label=MAIN_MENU_LABEL, value="Отмена")]
-    assert stale.text == closed_text
-    assert publisher.commands == []
+    assert accepted.text == "⏳ Отмена принята в обработку."
+    assert accepted.deferred and accepted.command_enqueued
+    assert any(button.value == f"select:cancel:{event.event_id}" for button in still_visible.buttons)
+    assert "Вы уверены, что хотите отменить участие" in selected_again.text
+    assert [command.operation for command in publisher.commands] == [Operation.CANCEL]
 
 
 @pytest.mark.asyncio
-async def test_cancellation_picker_has_no_pagination_when_only_registered_game_is_closed(
+async def test_cancellation_picker_shows_only_registered_closed_game_without_pagination(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -894,8 +890,11 @@ async def test_cancellation_picker_has_no_pagination_when_only_registered_game_i
 
     response = await engine.handle(inbound(1, CANCEL))
 
-    assert response.text == "Сейчас нет игр, доступных для отмены участия."
-    assert response.buttons == [Button(label=MAIN_MENU_LABEL, value="Отмена")]
+    assert response.text == "❌ Выберите игру, участие в которой хотите отменить:"
+    assert response.buttons == [
+        Button(label=event.name, value=f"select:cancel:{event.event_id}"),
+        Button(label=MAIN_MENU_LABEL, value="Отмена"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1660,7 +1659,7 @@ async def test_event_leader_pages_profile_names_and_confirms_player_removal(
 
 
 @pytest.mark.asyncio
-async def test_event_leader_confirms_exact_waiting_player_count_before_bulk_removal(
+async def test_event_leader_confirms_exact_waiting_player_count_before_sifting(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -1691,8 +1690,10 @@ async def test_event_leader_confirms_exact_waiting_player_count_before_bulk_remo
 
     warning = await engine.handle(inbound(1, f"ag:remove-waiting:{event.event_id}", callback=True))
 
-    assert "Будет удалено игроков: 2." in warning.text
+    assert "Не подтвердили участие: 2." in warning.text
+    assert "получат уведомления" in warning.text
     confirm = next(button for button in warning.buttons if button.value.startswith("admin:remove-waiting:confirm:"))
+    assert confirm.label == "Да, пересортировать"
     accepted = await engine.handle(inbound(2, confirm.value, callback=True))
 
     assert accepted.deferred and accepted.command_enqueued

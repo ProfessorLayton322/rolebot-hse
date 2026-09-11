@@ -147,11 +147,10 @@ class OrderedWorker:
                         Operation.REMOVE_WAITING_PARTICIPANTS,
                     }:
                         if self.notifications is not None:
-                            if command.operation in {
-                                Operation.REMOVE_PARTICIPANT,
-                                Operation.REMOVE_WAITING_PARTICIPANTS,
-                            }:
+                            if command.operation is Operation.REMOVE_PARTICIPANT:
                                 await self.notifications.notify_removed_participants(command)
+                            if command.operation is Operation.REMOVE_WAITING_PARTICIPANTS:
+                                await self.notifications.notify_sifted_participants(command)
                             if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
                                 await self.notifications.notify_reserve_promotion(command)
                                 await self.notifications.notify_confirmed_link_promotion(command)

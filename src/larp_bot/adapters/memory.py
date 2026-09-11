@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -519,6 +519,20 @@ class MemoryRegistrationRepository:
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
+
+    async def sift_waiting_to_end(self, event_id: str) -> None:
+        active = [
+            registration
+            for (stored_event_id, _), registration in self.rows.items()
+            if stored_event_id == event_id and registration.attendance_status is not AttendanceStatus.CANCELLED
+        ]
+        if not active:
+            return
+        created_times = [registration.created_at for registration in active]
+        shift = max(created_times) - min(created_times) + timedelta(microseconds=1)
+        for registration in active:
+            if registration.attendance_status is AttendanceStatus.WAITING:
+                registration.created_at += shift
 
     async def remove(self, event_id: str, *, participant_key: str) -> bool:
         return self.rows.pop((event_id, participant_key), None) is not None

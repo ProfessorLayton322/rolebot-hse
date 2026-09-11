@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from uuid import uuid4
 
@@ -706,7 +706,7 @@ async def test_created_game_allows_enlist_but_rejects_confirmation_until_admin_o
 
 
 @pytest.mark.asyncio
-async def test_close_orders_enlist_confirmation_and_cancellation_rejection(
+async def test_close_rejects_enlist_and_confirmation_but_allows_cancellation(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     tables = MemoryRegistrationRepository()
@@ -729,16 +729,13 @@ async def test_close_orders_enlist_confirmation_and_cancellation_rejection(
         )
     with pytest.raises(OperationNotAllowed, match="закрыто"):
         await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Changed")))
-    with pytest.raises(OperationNotAllowed, match="состав зафиксирован"):
-        await mutations.apply(command(event, Operation.CANCEL, EmptyPayload()))
+    await mutations.apply(command(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="Medic")))
+    cancellation = await mutations.apply(command(event, Operation.CANCEL, EmptyPayload()))
+    assert cancellation.text == "Участие отменено"
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
-    assert registration.attendance_status is AttendanceStatus.CONFIRMED
-    await mutations.apply(command(event, Operation.UPDATE_CHARACTER_WISH, CharacterWishPayload(character_wish="Medic")))
-    updated = await tables.get(event.event_id, "a" * 43)
-    assert updated is not None
-    assert updated.character_wish == "Medic"
-    assert updated.attendance_status is AttendanceStatus.CONFIRMED
+    assert registration.attendance_status is AttendanceStatus.CANCELLED
+    assert registration.character_wish == "Medic"
 
 
 @pytest.mark.asyncio
@@ -935,12 +932,14 @@ async def test_nonleader_cannot_remove_event_participant(disk_store: MemoryDiskS
 
 
 @pytest.mark.asyncio
-async def test_bulk_removal_deletes_only_waiting_players_and_keeps_retry_snapshot(
+async def test_confirmation_sift_moves_confirmed_up_and_keeps_retry_snapshot(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
     waiting_keys = ["a" * 43, "b" * 43]
     confirmed_key = "c" * 43
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    event.player_amount = 2
     tables = MemoryRegistrationRepository(
         [
             Registration(
@@ -948,6 +947,7 @@ async def test_bulk_removal_deletes_only_waiting_players_and_keeps_retry_snapsho
                 participant_key=key,
                 display_name=f"Waiting {index}",
                 wish_play="Anyone",
+                created_at=base + timedelta(seconds=index),
             )
             for index, key in enumerate(waiting_keys)
         ]
@@ -958,6 +958,7 @@ async def test_bulk_removal_deletes_only_waiting_players_and_keeps_retry_snapsho
                 display_name="Confirmed",
                 wish_play="Anyone",
                 attendance_status=AttendanceStatus.CONFIRMED,
+                created_at=base + timedelta(seconds=2),
             )
         ]
     )
@@ -968,14 +969,21 @@ async def test_bulk_removal_deletes_only_waiting_players_and_keeps_retry_snapsho
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
     removal = command(event, Operation.REMOVE_WAITING_PARTICIPANTS, EmptyPayload())
 
-    assert (await mutations.apply(removal)).text == "Удалено не подтвердивших участие: 2"
-    assert (await mutations.apply(removal)).text == "Удалено не подтвердивших участие: 2"
-    assert [await tables.get(event.event_id, key) for key in waiting_keys] == [None, None]
-    assert await tables.get(event.event_id, confirmed_key) is not None
+    expected = "Заявки пересортированы: в основной состав перемещено 1, в запас — 1"
+    assert (await mutations.apply(removal)).text == expected
+    assert (await mutations.apply(removal)).text == expected
+    rows = await tables.list_for_event(event.event_id)
+    assert [row.participant_key for row in rows] == [confirmed_key, *waiting_keys]
+    assert all(
+        registration is not None for registration in [await tables.get(event.event_id, key) for key in waiting_keys]
+    )
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
     assert stored_event.last_participant_removal_operation_id == removal.operation_id
-    assert stored_event.participant_removal_keys == waiting_keys
+    assert stored_event.participant_removal_keys == [
+        f"promoted:{confirmed_key}",
+        f"demoted:{waiting_keys[1]}",
+    ]
 
 
 @pytest.mark.asyncio
