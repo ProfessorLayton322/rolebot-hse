@@ -24,6 +24,7 @@ from larp_bot.application.conversation import (
     ADMIN_MENU,
     ARCHIVE_GAME,
     ARCHIVED_GAMES,
+    BACK,
     CANCEL,
     CHANGE_PLAYER_AMOUNT,
     CHANGE_STATUS,
@@ -38,6 +39,7 @@ from larp_bot.application.conversation import (
     GAMEMASTER_NOTIFICATION,
     GAMEMASTER_REVOKED_NOTIFICATION,
     GRANT_GAMEMASTER,
+    INACTIVE_GAME_RESPONSE,
     INVALID_INPUT_RESPONSE,
     LIST_EVENT_LEADERS,
     LIST_GAMEMASTERS,
@@ -50,6 +52,7 @@ from larp_bot.application.conversation import (
     MANAGE_NOTIFICATIONS,
     MANAGE_PLAYERS,
     MASTER_TABLE_DISCLAIMER,
+    MY_GAMES,
     PAGE_BACK,
     PAGE_FORWARD,
     PAGE_SIZE,
@@ -633,7 +636,14 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
             "Сначала заполните профиль и запишитесь на игру. Мы сообщим вам, когда будет открыто "
             "подтверждение на игру — вы сможете подтвердиться, когда будете уверены, что сможете прийти на игру."
         )
-        assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL]
+        assert [button.value for button in response.buttons] == [
+            PROFILE,
+            ENLIST,
+            CONFIRM,
+            GAME_WISHES,
+            CANCEL,
+            MY_GAMES,
+        ]
         assert saved is not None and saved.dialog_state == "IDLE"
         assert saved.dialog_context == {}
 
@@ -1260,7 +1270,7 @@ async def test_profile_completion_shows_confirmation_before_main_menu(
     assert not completed.deferred and not completed.command_enqueued
 
     menu = await engine.handle(inbound(6, MAIN_MENU, callback=True, user_id=2))
-    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL]
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
 
 
 @pytest.mark.asyncio
@@ -2843,3 +2853,176 @@ async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_stor
     selected = await engine.handle(inbound(8, last_game_buttons[0].value, callback=True))
     assert selected.text.startswith("Пожелания по игре «")
     assert [button.label for button in selected.buttons] == [CHARACTER_WISHES, CO_PLAYER_WISHES]
+
+
+def my_games_event(index: int, **changes: object) -> Event:
+    created_at = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=index)
+    event_id = f"my-game-{index:04d}"
+    return Event(
+        event_id=event_id,
+        name=f"Game {index}",
+        game_date=date(2026, 10, index + 1),
+        disk_resource_path=f"disk:/larp-bot/events/{event_id}/master.xlsx",
+        public_registration_url=f"https://disk.example/master/{event_id}",
+        public_table_resource_path=f"disk:/larp-bot/events/{event_id}/public.xlsx",
+        public_table_public_url=f"https://disk.example/public/{event_id}",
+        status=EventStatus.CONFIRMATION_OPEN,
+        created_at=created_at,
+        updated_at=created_at,
+    ).model_copy(update=changes)
+
+
+def my_games_registration(
+    engine: ConversationEngine,
+    event: Event,
+    status: AttendanceStatus = AttendanceStatus.WAITING,
+    *,
+    user_id: int = 1,
+    signup_delay: int = 0,
+) -> Registration:
+    return Registration(
+        event_id=event.event_id,
+        participant_key=engine.registrations.key(Platform.TELEGRAM, user_id, event.event_id),
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+        attendance_status=status,
+        created_at=event.created_at + timedelta(minutes=signup_delay),
+    )
+
+
+@pytest.mark.asyncio
+async def test_my_games_reports_when_there_are_no_games_to_view(disk_store: MemoryDiskStore) -> None:
+    cancelled = my_games_event(0)
+    archived = my_games_event(1, archived_at=datetime(2026, 2, 1, tzinfo=UTC))
+    foreign = my_games_event(2)
+    engine, _, _, tables = await engine_setup(disk_store, cancelled, archived, foreign)
+    await tables.import_missing(
+        [
+            my_games_registration(engine, cancelled, AttendanceStatus.CANCELLED),
+            my_games_registration(engine, archived, AttendanceStatus.CONFIRMED),
+            my_games_registration(engine, foreign, AttendanceStatus.CONFIRMED, user_id=2),
+        ]
+    )
+    await engine.events.add_leader(archived.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1))
+
+    response = await engine.handle(inbound(1, MY_GAMES))
+
+    assert response.text == "Сейчас нет игр, доступных для просмотра."
+    assert response.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
+
+
+@pytest.mark.asyncio
+async def test_single_my_game_opens_its_page_without_a_list(disk_store: MemoryDiskStore) -> None:
+    game = my_games_event(0, confirmed_notifications=["https://t.me/+gamechat"])
+    engine, _, _, tables = await engine_setup(disk_store, game, my_games_event(1))
+    await tables.import_missing([my_games_registration(engine, game)])
+
+    response = await engine.handle(inbound(1, MY_GAMES))
+
+    assert response.text == (
+        "Игра: «Game 0»\n"
+        "Дата: 01.10.26\n"
+        "Ваш статус: Ожидает подтверждения, основной состав\n\n"
+        "Таблица участников: https://disk.example/public/my-game-0000"
+    )
+    assert response.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
+
+
+@pytest.mark.asyncio
+async def test_my_games_lists_player_and_master_games_with_status_and_links(disk_store: MemoryDiskStore) -> None:
+    chat = "https://t.me/+gamechat"
+    confirmed = my_games_event(0, confirmed_notifications=[chat, "Сбор в 18:00", chat])
+    led = my_games_event(1, status=EventStatus.CLOSED, confirmed_notifications=[chat])
+    reserve = my_games_event(2, player_amount=1, confirmed_notifications=[chat])
+    cancelled = my_games_event(3)
+    archived = my_games_event(4, archived_at=datetime(2026, 2, 1, tzinfo=UTC))
+    undated = my_games_event(5, game_date=None)
+    engine, _, _, tables = await engine_setup(disk_store, confirmed, led, reserve, cancelled, archived, undated)
+    await tables.import_missing(
+        [
+            my_games_registration(engine, confirmed, AttendanceStatus.CONFIRMED),
+            my_games_registration(engine, reserve, user_id=2),
+            my_games_registration(engine, reserve, AttendanceStatus.CONFIRMED, signup_delay=1),
+            my_games_registration(engine, cancelled, AttendanceStatus.CANCELLED),
+            my_games_registration(engine, archived, AttendanceStatus.CONFIRMED),
+            my_games_registration(engine, undated),
+        ]
+    )
+    await engine.events.add_leader(led.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1))
+
+    listing = await engine.handle(inbound(1, MY_GAMES))
+
+    assert listing.text == "Выберите игру, чтобы посмотреть информацию о ней:"
+    assert listing.buttons == [
+        *(Button(label=game.name, value=f"select:mine:{game.event_id}") for game in (confirmed, led, reserve, undated)),
+        Button(label=MAIN_MENU_LABEL, value="Отмена"),
+    ]
+
+    confirmed_page = await engine.handle(inbound(2, f"select:mine:{confirmed.event_id}", callback=True))
+    assert confirmed_page.text == (
+        "Игра: «Game 0»\n"
+        "Дата: 01.10.26\n"
+        "Ваш статус: Подтверждено, основной состав\n\n"
+        f"Чат игры: {chat}\n"
+        "Таблица участников: https://disk.example/public/my-game-0000"
+    )
+    assert confirmed_page.buttons == [
+        Button(label=BACK, value=MY_GAMES),
+        Button(label=MAIN_MENU_LABEL, value=MAIN_MENU),
+    ]
+
+    led_page = await engine.handle(inbound(3, f"select:mine:{led.event_id}", callback=True))
+    assert led_page.text == (
+        "Игра: «Game 1»\n"
+        "Дата: 02.10.26\n"
+        "Ваш статус: Мастер\n\n"
+        f"Чат игры: {chat}\n"
+        "Таблица участников: https://disk.example/public/my-game-0001"
+    )
+
+    reserve_page = await engine.handle(inbound(4, f"select:mine:{reserve.event_id}", callback=True))
+    assert reserve_page.text == (
+        "Игра: «Game 2»\n"
+        "Дата: 03.10.26\n"
+        "Ваш статус: Подтверждено, запас\n\n"
+        "Таблица участников: https://disk.example/public/my-game-0002"
+    )
+
+    undated_page = await engine.handle(inbound(5, f"select:mine:{undated.event_id}", callback=True))
+    assert undated_page.text.startswith(
+        "Игра: «Game 5»\nДата: не указана\nВаш статус: Ожидает подтверждения, основной состав\n\n"
+    )
+
+    returned = await engine.handle(inbound(6, MY_GAMES, callback=True))
+    assert returned.buttons == listing.buttons
+
+    no_longer_playing = await engine.handle(inbound(7, f"select:mine:{cancelled.event_id}", callback=True))
+    assert no_longer_playing.text == "Вы больше не участвуете в этой игре."
+    inactive = await engine.handle(inbound(8, f"select:mine:{archived.event_id}", callback=True))
+    assert inactive.text == INACTIVE_GAME_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_my_games_pages_hold_five_games(disk_store: MemoryDiskStore) -> None:
+    games = [my_games_event(index) for index in range(PAGE_SIZE + 1)]
+    engine, _, _, tables = await engine_setup(disk_store, *games)
+    await tables.import_missing([my_games_registration(engine, game) for game in games[::2]])
+    for game in games[1::2]:
+        await engine.events.add_leader(game.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1))
+
+    first = await engine.handle(inbound(1, MY_GAMES))
+    second = await engine.handle(
+        inbound(2, next(button.value for button in first.buttons if button.label == PAGE_FORWARD), callback=True)
+    )
+    returned = await engine.handle(
+        inbound(3, next(button.value for button in second.buttons if button.label == PAGE_BACK), callback=True)
+    )
+
+    def game_labels(buttons: list[Button]) -> list[str]:
+        return [button.label for button in buttons if button.value.startswith("select:mine:")]
+
+    assert game_labels(first.buttons) == [f"Game {index}" for index in range(PAGE_SIZE)]
+    assert PAGE_BACK not in {button.label for button in first.buttons}
+    assert game_labels(second.buttons) == [f"Game {PAGE_SIZE}"]
+    assert PAGE_FORWARD not in {button.label for button in second.buttons}
+    assert game_labels(returned.buttons) == game_labels(first.buttons)
