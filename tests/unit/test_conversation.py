@@ -1782,8 +1782,15 @@ async def test_admin_grants_telegram_gamemaster_by_profile_and_notifies_them(
     assert target.gamemaster_grant_operation_id == "gamemaster-grant:telegram:2:5"
     assert isinstance(engine.transport, MemoryDeferredTransport)
     assert engine.transport.sent == [
-        (Platform.TELEGRAM, 2, "gamemaster-grant:telegram:2:5", GAMEMASTER_NOTIFICATION, ()),
+        (
+            Platform.TELEGRAM,
+            2,
+            "gamemaster-grant:telegram:2:5",
+            GAMEMASTER_NOTIFICATION,
+            (Button(label=ADMIN_MENU, value=ADMIN_MENU),),
+        ),
     ]
+    assert target.last_bot_buttons == [Button(label=ADMIN_MENU, value=ADMIN_MENU)]
     assert granted.text == "✅ Пользователь назначен модератором в Telegram."
 
     target_main = await engine.handle(inbound(6, "/start", user_id=2, telegram_username="target_player"))
@@ -1886,8 +1893,15 @@ async def test_admin_grants_vk_gamemaster_from_vanity_link(disk_store: MemoryDis
     assert target is not None and target.is_gamemaster
     assert isinstance(engine.transport, MemoryDeferredTransport)
     assert engine.transport.sent == [
-        (Platform.VK, 22, "gamemaster-grant:vk:22:3", GAMEMASTER_NOTIFICATION, ()),
+        (
+            Platform.VK,
+            22,
+            "gamemaster-grant:vk:22:3",
+            GAMEMASTER_NOTIFICATION,
+            (Button(label=ADMIN_MENU, value=ADMIN_MENU),),
+        ),
     ]
+    assert target.last_bot_buttons == [Button(label=ADMIN_MENU, value=ADMIN_MENU)]
     assert granted.text == "✅ Пользователь назначен модератором в VK."
 
 
@@ -1940,6 +1954,7 @@ async def test_gamemaster_notification_retries_after_role_was_persisted(
     assert isinstance(engine.transport, FailOnceTransport)
     assert len(engine.transport.sent) == 1
     assert engine.transport.sent[0][3] == GAMEMASTER_NOTIFICATION
+    assert engine.transport.sent[0][4] == (Button(label=ADMIN_MENU, value=ADMIN_MENU),)
 
 
 @pytest.mark.asyncio
