@@ -2027,9 +2027,11 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     prompt = await engine.handle(inbound(1, "➕ Создать игру"))
     assert prompt.text == "Введите название игры:"
     amount_prompt = await engine.handle(inbound(2, "Бал в зимнем дворце"))
-    assert amount_prompt.text == "Введите дату игры строго в формате DD.MM.YY:"
+    assert "DD.MM.YY" in amount_prompt.text
+    assert amount_prompt.buttons == [Button(label="Следующая суббота", value="admin:date:next-saturday")]
     invalid_date = await engine.handle(inbound(3, "31.02.26"))
-    assert invalid_date.text == "Введите корректную дату игры строго в формате DD.MM.YY:"
+    assert "Некорректная дата" in invalid_date.text
+    assert invalid_date.buttons == amount_prompt.buttons
     amount_prompt = await engine.handle(inbound(4, "14.11.26"))
     assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
     invalid = await engine.handle(inbound(5, "много"))
@@ -2083,6 +2085,26 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
     assert "Административная таблица" in tables.text
     assert "Таблица пропусков" in tables.text
+
+
+@pytest.mark.asyncio
+async def test_admin_can_choose_next_saturday_as_game_date(
+    monkeypatch: pytest.MonkeyPatch,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    next_saturday = date(2026, 9, 19)
+    monkeypatch.setattr("larp_bot.application.conversation.next_saturday_game_date", lambda: next_saturday)
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    date_prompt = await engine.handle(inbound(2, "Игра в субботу"))
+    amount_prompt = await engine.handle(inbound(3, date_prompt.buttons[0].value, callback=True))
+
+    creator = await users.get(Platform.TELEGRAM, 1)
+    assert creator is not None
+    assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
+    assert creator.dialog_context["game_date"] == next_saturday.isoformat()
 
 
 @pytest.mark.asyncio

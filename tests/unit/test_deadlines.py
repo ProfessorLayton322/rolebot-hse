@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -8,6 +8,7 @@ from larp_bot.application.deadlines import (
     MOSCOW_TIMEZONE,
     closest_thursday_19,
     format_confirmation_deadline,
+    next_saturday_game_date,
     parse_confirmation_deadline,
 )
 
@@ -33,3 +34,11 @@ def test_nearest_thursday_includes_today_and_sets_1900() -> None:
 
     assert closest_thursday_19(thursday) == datetime(2026, 9, 3, 19, tzinfo=MOSCOW_TIMEZONE)
     assert closest_thursday_19(wednesday) == datetime(2026, 9, 3, 19, tzinfo=MOSCOW_TIMEZONE)
+
+
+def test_next_saturday_is_one_week_after_closest_saturday_in_moscow() -> None:
+    friday_in_utc_but_saturday_in_moscow = datetime(2026, 9, 11, 22, tzinfo=UTC)
+    sunday_in_moscow = datetime(2026, 9, 13, 12, tzinfo=MOSCOW_TIMEZONE)
+
+    assert next_saturday_game_date(friday_in_utc_but_saturday_in_moscow) == date(2026, 9, 19)
+    assert next_saturday_game_date(sunday_in_moscow) == date(2026, 9, 26)

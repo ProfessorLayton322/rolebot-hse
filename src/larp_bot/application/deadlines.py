@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 DEADLINE_FORMAT = "%d.%m.%y %H:%M"
 MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 NEAREST_THURSDAY = "Ближайший четверг 19:00"
+NEXT_SATURDAY = "Следующая суббота"
 _STRICT_DEADLINE = re.compile(r"\d{2}\.\d{2}\.\d{2} \d{2}:\d{2}")
 
 
@@ -28,3 +29,9 @@ def closest_thursday_19(now: datetime | None = None) -> datetime:
     days_until_thursday = (3 - local_now.weekday()) % 7
     target_date = local_now.date() + timedelta(days=days_until_thursday)
     return datetime.combine(target_date, time(hour=19), tzinfo=MOSCOW_TIMEZONE)
+
+
+def next_saturday_game_date(now: datetime | None = None) -> date:
+    local_now = datetime.now(MOSCOW_TIMEZONE) if now is None else now.astimezone(MOSCOW_TIMEZONE)
+    days_until_closest_saturday = (5 - local_now.weekday()) % 7
+    return local_now.date() + timedelta(days=days_until_closest_saturday + 7)
