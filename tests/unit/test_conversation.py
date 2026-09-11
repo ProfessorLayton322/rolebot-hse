@@ -70,7 +70,7 @@ from larp_bot.application.conversation import (
     STATUS_REGISTRATION,
     UNARCHIVE_GAME,
     UNSUPPORTED_CONTENT_RESPONSE,
-    VENUE_URL,
+    VENUE_ADDRESS,
     ConversationEngine,
 )
 from larp_bot.application.services import (
@@ -1244,7 +1244,7 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
     assert [button.value for button in full_name_prompt.buttons] == ["Отмена"]
     assert invalid_full_name.text == "Введите ФИО кириллицей, либо фамилию имя, если отчества нету"
     assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
-    assert pass_prompt.text == f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_URL})?"
+    assert pass_prompt.text == f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_ADDRESS})?"
     assert "страницу VK" in contact_prompt.text
     assert "Профиль успешно заполнен" in saved.text
     assert profile is not None
