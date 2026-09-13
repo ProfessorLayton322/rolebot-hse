@@ -6,6 +6,7 @@ import pytest
 
 from larp_bot.application.deadlines import (
     MOSCOW_TIMEZONE,
+    closest_friday_18,
     closest_thursday_19,
     format_confirmation_deadline,
     next_saturday_game_date,
@@ -34,6 +35,16 @@ def test_nearest_thursday_includes_today_and_sets_1900() -> None:
 
     assert closest_thursday_19(thursday) == datetime(2026, 9, 3, 19, tzinfo=MOSCOW_TIMEZONE)
     assert closest_thursday_19(wednesday) == datetime(2026, 9, 3, 19, tzinfo=MOSCOW_TIMEZONE)
+
+
+def test_nearest_friday_uses_today_before_1800_and_next_week_afterwards() -> None:
+    friday_before = datetime(2026, 9, 4, 17, 59, tzinfo=MOSCOW_TIMEZONE)
+    friday_at_opening = datetime(2026, 9, 4, 18, tzinfo=MOSCOW_TIMEZONE)
+    thursday_in_utc = datetime(2026, 9, 3, 22, tzinfo=UTC)
+
+    assert closest_friday_18(friday_before) == datetime(2026, 9, 4, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert closest_friday_18(friday_at_opening) == datetime(2026, 9, 11, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert closest_friday_18(thursday_in_utc) == datetime(2026, 9, 4, 18, tzinfo=MOSCOW_TIMEZONE)
 
 
 def test_next_saturday_is_one_week_after_closest_saturday_in_moscow() -> None:

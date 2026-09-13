@@ -166,6 +166,30 @@ async def test_worker_allows_admin_privileged_mutation_without_event_master_memb
 
 
 @pytest.mark.asyncio
+async def test_worker_rejects_signup_before_scheduled_registration_opening(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    event.registration_open_at = datetime.now(UTC) + timedelta(days=1)
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="ещё не открыта"):
+        await mutations.apply(
+            command(
+                event,
+                Operation.ENLIST,
+                EnlistPayload(display_name="Player", wish_play="Anyone"),
+            )
+        )
+
+    assert await tables.list_for_event(event.event_id) == []
+
+
+@pytest.mark.asyncio
 async def test_player_amount_change_is_retryable_and_moves_reserve_row_in_both_tables(
     disk_store: MemoryDiskStore,
     event: Event,
