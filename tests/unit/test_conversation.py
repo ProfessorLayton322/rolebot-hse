@@ -33,6 +33,8 @@ from larp_bot.application.conversation import (
     CO_PLAYER_WISHES,
     CONFIRM,
     CREATION_MASTER_QUESTION,
+    EDIT_PROFILE,
+    EMAIL_PROMPT,
     ENLIST,
     EVENT_TABLES,
     FREE_TEXT_DIALOG_STATES,
@@ -42,6 +44,7 @@ from larp_bot.application.conversation import (
     GRANT_GAMEMASTER,
     INACTIVE_GAME_RESPONSE,
     INVALID_INPUT_RESPONSE,
+    LATIN_FULL_NAME_PROMPT,
     LIST_EVENT_LEADERS,
     LIST_GAMEMASTERS,
     LIST_WAITING_PLAYERS,
@@ -57,7 +60,10 @@ from larp_bot.application.conversation import (
     PAGE_BACK,
     PAGE_FORWARD,
     PAGE_SIZE,
+    PHONE_PROMPT,
     PROFILE,
+    PROFILE_EDITED,
+    REFILL_PROFILE,
     REMOVE_EVENT_LEADER,
     REMOVE_PLAYER,
     REMOVE_WAITING_PLAYERS,
@@ -81,6 +87,7 @@ from larp_bot.application.services import (
 from larp_bot.domain.models import (
     AttendanceStatus,
     BotIdentity,
+    BotResponse,
     Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
@@ -1349,6 +1356,239 @@ async def test_profile_shows_persisted_moderator_status(
 
 
 @pytest.mark.asyncio
+async def test_completed_profile_display_and_edit_menu_include_pass_fields(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    user = await users.get(Platform.TELEGRAM, 1)
+    assert isinstance(user, TelegramUser)
+    user.needs_pass = True
+    user.pass_details = PassDetails(
+        surname_cyrillic="Иванов",
+        name_cyrillic="Иван",
+        patronym_cyrillic="Иванович",
+        foreigner=True,
+        surname_latin="Ivanov",
+        name_latin="Ivan",
+        patronym_latin="Ivanovich",
+        mobile_phone="+7 999 123-45-67",
+        email="player@example.com",
+    )
+    await users.save(user)
+
+    shown = await engine.handle(inbound(1, PROFILE))
+
+    assert "ФИО: Иванов Иван Иванович" in shown.text
+    assert "Номер телефона: +7 999 123-45-67" in shown.text
+    assert "Email: player@example.com" in shown.text
+    assert "Российское гражданство: Нет" in shown.text
+    assert "ФИО латиницей: Ivanov Ivan Ivanovich" in shown.text
+    assert [button.label for button in shown.buttons] == [MAIN_MENU_LABEL, EDIT_PROFILE]
+
+    menu = await engine.handle(inbound(2, "profile:menu", callback=True))
+
+    assert [button.label for button in menu.buttons] == [
+        REFILL_PROFILE,
+        "ФИО",
+        "Профиль ВКонтакте",
+        "Кросспол",
+        "Пропуск",
+        "Номер телефона",
+        "Email",
+        "Гражданство",
+        "ФИО латиницей",
+        BACK,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vk_profile_edit_menu_names_telegram_contact(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    await users.save(
+        VkUser(
+            vk_id=7,
+            full_name="Иванов Иван",
+            telegram_handle="@player_ivan",
+            crossplay=False,
+            needs_pass=False,
+        )
+    )
+
+    def vk(update: int, value: str) -> InboundMessage:
+        return InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id=str(update),
+            callback=value,
+            peer_id=7,
+        )
+
+    shown = await engine.handle(vk(1, PROFILE))
+    menu = await engine.handle(vk(2, "profile:menu"))
+
+    assert "Профиль Telegram: @player_ivan" in shown.text
+    assert "Профиль Telegram" in [button.label for button in menu.buttons]
+    assert "Номер телефона" not in [button.label for button in menu.buttons]
+
+
+@pytest.mark.asyncio
+async def test_pass_edit_clears_details_when_pass_is_no_longer_needed(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+    user = await users.get(Platform.TELEGRAM, 1)
+    assert isinstance(user, TelegramUser)
+    user.needs_pass = True
+    user.pass_details = PassDetails(
+        surname_cyrillic="Иванов",
+        name_cyrillic="Иван",
+        patronym_cyrillic="-",
+        foreigner=False,
+        mobile_phone="+7 999 123-45-67",
+        email="player@example.com",
+    )
+    await users.save(user)
+
+    await engine.handle(inbound(1, "profile:field:pass", callback=True))
+    changed = await engine.handle(inbound(2, "Нет", callback=True))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert saved is not None and saved.needs_pass is False and saved.pass_details is None
+    assert changed.text.startswith(f"{PROFILE_EDITED}\n\nПрофиль\n")
+    assert "Email:" not in changed.text
+    assert [button.label for button in changed.buttons] == [MAIN_MENU_LABEL, EDIT_PROFILE]
+    assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE]
+
+
+@pytest.mark.asyncio
+async def test_enabling_pass_collects_every_required_field_before_saving(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+
+    await engine.handle(inbound(1, "profile:field:pass", callback=True))
+    citizenship = await engine.handle(inbound(2, "Да", callback=True))
+    latin_name = await engine.handle(inbound(3, "Нет", callback=True))
+    phone = await engine.handle(inbound(4, "Ivanov Ivan"))
+    email = await engine.handle(inbound(5, "+44 7700 900123"))
+    changed = await engine.handle(inbound(6, "ivan@example.com"))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert citizenship.text == "Есть ли у вас российское гражданство?"
+    assert latin_name.text == LATIN_FULL_NAME_PROMPT
+    assert phone.text == PHONE_PROMPT
+    assert email.text == EMAIL_PROMPT
+    assert saved is not None and saved.needs_pass is True and saved.pass_details is not None
+    assert saved.pass_details.model_dump() == {
+        "surname_cyrillic": "Иван",
+        "name_cyrillic": "Иванов",
+        "patronym_cyrillic": "-",
+        "foreigner": True,
+        "surname_latin": "Ivanov",
+        "name_latin": "Ivan",
+        "patronym_latin": "-",
+        "mobile_phone": "+44 7700 900123",
+        "email": "ivan@example.com",
+    }
+    assert changed.text.startswith(f"{PROFILE_EDITED}\n\nПрофиль\n")
+    assert len(publisher.commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_each_profile_field_can_be_edited_independently(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+    user = await users.get(Platform.TELEGRAM, 1)
+    assert isinstance(user, TelegramUser)
+    user.needs_pass = True
+    user.pass_details = PassDetails(
+        surname_cyrillic="Иван",
+        name_cyrillic="Иванов",
+        patronym_cyrillic="Иванович",
+        foreigner=True,
+        surname_latin="Ivan",
+        name_latin="Ivanov",
+        patronym_latin="Ivanovich",
+        mobile_phone="+7 999 123-45-67",
+        email="old@example.com",
+    )
+    await users.save(user)
+    update = 0
+
+    async def edit(field: str, answer: str) -> BotResponse:
+        nonlocal update
+        update += 1
+        await engine.handle(inbound(update, "profile:menu", callback=True))
+        update += 1
+        await engine.handle(inbound(update, f"profile:field:{field}", callback=True))
+        update += 1
+        response = await engine.handle(inbound(update, answer))
+        assert response.text.startswith(f"{PROFILE_EDITED}\n\nПрофиль\n")
+        assert [button.label for button in response.buttons] == [MAIN_MENU_LABEL, EDIT_PROFILE]
+        return response
+
+    await edit("name", "Петров Пётр Петрович")
+    await edit("contact", "https://vk.com/new-profile")
+    await edit("crossplay", "Нет")
+    await edit("phone", "+44 7700 900123")
+    await edit("email", "new@example.com")
+    latin_response = await edit("latin-name", "Petrov Petr Petrovich")
+    citizenship_response = await edit("citizenship", "Да")
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert "ФИО латиницей: Petrov Petr Petrovich" in latin_response.text
+    assert "ФИО латиницей:" not in citizenship_response.text
+    assert isinstance(saved, TelegramUser) and saved.pass_details is not None
+    assert saved.full_name == "Петров Пётр"
+    assert saved.vk_url == "https://vk.com/new-profile"
+    assert saved.crossplay is False
+    assert saved.pass_details.model_dump() == {
+        "surname_cyrillic": "Петров",
+        "name_cyrillic": "Пётр",
+        "patronym_cyrillic": "Петрович",
+        "foreigner": False,
+        "surname_latin": None,
+        "name_latin": None,
+        "patronym_latin": None,
+        "mobile_phone": "+44 7700 900123",
+        "email": "new@example.com",
+    }
+    assert len(publisher.commands) == 7
+
+
+@pytest.mark.asyncio
+async def test_cancelling_profile_field_edit_reshows_unchanged_profile(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+
+    prompt = await engine.handle(inbound(1, "profile:field:crossplay", callback=True))
+    cancelled = await engine.handle(inbound(2, "Отмена", callback=True))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert saved is not None and saved.crossplay is True
+    assert prompt.buttons[-1].label == "Отмена"
+    assert cancelled.text.startswith(f"{PROFILE_EDITED}\n\nПрофиль\n")
+    assert "Кросспол: Да" in cancelled.text
+    assert [button.label for button in cancelled.buttons] == [MAIN_MENU_LABEL, EDIT_PROFILE]
+    assert publisher.commands == []
+
+    await engine.handle(inbound(3, "profile:menu", callback=True))
+    refill = await engine.handle(inbound(4, "profile:reset", callback=True))
+    refill_cancelled = await engine.handle(inbound(5, "Отмена", callback=True))
+
+    assert refill.buttons[-1].label == "Отмена"
+    assert refill_cancelled.text.startswith(f"{PROFILE_EDITED}\n\nПрофиль\n")
+    assert [button.label for button in refill_cancelled.buttons] == [MAIN_MENU_LABEL, EDIT_PROFILE]
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
 async def test_profile_save_queues_one_background_sync_instead_of_scanning_games(
     disk_store: MemoryDiskStore,
     event: Event,
@@ -1403,7 +1643,7 @@ async def test_profile_save_queues_one_background_sync_instead_of_scanning_games
         response = await engine.handle(inbound(update, answer, user_id=1, telegram_username="new_profile"))
 
     profile = await users.get(Platform.TELEGRAM, 1)
-    assert "Профиль успешно заполнен" in response.text
+    assert response.text.startswith(f"{PROFILE_EDITED}\n\nПрофиль\n")
     assert profile is not None and profile.full_name == "Новиков Новый"
     assert profile.larp_experience is True
     assert profile.last_update_id == "5"

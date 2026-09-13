@@ -75,6 +75,9 @@ from .services import (
 )
 
 PROFILE = "📝 Профиль"
+EDIT_PROFILE = "Редактировать профиль"
+REFILL_PROFILE = "Заполнить профиль заново"
+PROFILE_EDITED = "Профиль успешно изменён!"
 ENLIST = "🎮 Записаться на игру"
 CONFIRM = "✅ Подтвердить участие"
 # Keep the former value recognizable for keyboards sent before this rollout.
@@ -247,13 +250,32 @@ LATIN_FULL_NAME_RETRY_PROMPT = "Введите ФИО латиницей, либ
 PHONE_PROMPT = "Введите ваш номер телефона. Он необходим для оформления пропуска."
 EMAIL_PROMPT = "Введите ваш email. Он необходим для оформления пропуска."
 
+PROFILE_EDIT_ACTIONS = {
+    "profile:field:name": "ФИО",
+    "profile:field:crossplay": "Кросспол",
+    "profile:field:pass": "Пропуск",
+    "profile:field:phone": "Номер телефона",
+    "profile:field:email": "Email",
+    "profile:field:citizenship": "Гражданство",
+    "profile:field:latin-name": "ФИО латиницей",
+}
+
 
 def dialog_exit_button(*, label: str = MAIN_MENU_LABEL) -> Button:
     return Button(label=label, value=CANCEL_DIALOG)
 
 
-def yes_no_buttons() -> list[Button]:
-    return [Button(label="Да", value="Да"), Button(label="Нет", value="Нет"), dialog_exit_button()]
+def profile_dialog_exit_button(user: User) -> Button:
+    editing = user.dialog_context.get("profile_flow") in {"field", "reset"}
+    return dialog_exit_button(label=CANCEL_DIALOG if editing else MAIN_MENU_LABEL)
+
+
+def profile_yes_no_buttons(user: User) -> list[Button]:
+    return [
+        Button(label="Да", value="Да"),
+        Button(label="Нет", value="Нет"),
+        profile_dialog_exit_button(user),
+    ]
 
 
 def main_buttons(has_admin_access: bool) -> list[Button]:
@@ -285,6 +307,10 @@ def is_profile_complete(user: User) -> bool:
 
 def _bool_text(value: bool | None) -> str:
     return "Да" if value else "Нет"
+
+
+def _pass_name(parts: tuple[str | None, str | None, str | None]) -> str:
+    return " ".join(part for part in parts if part not in {None, "-"})
 
 
 def _attendance_status_text(status: AttendanceStatus) -> str:
@@ -593,8 +619,15 @@ class ConversationEngine:
             await self._clear(user)
             response = await self._main(user, WELCOME_TEXT)
         elif value == CANCEL_DIALOG:
+            return_to_profile = user.dialog_state.startswith("PROFILE_") and user.dialog_context.get(
+                "profile_flow"
+            ) in {"field", "reset"}
             await self._clear(user)
-            response = await self._main(user, "Действие отменено.")
+            response = (
+                await self._profile_response(user, prefix=PROFILE_EDITED)
+                if return_to_profile
+                else await self._main(user, "Действие отменено.")
+            )
         elif value in {ADMIN_MENU, MANAGE_MODERATORS}:
             await self._clear(user)
             response = (
@@ -621,24 +654,21 @@ class ConversationEngine:
     async def _start(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if value == PROFILE:
             if is_profile_complete(user):
-                contact = user.vk_url if isinstance(user, TelegramUser) else user.telegram_handle
-                contact_label = "VK" if isinstance(user, TelegramUser) else "Telegram"
-                role = await self._user_role_label(user)
-                return BotResponse(
-                    text=(
-                        f"Профиль\n\nИмя: {user.full_name}\nСтатус: {role}\n"
-                        f"{contact_label}: {contact or 'не указан'}\n"
-                        f"Кросспол: {_bool_text(user.crossplay)}\n"
-                        f"Нужен пропуск: {_bool_text(user.needs_pass)}"
-                    ),
-                    buttons=[
-                        Button(label="Заполнить профиль заново", value="profile:edit"),
-                        main_menu_button(),
-                    ],
-                )
+                return await self._profile_response(user)
             return await self._begin_profile(user)
+        if value == "profile:menu":
+            if not is_profile_complete(user):
+                return await self._begin_profile(user)
+            return self._profile_edit_menu(user)
+        if value == "profile:reset":
+            return await self._begin_profile(user, editing_existing=is_profile_complete(user))
         if value == "profile:edit":
-            return await self._begin_profile(user)
+            # Keep keyboards sent before the edit-menu rollout working.
+            return await self._begin_profile(user, editing_existing=is_profile_complete(user))
+        if value.startswith("profile:field:"):
+            if not is_profile_complete(user):
+                return await self._begin_profile(user)
+            return self._begin_profile_field(user, value.removeprefix("profile:field:"))
         if value == ENLIST:
             if not is_profile_complete(user):
                 return BotResponse(
@@ -675,13 +705,138 @@ class ConversationEngine:
             return admin_response
         return await self._main(user, "Не удалось распознать команду. Выберите действие кнопкой.")
 
-    async def _begin_profile(self, user: User) -> BotResponse:
+    async def _profile_response(self, user: User, *, prefix: str | None = None) -> BotResponse:
+        contact = user.vk_url if isinstance(user, TelegramUser) else user.telegram_handle
+        contact_label = "Профиль ВКонтакте" if isinstance(user, TelegramUser) else "Профиль Telegram"
+        role = await self._user_role_label(user)
+        details = user.pass_details
+        full_name = user.full_name or "не указано"
+        if details is not None:
+            full_name = _pass_name((details.surname_cyrillic, details.name_cyrillic, details.patronym_cyrillic))
+        lines = [
+            "Профиль",
+            "",
+            f"ФИО: {full_name}",
+            f"Статус: {role}",
+            f"{contact_label}: {contact or 'не указан'}",
+            f"Кросспол: {_bool_text(user.crossplay)}",
+            f"Нужен пропуск: {_bool_text(user.needs_pass)}",
+        ]
+        if details is not None:
+            lines.extend(
+                [
+                    f"Номер телефона: {details.mobile_phone}",
+                    f"Email: {details.email}",
+                    f"Российское гражданство: {_bool_text(not details.foreigner)}",
+                ]
+            )
+            if details.foreigner:
+                lines.append(
+                    f"ФИО латиницей: {_pass_name((details.surname_latin, details.name_latin, details.patronym_latin))}"
+                )
+        text = "\n".join(lines)
+        if prefix is not None:
+            text = f"{prefix}\n\n{text}"
+        return BotResponse(
+            text=text,
+            buttons=[
+                main_menu_button(),
+                Button(label=EDIT_PROFILE, value="profile:menu"),
+            ],
+        )
+
+    @staticmethod
+    def _profile_edit_menu(user: User) -> BotResponse:
+        contact_label = "Профиль ВКонтакте" if isinstance(user, TelegramUser) else "Профиль Telegram"
+        buttons = [
+            Button(label=REFILL_PROFILE, value="profile:reset"),
+            Button(label=PROFILE_EDIT_ACTIONS["profile:field:name"], value="profile:field:name"),
+            Button(label=contact_label, value="profile:field:contact"),
+            Button(label=PROFILE_EDIT_ACTIONS["profile:field:crossplay"], value="profile:field:crossplay"),
+            Button(label=PROFILE_EDIT_ACTIONS["profile:field:pass"], value="profile:field:pass"),
+        ]
+        details = user.pass_details
+        if user.needs_pass and details is not None:
+            buttons.extend(
+                [
+                    Button(label=PROFILE_EDIT_ACTIONS["profile:field:phone"], value="profile:field:phone"),
+                    Button(label=PROFILE_EDIT_ACTIONS["profile:field:email"], value="profile:field:email"),
+                    Button(
+                        label=PROFILE_EDIT_ACTIONS["profile:field:citizenship"],
+                        value="profile:field:citizenship",
+                    ),
+                ]
+            )
+            if details.foreigner:
+                buttons.append(
+                    Button(
+                        label=PROFILE_EDIT_ACTIONS["profile:field:latin-name"],
+                        value="profile:field:latin-name",
+                    )
+                )
+        buttons.append(Button(label=BACK, value=PROFILE))
+        return BotResponse(text="Что вы хотите изменить?", buttons=buttons)
+
+    async def _begin_profile(self, user: User, *, editing_existing: bool = False) -> BotResponse:
         user.dialog_state = "PROFILE_FULL_NAME_CYRILLIC"
-        user.dialog_context = {"profile_format": PROFILE_FORMAT}
+        user.dialog_context = {
+            "profile_format": PROFILE_FORMAT,
+            "profile_flow": "reset" if editing_existing else "initial",
+        }
         return BotResponse(
             text=CYRILLIC_FULL_NAME_PROMPT,
-            buttons=[dialog_exit_button()],
+            buttons=[profile_dialog_exit_button(user)],
         )
+
+    def _begin_profile_field(self, user: User, field: str) -> BotResponse:
+        context: dict[str, object] = {
+            "profile_format": PROFILE_FORMAT,
+            "profile_flow": "field",
+            "profile_field": field,
+        }
+        details = user.pass_details
+        if details is not None:
+            context.update(details.model_dump())
+        elif user.full_name is not None:
+            surname, name = user.full_name.split()[:2]
+            context.update(
+                surname_cyrillic=surname,
+                name_cyrillic=name,
+                patronym_cyrillic="-",
+            )
+        user.dialog_context = context
+        if field == "name":
+            user.dialog_state = "PROFILE_FULL_NAME_CYRILLIC"
+            return BotResponse(text=CYRILLIC_FULL_NAME_PROMPT, buttons=[profile_dialog_exit_button(user)])
+        if field == "contact":
+            return self._profile_contact_prompt(user)
+        if field == "crossplay":
+            user.dialog_state = "PROFILE_CROSSPLAY"
+            return BotResponse(
+                text="Готовы ли вы играть за персонажа противоположного пола?",
+                buttons=profile_yes_no_buttons(user),
+            )
+        if field == "pass":
+            user.dialog_state = "PROFILE_NEEDS_PASS"
+            return BotResponse(
+                text=f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_ADDRESS})?",
+                buttons=profile_yes_no_buttons(user),
+            )
+        if details is None:
+            return self._profile_edit_menu(user)
+        if field == "phone":
+            user.dialog_state = "PROFILE_PASS_PHONE"
+            return BotResponse(text=PHONE_PROMPT, buttons=[profile_dialog_exit_button(user)])
+        if field == "email":
+            user.dialog_state = "PROFILE_PASS_EMAIL_ADDRESS"
+            return BotResponse(text=EMAIL_PROMPT, buttons=[profile_dialog_exit_button(user)])
+        if field == "citizenship":
+            user.dialog_state = "PROFILE_PASS_FOREIGNER"
+            return BotResponse(text="Есть ли у вас российское гражданство?", buttons=profile_yes_no_buttons(user))
+        if field == "latin-name" and details.foreigner:
+            user.dialog_state = "PROFILE_PASS_FULL_NAME_LATIN"
+            return BotResponse(text=LATIN_FULL_NAME_PROMPT, buttons=[profile_dialog_exit_button(user)])
+        return self._profile_edit_menu(user)
 
     @staticmethod
     def _profile_contact_prompt(user: User) -> BotResponse:
@@ -689,14 +844,14 @@ class ConversationEngine:
         if isinstance(user, TelegramUser):
             return BotResponse(
                 text="Введите обязательную ссылку на вашу страницу VK:",
-                buttons=[dialog_exit_button()],
+                buttons=[profile_dialog_exit_button(user)],
             )
         return BotResponse(
             text=(
                 "Укажите имя пользователя Telegram в формате @username или ссылку https://t.me/username. "
                 "Если Telegram нет, нажмите «Пропустить»."
             ),
-            buttons=[Button(label=SKIP, value=SKIP), dialog_exit_button()],
+            buttons=[Button(label=SKIP, value=SKIP), profile_dialog_exit_button(user)],
         )
 
     async def _continue(self, user: User, message: InboundMessage, value: str) -> BotResponse:
@@ -727,13 +882,15 @@ class ConversationEngine:
             response = await self._begin_profile(user)
             response.text = f"Формат профиля обновился. {response.text}"
             return response
+        if context.get("profile_flow") == "field":
+            return await self._profile_field_step(user, message, value)
         if state == "PROFILE_FULL_NAME_CYRILLIC":
             try:
                 name_parts = parse_full_name(value, alphabet="cyrillic")
             except ValueError:
                 return BotResponse(
                     text=CYRILLIC_FULL_NAME_RETRY_PROMPT,
-                    buttons=[dialog_exit_button()],
+                    buttons=[profile_dialog_exit_button(user)],
                 )
             surname, name = name_parts[:2]
             patronym = name_parts[2] if len(name_parts) == 3 else "-"
@@ -744,22 +901,28 @@ class ConversationEngine:
             user.dialog_state = "PROFILE_NEEDS_PASS"
             return BotResponse(
                 text=f"Нужен ли вам пропуск для входа на место проведения игры ({VENUE_ADDRESS})?",
-                buttons=yes_no_buttons(),
+                buttons=profile_yes_no_buttons(user),
             )
         if state == "PROFILE_NEEDS_PASS":
             if value not in {"Да", "Нет"}:
-                return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=profile_yes_no_buttons(user))
             context["needs_pass"] = value == "Да"
             if value == "Да":
                 user.dialog_state = "PROFILE_PASS_FOREIGNER"
-                return BotResponse(text="Есть ли у вас российское гражданство?", buttons=yes_no_buttons())
+                return BotResponse(
+                    text="Есть ли у вас российское гражданство?",
+                    buttons=profile_yes_no_buttons(user),
+                )
             return self._profile_contact_prompt(user)
         if state == "PROFILE_CONTACT":
             if isinstance(user, TelegramUser):
                 try:
                     context["contact"] = normalize_vk_url(value)
                 except ValueError as exc:
-                    return BotResponse(text=f"❌ {exc}. Попробуйте ещё раз:", buttons=[dialog_exit_button()])
+                    return BotResponse(
+                        text=f"❌ {exc}. Попробуйте ещё раз:",
+                        buttons=[profile_dialog_exit_button(user)],
+                    )
             else:
                 if value == SKIP:
                     context["contact"] = None
@@ -768,72 +931,278 @@ class ConversationEngine:
                     if contact is None:
                         return BotResponse(
                             text="Не удалось разобрать профиль Telegram. Попробуйте ещё раз",
-                            buttons=[Button(label=SKIP, value=SKIP), dialog_exit_button()],
+                            buttons=[Button(label=SKIP, value=SKIP), profile_dialog_exit_button(user)],
                         )
                     context["contact"] = contact
             user.dialog_state = "PROFILE_CROSSPLAY"
             return BotResponse(
                 text="Готовы ли вы играть за персонажа противоположного пола?",
-                buttons=yes_no_buttons(),
+                buttons=profile_yes_no_buttons(user),
             )
         if state == "PROFILE_CROSSPLAY":
             if value not in {"Да", "Нет"}:
-                return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=profile_yes_no_buttons(user))
             context["crossplay"] = value == "Да"
             return await self._finish_profile(user, message)
         if state == "PROFILE_PASS_FOREIGNER":
             if value not in {"Да", "Нет"}:
-                return BotResponse(text="Выберите «Да» или «Нет».", buttons=yes_no_buttons())
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=profile_yes_no_buttons(user))
             context["foreigner"] = value == "Нет"
             if context["foreigner"]:
                 user.dialog_state = "PROFILE_PASS_FULL_NAME_LATIN"
                 return BotResponse(
                     text=LATIN_FULL_NAME_PROMPT,
-                    buttons=[dialog_exit_button()],
+                    buttons=[profile_dialog_exit_button(user)],
                 )
             user.dialog_state = "PROFILE_PASS_PHONE"
-            return BotResponse(text=PHONE_PROMPT, buttons=[dialog_exit_button()])
+            return BotResponse(text=PHONE_PROMPT, buttons=[profile_dialog_exit_button(user)])
         if state == "PROFILE_PASS_FULL_NAME_LATIN":
             try:
                 name_parts = parse_full_name(value, alphabet="latin")
             except ValueError:
                 return BotResponse(
                     text=LATIN_FULL_NAME_RETRY_PROMPT,
-                    buttons=[dialog_exit_button()],
+                    buttons=[profile_dialog_exit_button(user)],
                 )
             surname, name = name_parts[:2]
             patronym = name_parts[2] if len(name_parts) == 3 else "-"
             if (context["patronym_cyrillic"] == "-") != (patronym == "-"):
                 return BotResponse(
                     text=LATIN_FULL_NAME_RETRY_PROMPT,
-                    buttons=[dialog_exit_button()],
+                    buttons=[profile_dialog_exit_button(user)],
                 )
             context["surname_latin"] = surname
             context["name_latin"] = name
             context["patronym_latin"] = patronym
             user.dialog_state = "PROFILE_PASS_PHONE"
-            return BotResponse(text=PHONE_PROMPT, buttons=[dialog_exit_button()])
+            return BotResponse(text=PHONE_PROMPT, buttons=[profile_dialog_exit_button(user)])
         if state == "PROFILE_PASS_PHONE":
             try:
                 context["mobile_phone"] = normalize_mobile_phone(value)
             except ValueError:
                 return BotResponse(
                     text=f"Некорректный номер. {PHONE_PROMPT}",
-                    buttons=[dialog_exit_button()],
+                    buttons=[profile_dialog_exit_button(user)],
                 )
             user.dialog_state = "PROFILE_PASS_EMAIL_ADDRESS"
-            return BotResponse(text=EMAIL_PROMPT, buttons=[dialog_exit_button()])
+            return BotResponse(text=EMAIL_PROMPT, buttons=[profile_dialog_exit_button(user)])
         if state == "PROFILE_PASS_EMAIL_ADDRESS":
             try:
                 email = validate_pass_email(value)
             except ValidationError:
                 return BotResponse(
                     text=f"Некорректный email. {EMAIL_PROMPT}",
-                    buttons=[dialog_exit_button()],
+                    buttons=[profile_dialog_exit_button(user)],
                 )
             context["email"] = email
             return self._profile_contact_prompt(user)
         raise AssertionError(f"unknown profile state: {state}")
+
+    @staticmethod
+    def _pass_details_from_context(context: dict[str, object]) -> PassDetails:
+        foreigner = bool(context["foreigner"])
+        return PassDetails(
+            surname_cyrillic=str(context["surname_cyrillic"]),
+            name_cyrillic=str(context["name_cyrillic"]),
+            patronym_cyrillic=str(context["patronym_cyrillic"]),
+            foreigner=foreigner,
+            surname_latin=str(context["surname_latin"]) if foreigner else None,
+            name_latin=str(context["name_latin"]) if foreigner else None,
+            patronym_latin=str(context["patronym_latin"]) if foreigner else None,
+            mobile_phone=str(context["mobile_phone"]),
+            email=str(context["email"]),
+        )
+
+    async def _complete_profile_edit(
+        self,
+        user: User,
+        message: InboundMessage,
+        *,
+        previous_name: str | None = None,
+    ) -> BotResponse:
+        profile_names = {name for name in (previous_name, user.full_name) if name is not None}
+        await self.users.save(user)
+        await self.registrations.enqueue_profile_sync(
+            message.identity.platform,
+            message.identity.platform_user_id,
+            ProfileSyncPayload(names=sorted(profile_names)),
+            idempotency_key=f"{message.update_id}:{Operation.SYNC_PROFILE.value}",
+        )
+        await self._clear(user)
+        return await self._profile_response(user, prefix=PROFILE_EDITED)
+
+    async def _profile_field_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        context = user.dialog_context
+        state = user.dialog_state
+        field = str(context["profile_field"])
+        if state == "PROFILE_FULL_NAME_CYRILLIC":
+            try:
+                name_parts = parse_full_name(value, alphabet="cyrillic")
+            except ValueError:
+                return BotResponse(
+                    text=CYRILLIC_FULL_NAME_RETRY_PROMPT,
+                    buttons=[profile_dialog_exit_button(user)],
+                )
+            surname, name = name_parts[:2]
+            patronym = name_parts[2] if len(name_parts) == 3 else "-"
+            context.update(
+                surname_cyrillic=surname,
+                name_cyrillic=name,
+                patronym_cyrillic=patronym,
+                full_name=surname_and_name(value),
+            )
+            details = user.pass_details
+            if details is not None and details.foreigner and (details.patronym_cyrillic == "-") != (patronym == "-"):
+                user.dialog_state = "PROFILE_PASS_FULL_NAME_LATIN"
+                return BotResponse(text=LATIN_FULL_NAME_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            previous_name = user.full_name
+            if details is not None:
+                updated = details.model_dump()
+                updated.update(
+                    surname_cyrillic=surname,
+                    name_cyrillic=name,
+                    patronym_cyrillic=patronym,
+                )
+                user.pass_details = PassDetails.model_validate(updated)
+            user.full_name = surname_and_name(value)
+            return await self._complete_profile_edit(user, message, previous_name=previous_name)
+        if state == "PROFILE_CONTACT":
+            if isinstance(user, TelegramUser):
+                try:
+                    user.vk_url = normalize_vk_url(value)
+                except ValueError as exc:
+                    return BotResponse(
+                        text=f"❌ {exc}. Попробуйте ещё раз:",
+                        buttons=[profile_dialog_exit_button(user)],
+                    )
+            else:
+                if value == SKIP:
+                    user.telegram_handle = None
+                else:
+                    contact = _normalize_vk_telegram_contact(value)
+                    if contact is None:
+                        return BotResponse(
+                            text="Не удалось разобрать профиль Telegram. Попробуйте ещё раз",
+                            buttons=[Button(label=SKIP, value=SKIP), profile_dialog_exit_button(user)],
+                        )
+                    user.telegram_handle = contact
+            return await self._complete_profile_edit(user, message)
+        if state == "PROFILE_CROSSPLAY":
+            if value not in {"Да", "Нет"}:
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=profile_yes_no_buttons(user))
+            user.crossplay = value == "Да"
+            return await self._complete_profile_edit(user, message)
+        if state == "PROFILE_NEEDS_PASS":
+            if value not in {"Да", "Нет"}:
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=profile_yes_no_buttons(user))
+            if value == "Нет":
+                user.pass_details = None
+                user.needs_pass = False
+                return await self._complete_profile_edit(user, message)
+            if user.needs_pass and user.pass_details is not None:
+                return await self._complete_profile_edit(user, message)
+            user.dialog_state = "PROFILE_PASS_FOREIGNER"
+            return BotResponse(
+                text="Есть ли у вас российское гражданство?",
+                buttons=profile_yes_no_buttons(user),
+            )
+        if state == "PROFILE_PASS_FOREIGNER":
+            if value not in {"Да", "Нет"}:
+                return BotResponse(text="Выберите «Да» или «Нет».", buttons=profile_yes_no_buttons(user))
+            context["foreigner"] = value == "Нет"
+            if field == "pass":
+                if context["foreigner"]:
+                    user.dialog_state = "PROFILE_PASS_FULL_NAME_LATIN"
+                    return BotResponse(text=LATIN_FULL_NAME_PROMPT, buttons=[profile_dialog_exit_button(user)])
+                user.dialog_state = "PROFILE_PASS_PHONE"
+                return BotResponse(text=PHONE_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            details = user.pass_details
+            assert details is not None
+            if context["foreigner"] and not details.foreigner:
+                user.dialog_state = "PROFILE_PASS_FULL_NAME_LATIN"
+                return BotResponse(text=LATIN_FULL_NAME_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            updated = details.model_dump()
+            updated.update(
+                foreigner=bool(context["foreigner"]),
+                surname_latin=details.surname_latin if context["foreigner"] else None,
+                name_latin=details.name_latin if context["foreigner"] else None,
+                patronym_latin=details.patronym_latin if context["foreigner"] else None,
+            )
+            user.pass_details = PassDetails.model_validate(updated)
+            return await self._complete_profile_edit(user, message)
+        if state == "PROFILE_PASS_FULL_NAME_LATIN":
+            try:
+                name_parts = parse_full_name(value, alphabet="latin")
+            except ValueError:
+                return BotResponse(text=LATIN_FULL_NAME_RETRY_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            surname, name = name_parts[:2]
+            patronym = name_parts[2] if len(name_parts) == 3 else "-"
+            if (context["patronym_cyrillic"] == "-") != (patronym == "-"):
+                return BotResponse(text=LATIN_FULL_NAME_RETRY_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            context.update(
+                surname_latin=surname,
+                name_latin=name,
+                patronym_latin=patronym,
+                foreigner=True,
+            )
+            if field == "pass":
+                user.dialog_state = "PROFILE_PASS_PHONE"
+                return BotResponse(text=PHONE_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            details = user.pass_details
+            assert details is not None
+            updated = details.model_dump()
+            updated.update(
+                surname_cyrillic=str(context["surname_cyrillic"]),
+                name_cyrillic=str(context["name_cyrillic"]),
+                patronym_cyrillic=str(context["patronym_cyrillic"]),
+                foreigner=True,
+                surname_latin=surname,
+                name_latin=name,
+                patronym_latin=patronym,
+            )
+            previous_name = user.full_name
+            user.pass_details = PassDetails.model_validate(updated)
+            if field == "name":
+                user.full_name = str(context["full_name"])
+            return await self._complete_profile_edit(
+                user,
+                message,
+                previous_name=previous_name if field == "name" else None,
+            )
+        if state == "PROFILE_PASS_PHONE":
+            try:
+                phone = normalize_mobile_phone(value)
+            except ValueError:
+                return BotResponse(
+                    text=f"Некорректный номер. {PHONE_PROMPT}",
+                    buttons=[profile_dialog_exit_button(user)],
+                )
+            context["mobile_phone"] = phone
+            if field == "pass":
+                user.dialog_state = "PROFILE_PASS_EMAIL_ADDRESS"
+                return BotResponse(text=EMAIL_PROMPT, buttons=[profile_dialog_exit_button(user)])
+            details = user.pass_details
+            assert details is not None
+            user.pass_details = PassDetails.model_validate({**details.model_dump(), "mobile_phone": phone})
+            return await self._complete_profile_edit(user, message)
+        if state == "PROFILE_PASS_EMAIL_ADDRESS":
+            try:
+                email = validate_pass_email(value)
+            except ValidationError:
+                return BotResponse(
+                    text=f"Некорректный email. {EMAIL_PROMPT}",
+                    buttons=[profile_dialog_exit_button(user)],
+                )
+            context["email"] = email
+            if field == "pass":
+                user.needs_pass = True
+                user.pass_details = self._pass_details_from_context(context)
+            else:
+                details = user.pass_details
+                assert details is not None
+                user.pass_details = PassDetails.model_validate({**details.model_dump(), "email": email})
+            return await self._complete_profile_edit(user, message)
+        raise AssertionError(f"unknown profile edit state: {state}")
 
     async def _finish_profile(self, user: User, message: InboundMessage) -> BotResponse:
         context = user.dialog_context
@@ -845,19 +1214,8 @@ class ConversationEngine:
         user.crossplay = bool(context["crossplay"])
         needs_pass = bool(context["needs_pass"])
         if needs_pass:
-            details = PassDetails(
-                surname_cyrillic=str(context["surname_cyrillic"]),
-                name_cyrillic=str(context["name_cyrillic"]),
-                patronym_cyrillic=str(context["patronym_cyrillic"]),
-                foreigner=bool(context["foreigner"]),
-                surname_latin=(str(context["surname_latin"]) if context.get("foreigner") else None),
-                name_latin=(str(context["name_latin"]) if context.get("foreigner") else None),
-                patronym_latin=(str(context["patronym_latin"]) if context.get("foreigner") else None),
-                mobile_phone=str(context["mobile_phone"]),
-                email=str(context["email"]),
-            )
             user.needs_pass = True
-            user.pass_details = details
+            user.pass_details = self._pass_details_from_context(context)
         else:
             user.pass_details = None
             user.needs_pass = False
@@ -876,7 +1234,10 @@ class ConversationEngine:
             ProfileSyncPayload(names=sorted(profile_names)),
             idempotency_key=f"{message.update_id}:{Operation.SYNC_PROFILE.value}",
         )
+        editing_existing = context.get("profile_flow") == "reset"
         await self._clear(user)
+        if editing_existing:
+            return await self._profile_response(user, prefix=PROFILE_EDITED)
         return BotResponse(
             text="✅ Профиль успешно заполнен.",
             buttons=[main_menu_button()],
