@@ -84,6 +84,13 @@ def test_persisted_game_date_is_loaded() -> None:
     assert event.game_date == date(2026, 11, 14)
 
 
+def test_persisted_registration_opening_time_is_loaded() -> None:
+    opening = datetime(2026, 9, 18, 15, tzinfo=UTC)
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"registration_open_at": opening})
+
+    assert event.registration_open_at == opening
+
+
 def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
     row = event_row("CONFIRMATION_OPEN") | {
         "confirmed_notifications_json": json.dumps(
@@ -166,6 +173,19 @@ async def test_event_creation_persists_optional_game_date() -> None:
 
     assert "game_date" in executor.query_text
     assert executor.params["$game_date"] == date(2026, 11, 14)
+
+
+@pytest.mark.asyncio
+async def test_event_creation_persists_scheduled_registration_time() -> None:
+    opening = datetime(2026, 9, 18, 15, tzinfo=UTC)
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"registration_open_at": opening})
+
+    await repository.create(event)
+
+    assert "registration_open_at" in executor.query_text
+    assert executor.params["$registration_open_at"] == opening
 
 
 @pytest.mark.asyncio
@@ -273,6 +293,17 @@ async def test_confirmation_open_filter_includes_legacy_open_rows() -> None:
     assert events[0].status is EventStatus.CONFIRMATION_OPEN
     status_values = {value for key, value in executor.params.items() if key.startswith("$status_")}
     assert status_values == {"CREATED", "CONFIRMATION_OPEN", "OPEN"}
+
+
+@pytest.mark.asyncio
+async def test_player_game_page_filters_out_registration_that_has_not_opened() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    await repository.list_page(registration_opened=True, limit=10)
+
+    assert "registration_open_at IS NULL OR registration_open_at <= $registration_now" in executor.query_text
+    assert executor.params["$registration_now"].tzinfo is UTC
 
 
 @pytest.mark.asyncio

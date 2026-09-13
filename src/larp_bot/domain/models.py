@@ -360,6 +360,9 @@ class Event(StrictModel):
     public_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_table_public_url: str | None = None
     status: EventStatus = EventStatus.CREATED
+    # Null means immediate publication. A future timestamp hides registration
+    # from players until that instant while leaving it manageable by masters.
+    registration_open_at: datetime | None = None
     confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
@@ -381,6 +384,13 @@ class Event(StrictModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
+    @field_validator("registration_open_at")
+    @classmethod
+    def registration_opening_has_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("registration opening must include a timezone")
+        return value
+
     @model_validator(mode="after")
     def table_fields_are_atomic(self) -> Event:
         if (self.public_table_resource_path is None) != (self.public_table_public_url is None):
@@ -400,6 +410,10 @@ class Event(StrictModel):
         """The legacy column is retained as the stable master-table URL."""
 
         return self.public_registration_url
+
+    def registration_is_open(self, now: datetime | None = None) -> bool:
+        current = datetime.now(UTC) if now is None else now
+        return self.registration_open_at is None or self.registration_open_at <= current
 
 
 class Registration(StrictModel):

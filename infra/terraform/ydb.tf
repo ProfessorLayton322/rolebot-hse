@@ -151,6 +151,12 @@ resource "yandex_ydb_table" "events" {
     type     = "Utf8"
     not_null = true
   }
+  # Null keeps legacy and immediately published games available. A future
+  # timestamp delays player-facing registration without requiring a cron job.
+  column {
+    name = "registration_open_at"
+    type = "Timestamp"
+  }
   column {
     name = "confirmation_deadline"
     type = "Timestamp"

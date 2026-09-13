@@ -464,7 +464,7 @@ class YdbEventRepository:
     COLUMNS = """
         event_id, name, game_date, player_amount, disk_resource_path, public_registration_url,
         public_table_resource_path, public_table_public_url,
-        status, confirmation_deadline, registrations_migrated_at,
+        status, registration_open_at, confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
@@ -496,6 +496,9 @@ class YdbEventRepository:
             public_table_resource_path=row.get("public_table_resource_path"),
             public_table_public_url=row.get("public_table_public_url"),
             status=status,
+            registration_open_at=(
+                _dt(row["registration_open_at"]) if row.get("registration_open_at") is not None else None
+            ),
             confirmation_deadline=(
                 _dt(row["confirmation_deadline"]) if row.get("confirmation_deadline") is not None else None
             ),
@@ -575,6 +578,7 @@ class YdbEventRepository:
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
+            DECLARE $registration_open_at AS Optional<Timestamp>;
             DECLARE $confirmation_deadline AS Optional<Timestamp>;
             DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $pass_table_resource_path AS Optional<Utf8>;
@@ -596,7 +600,7 @@ class YdbEventRepository:
             INSERT INTO `events` (
                 event_id, name, game_date, player_amount, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
-                status, confirmation_deadline, registrations_migrated_at,
+                status, registration_open_at, confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
                 last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
@@ -610,7 +614,7 @@ class YdbEventRepository:
             ) VALUES (
                 $event_id, $name, $game_date, $player_amount, $disk_resource_path, $public_url,
                 $public_table_resource_path, $public_table_public_url,
-                $status, $confirmation_deadline, $registrations_migrated_at,
+                $status, $registration_open_at, $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
@@ -634,6 +638,7 @@ class YdbEventRepository:
                 "$public_table_resource_path": event.public_table_resource_path,
                 "$public_table_public_url": event.public_table_public_url,
                 "$status": event.status.value,
+                "$registration_open_at": event.registration_open_at,
                 "$confirmation_deadline": event.confirmation_deadline,
                 "$registrations_migrated_at": event.registrations_migrated_at,
                 "$pass_table_resource_path": event.pass_table_resource_path,
@@ -1104,6 +1109,7 @@ class YdbEventRepository:
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         archived: bool | None = None,
+        registration_opened: bool | None = None,
         newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]:
@@ -1142,6 +1148,14 @@ class YdbEventRepository:
             params.update({"$before_time": before[0], "$before_id": before[1]})
         if archived is not None:
             conditions.append("archived_at IS NOT NULL" if archived else "archived_at IS NULL")
+        if registration_opened is not None:
+            declarations.append("DECLARE $registration_now AS Timestamp;")
+            params["$registration_now"] = datetime.now(UTC)
+            conditions.append(
+                "(registration_open_at IS NULL OR registration_open_at <= $registration_now)"
+                if registration_opened
+                else "registration_open_at > $registration_now"
+            )
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         order = "DESC" if newest_first else "ASC"
         if before is not None:

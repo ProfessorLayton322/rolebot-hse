@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -126,8 +126,26 @@ def test_event_has_exactly_three_states_and_starts_before_confirmation() -> None
     )
     assert event.status is EventStatus.CREATED
     assert event.player_amount > 0
+    assert event.registration_is_open()
     with pytest.raises(ValidationError):
         event.player_amount = 0
+
+
+def test_scheduled_registration_opens_at_the_stored_instant() -> None:
+    opening = datetime(2026, 9, 18, 15, tzinfo=UTC)
+    event = Event(
+        event_id="event-a1",
+        name="Game",
+        disk_resource_path="disk:/larp-bot/events/event-a1-game.xlsx",
+        public_registration_url="https://disk.example/game",
+        registration_open_at=opening,
+    )
+
+    assert not event.registration_is_open(opening - timedelta(microseconds=1))
+    assert event.registration_is_open(opening)
+
+    with pytest.raises(ValidationError, match="timezone"):
+        event.registration_open_at = datetime(2026, 9, 18, 18)
 
 
 def test_game_date_uses_strict_two_digit_russian_format() -> None:

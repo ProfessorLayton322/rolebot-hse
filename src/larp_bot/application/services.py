@@ -626,8 +626,11 @@ class RegistrationService:
         target_participant_key: str | None = None,
     ) -> OrderedRegistrationCommand:
         event = await self._event(event_id)
-        if operation is Operation.ENLIST and event.status is EventStatus.CLOSED:
-            raise OperationNotAllowed("Регистрация на эту игру закрыта")
+        if operation is Operation.ENLIST:
+            if event.status is EventStatus.CLOSED:
+                raise OperationNotAllowed("Регистрация на эту игру закрыта")
+            if not event.registration_is_open():
+                raise OperationNotAllowed("Регистрация на эту игру ещё не открыта")
         administrative_operations = {
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
@@ -714,6 +717,7 @@ class EventAdministrationService:
         game_date: date,
         player_amount: int,
         leaders: Sequence[BotIdentity],
+        registration_open_at: datetime | None = None,
     ) -> Event:
         clean_name = name.strip()
         if not clean_name:
@@ -753,6 +757,7 @@ class EventAdministrationService:
                 public_table_public_url=public_url,
                 pass_table_resource_path=pass_path,
                 pass_table_public_url=pass_url,
+                registration_open_at=registration_open_at,
             )
             await self.events.create(event, leaders)
         except Exception:
@@ -1855,6 +1860,8 @@ class OrderedMutationService:
         if command.operation is Operation.ENLIST:
             if event.status is EventStatus.CLOSED:
                 raise OperationNotAllowed("Регистрация на эту игру закрыта")
+            if not event.registration_is_open():
+                raise OperationNotAllowed("Регистрация на эту игру ещё не открыта")
             assert isinstance(command.payload, EnlistPayload)
             existing = await self.catalog.registrations.get(event.event_id, command.participant_key)
             if (

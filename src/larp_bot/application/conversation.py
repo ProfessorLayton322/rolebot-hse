@@ -47,8 +47,11 @@ from larp_bot.domain.models import (
 )
 
 from .deadlines import (
+    MOSCOW_TIMEZONE,
+    NEAREST_FRIDAY,
     NEAREST_THURSDAY,
     NEXT_SATURDAY,
+    closest_friday_18,
     closest_thursday_19,
     format_confirmation_deadline,
     next_saturday_game_date,
@@ -130,6 +133,7 @@ LIST_EVENT_LEADERS = "📋 Список мастеров"
 CREATION_MASTER_QUESTION = "Собираетесь ли вы сами мастерить эту игру, или добавите на эту роль кого-то ещё?"
 CREATE_AS_MASTER = "Да, буду мастерить самостоятельно"
 CREATE_WITH_OTHER_MASTER = "Нет, выбрать мастера"
+SCHEDULE_REGISTRATION_QUESTION = "Хотите ли вы запланировать отложенное открытие игры?"
 ARCHIVE_GAME = "📦 Архивировать игру"
 UNARCHIVE_GAME = "📤 Разархивировать игру"
 LEGACY_DELETE_GAME = "🗑 Удалить игру"
@@ -218,6 +222,8 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_CREATE_MASTER_CHOICE",
         "ADMIN_CREATE_MASTER_PICK",
+        "ADMIN_CREATE_SCHEDULE_CHOICE",
+        "ADMIN_CREATE_SCHEDULE_TIME",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_LINK_TEXT",
@@ -471,6 +477,25 @@ def _game_date_response(*, invalid: bool = False) -> BotResponse:
     return BotResponse(
         text=f"{prefix}Введите дату игры строго в формате DD.MM.YY или нажмите «{NEXT_SATURDAY}».",
         buttons=[Button(label=NEXT_SATURDAY, value="admin:date:next-saturday")],
+    )
+
+
+def _registration_schedule_response(*, invalid: bool = False, past: bool = False) -> BotResponse:
+    if past:
+        prefix = "Время открытия должно быть строго позже текущего московского времени.\n\n"
+    elif invalid:
+        prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n"
+    else:
+        prefix = ""
+    return BotResponse(
+        text=(
+            f"{prefix}Введите время публикации строго в формате DD.MM.YY HH:MM "
+            f"или нажмите «{NEAREST_FRIDAY}». Время указывается по Москве."
+        ),
+        buttons=[
+            Button(label=NEAREST_FRIDAY, value="create:schedule:nearest-friday"),
+            Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+        ],
     )
 
 
@@ -1258,6 +1283,7 @@ class ConversationEngine:
                 after=after,
                 before=before,
                 archived=False,
+                registration_opened=True if flow == "enlist" else None,
                 limit=PAGE_SIZE,
             )
         )
@@ -1273,12 +1299,14 @@ class ConversationEngine:
                 statuses=statuses,
                 before=(first.created_at, first.event_id),
                 archived=False,
+                registration_opened=True if flow == "enlist" else None,
                 limit=1,
             ),
             self.events.list_page(
                 statuses=statuses,
                 after=(last.created_at, last.event_id),
                 archived=False,
+                registration_opened=True if flow == "enlist" else None,
                 limit=1,
             ),
         )
@@ -1594,6 +1622,14 @@ class ConversationEngine:
                 )
             if event.archived_at is not None:
                 return BotResponse(text=INACTIVE_GAME_RESPONSE)
+            if not event.registration_is_open():
+                assert event.registration_open_at is not None
+                return BotResponse(
+                    text=(
+                        "Регистрация на эту игру откроется "
+                        f"{format_confirmation_deadline(event.registration_open_at)} (МСК)."
+                    )
+                )
             if event.status is EventStatus.CLOSED:
                 return BotResponse(text="Регистрация на эту игру уже закрыта.")
             registration = await self.registrations.get_registration(event_id, platform, uid)
@@ -2310,6 +2346,20 @@ class ConversationEngine:
             ],
         )
 
+    def _creation_schedule_question(self, user: User, master: User | None = None) -> BotResponse:
+        if master is not None:
+            identity = self._identity(master)
+            user.dialog_context["master_platform"] = identity.platform.value
+            user.dialog_context["master_user_id"] = identity.platform_user_id
+        user.dialog_state = "ADMIN_CREATE_SCHEDULE_CHOICE"
+        return BotResponse(
+            text=SCHEDULE_REGISTRATION_QUESTION,
+            buttons=[
+                Button(label="Да", value="create:schedule:yes"),
+                Button(label="Нет", value="create:schedule:no"),
+            ],
+        )
+
     async def _show_creation_master_candidates(self, user: User, *, offset: int = 0, notice: str = "") -> BotResponse:
         creator = self._identity(user)
         candidates = [profile for profile in await self._master_candidates() if self._identity(profile) != creator]
@@ -2344,13 +2394,11 @@ class ConversationEngine:
         return BotResponse(text=f"{notice}{text}", buttons=buttons)
 
     async def _creation_master_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
-        if "created_event_id" in user.dialog_context:
-            return await self._finish_game_creation(user)
         if not await self._is_admin(user):
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
         if value == "create:master-self":
-            return await self._create_game(user, message, user)
+            return self._creation_schedule_question(user, user)
         if value == "create:master-pick":
             return await self._show_creation_master_candidates(user)
         if user.dialog_state != "ADMIN_CREATE_MASTER_PICK" or value == "create:master-choice":
@@ -2362,7 +2410,7 @@ class ConversationEngine:
         if value.startswith("create:master:") and len(parts) == 4 and parts[2] in {"t", "v"} and parts[3].isdecimal():
             target = await self.users.get(self._platform_from_code(parts[2]), int(parts[3]))
             if target is not None and await self._has_admin_access(target):
-                return await self._create_game(user, message, target)
+                return self._creation_schedule_question(user, target)
             return await self._show_creation_master_candidates(
                 user,
                 offset=offset,
@@ -2370,15 +2418,61 @@ class ConversationEngine:
             )
         return await self._show_creation_master_candidates(user, offset=offset)
 
-    async def _create_game(self, user: User, message: InboundMessage, master: User) -> BotResponse:
+    async def _creation_schedule_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
+        if "created_event_id" in user.dialog_context:
+            return await self._finish_game_creation(user)
+        if not await self._has_admin_access(user):
+            await self._clear(user)
+            return BotResponse(text="Недостаточно прав.")
+        if user.dialog_state == "ADMIN_CREATE_SCHEDULE_CHOICE":
+            if value == "create:schedule:yes":
+                user.dialog_state = "ADMIN_CREATE_SCHEDULE_TIME"
+                return _registration_schedule_response()
+            if value == "create:schedule:no":
+                return await self._create_game(user, message, registration_open_at=None)
+            return self._creation_schedule_question(user)
+        if value == "create:schedule:nearest-friday":
+            registration_open_at = closest_friday_18()
+        else:
+            try:
+                registration_open_at = parse_confirmation_deadline(value)
+            except ValueError:
+                return _registration_schedule_response(invalid=True)
+            if registration_open_at <= datetime.now(MOSCOW_TIMEZONE):
+                return _registration_schedule_response(past=True)
+        return await self._create_game(user, message, registration_open_at=registration_open_at)
+
+    async def _creation_master(self, user: User) -> User:
+        context = user.dialog_context
+        master = await self.users.get(
+            Platform(str(context["master_platform"])),
+            int(context["master_user_id"]),
+        )
+        if master is None or not await self._has_admin_access(master):
+            raise ValueError("selected master is no longer privileged")
+        return master
+
+    async def _create_game(
+        self,
+        user: User,
+        message: InboundMessage,
+        *,
+        registration_open_at: datetime | None,
+    ) -> BotResponse:
         context = user.dialog_context
         game_date = date.fromisoformat(str(context["game_date"]))
+        try:
+            master = await self._creation_master(user)
+        except ValueError:
+            await self._clear(user)
+            return BotResponse(text="Выбранный мастер больше не является модератором или администратором.")
         master_identity = self._identity(master)
         event = await self.administration.create_event(
             str(context["event_name"]),
             game_date,
             int(context["player_amount"]),
             [master_identity],
+            registration_open_at,
         )
         if master_identity == self._identity(user):
             await self._clear(user)
@@ -2421,14 +2515,23 @@ class ConversationEngine:
     @staticmethod
     def _game_created_response(event: Event, game_date: date, *, master_label: str | None = None) -> BotResponse:
         master_line = "" if master_label is None else f"Мастер: {master_label}\n\n"
+        if event.registration_open_at is None:
+            registration_line = (
+                f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, но пока не могут подтверждать участие."
+            )
+        else:
+            registration_line = (
+                "Открытие регистрации запланировано на "
+                f"{format_confirmation_deadline(event.registration_open_at)} (МСК). "
+                "До этого времени игра не будет видна игрокам."
+            )
         return BotResponse(
             text=(
                 f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
                 f"Дата игры: {format_game_date(game_date)}\n\n"
                 f"Количество игроков: {event.player_amount}\n\n"
                 f"{master_line}"
-                f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, "
-                "но пока не могут подтверждать участие.\n\n"
+                f"{registration_line}\n\n"
                 f"{event_table_links(event)}"
             ),
             buttons=[game_management_button(event.event_id)],
@@ -2816,6 +2919,8 @@ class ConversationEngine:
             return await self._admin_waiting_pick(user, value)
         if user.dialog_state in {"ADMIN_CREATE_MASTER_CHOICE", "ADMIN_CREATE_MASTER_PICK"}:
             return await self._creation_master_step(user, message, value)
+        if user.dialog_state in {"ADMIN_CREATE_SCHEDULE_CHOICE", "ADMIN_CREATE_SCHEDULE_TIME"}:
+            return await self._creation_schedule_step(user, message, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
             clean_name = value.strip()
             if not clean_name:
@@ -2846,7 +2951,7 @@ class ConversationEngine:
             user.dialog_context["player_amount"] = player_amount
             if await self._is_admin(user):
                 return self._creation_master_question(user)
-            return await self._create_game(user, message, user)
+            return self._creation_schedule_question(user, user)
         if user.dialog_state == "ADMIN_UPDATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
             if not raw_amount.isdecimal():
@@ -3866,6 +3971,9 @@ class ConversationEngine:
             f"Количество игроков: {event.player_amount}\n"
             f"Статус: {EVENT_STATUS_LABELS[event.status]}"
         )
+        if not event.registration_is_open():
+            assert event.registration_open_at is not None
+            text += f"\nОткрытие регистрации: {format_confirmation_deadline(event.registration_open_at)} (МСК)"
         if event.confirmation_deadline is not None:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
         if not is_leader and not is_admin:

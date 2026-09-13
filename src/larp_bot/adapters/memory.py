@@ -304,6 +304,7 @@ class MemoryEventRepository:
         after: tuple[datetime, str] | None = None,
         before: tuple[datetime, str] | None = None,
         archived: bool | None = None,
+        registration_opened: bool | None = None,
         newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]:
@@ -319,6 +320,9 @@ class MemoryEventRepository:
             values = [event for event in values if event.status in accepted]
         if archived is not None:
             values = [event for event in values if (event.archived_at is not None) is archived]
+        if registration_opened is not None:
+            current = datetime.now(UTC)
+            values = [event for event in values if event.registration_is_open(current) is registration_opened]
         if after is not None:
             if newest_first:
                 values = [event for event in values if (event.created_at, event.event_id) < after]
