@@ -14,6 +14,8 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'primary_key = ["event_id", "participant_key"]' in ydb
     assert 'name = "confirmation_deadline"' in ydb
     assert 'name = "registration_open_at"' in ydb
+    assert 'name = "registration_open_notified_recipients_json"' in ydb
+    assert 'name = "registration_open_notification_completed_at"' in ydb
     assert 'name = "signup_token"' in ydb
     assert 'name = "vk_profile"' in ydb
     assert 'name = "telegram_profile"' in ydb
@@ -46,6 +48,17 @@ def test_no_fifo_native_trigger() -> None:
     trigger = (ROOT / "infra/terraform/ymq.tf").read_text()
     assert "queue_id           = yandex_message_queue.worker_kicks.arn" in trigger
     assert "queue_id           = yandex_message_queue.registration_commands" not in trigger
+
+
+def test_scheduled_registration_notifications_use_an_isolated_timer_function() -> None:
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    triggers = (ROOT / "infra/terraform/ymq.tf").read_text()
+    build = (ROOT / "scripts/build_function.sh").read_text()
+
+    assert 'entrypoint         = "registration_notifier.handler"' in functions
+    assert 'cron_expression = "* * * * ? *"' in triggers
+    assert "yandex_function.registration_notifier.id" in triggers
+    assert "registration_notifier.py" in build
 
 
 def test_no_direct_telegram_connection_from_yandex_python() -> None:

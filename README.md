@@ -38,7 +38,7 @@ The boundaries are:
 - `adapters/yandex_disk`: restricted master and contact-free public XLSX showcase creation and projection;
 - `adapters/ymq`: authoritative FIFO publishing, wake-up publishing, and consuming;
 - `adapters/runtime_config`: OIDC-authenticated Worker configuration, cached for at most 60 seconds;
-- `functions/gateway` and `functions/ordered_worker`: Yandex entry points;
+- `functions/gateway`, `functions/ordered_worker`, and `functions/registration_notifier`: Yandex entry points;
 - `cloudflare/telegram-*`: isolated Telegram transport.
 
 The old `main.py` was a 286-line Telegram polling script with an in-memory aiogram FSM, one profile workbook, one registration workbook, synchronous mutation, raw Telegram IDs in XLSX, and character wishes collected during enlistment. It has been replaced by a webhook-only Function entry point. Its Russian profile questions and co-player preferences remain the behavioral baseline.
@@ -620,14 +620,14 @@ One provider constraint deserves attention: Terraform's Yandex Message Queue res
 
 ```text
 .
-├── main.py / ordered_worker.py
+├── main.py / ordered_worker.py / registration_notifier.py
 ├── pyproject.toml / requirements.txt
 ├── src/larp_bot/
 │   ├── domain/
 │   ├── application/
 │   ├── adapters/{telegram,vk,ydb,yandex_disk,ymq,runtime_config,transports}/
 │   ├── config/
-│   └── functions/{gateway,ordered_worker}/
+│   └── functions/{gateway,ordered_worker,registration_notifier}/
 ├── cloudflare/
 │   ├── telegram-ingress/{src,tests}/
 │   └── telegram-egress/{src,tests}/

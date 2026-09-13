@@ -464,7 +464,9 @@ class YdbEventRepository:
     COLUMNS = """
         event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
         public_table_resource_path, public_table_public_url,
-        status, registration_open_at, confirmation_deadline, registrations_migrated_at,
+        status, registration_open_at, registration_open_notified_recipients_json,
+        registration_open_notification_completed_at,
+        confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
@@ -499,6 +501,15 @@ class YdbEventRepository:
             status=status,
             registration_open_at=(
                 _dt(row["registration_open_at"]) if row.get("registration_open_at") is not None else None
+            ),
+            registration_open_notified_recipients=_string_list(
+                row.get("registration_open_notified_recipients_json"),
+                "registration_open_notified_recipients_json",
+            ),
+            registration_open_notification_completed_at=(
+                _dt(row["registration_open_notification_completed_at"])
+                if row.get("registration_open_notification_completed_at") is not None
+                else None
             ),
             confirmation_deadline=(
                 _dt(row["confirmation_deadline"]) if row.get("confirmation_deadline") is not None else None
@@ -595,6 +606,8 @@ class YdbEventRepository:
             DECLARE $public_table_public_url AS Optional<Utf8>;
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
             DECLARE $registration_open_at AS Optional<Timestamp>;
+            DECLARE $registration_open_notified_recipients_json AS Utf8;
+            DECLARE $registration_open_notification_completed_at AS Optional<Timestamp>;
             DECLARE $confirmation_deadline AS Optional<Timestamp>;
             DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $pass_table_resource_path AS Optional<Utf8>;
@@ -616,7 +629,9 @@ class YdbEventRepository:
             INSERT INTO `events` (
                 event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
-                status, registration_open_at, confirmation_deadline, registrations_migrated_at,
+                status, registration_open_at, registration_open_notified_recipients_json,
+                registration_open_notification_completed_at,
+                confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
                 last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
@@ -630,7 +645,9 @@ class YdbEventRepository:
             ) VALUES (
                 $event_id, $name, $game_date, $player_amount, $signup_token, $disk_resource_path, $public_url,
                 $public_table_resource_path, $public_table_public_url,
-                $status, $registration_open_at, $confirmation_deadline, $registrations_migrated_at,
+                $status, $registration_open_at, $registration_open_notified_recipients_json,
+                $registration_open_notification_completed_at,
+                $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
@@ -656,6 +673,11 @@ class YdbEventRepository:
                 "$public_table_public_url": event.public_table_public_url,
                 "$status": event.status.value,
                 "$registration_open_at": event.registration_open_at,
+                "$registration_open_notified_recipients_json": json.dumps(
+                    event.registration_open_notified_recipients,
+                    separators=(",", ":"),
+                ),
+                "$registration_open_notification_completed_at": (event.registration_open_notification_completed_at),
                 "$confirmation_deadline": event.confirmation_deadline,
                 "$registrations_migrated_at": event.registrations_migrated_at,
                 "$pass_table_resource_path": event.pass_table_resource_path,
@@ -785,6 +807,70 @@ class YdbEventRepository:
             },
         )
         return True
+
+    async def list_due_registration_notifications(
+        self,
+        opened_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]:
+        rows = await self.db.query(
+            f"""
+            DECLARE $opened_by AS Timestamp; DECLARE $closed_status AS Utf8;
+            DECLARE $limit AS Uint64;
+            SELECT {self.COLUMNS}
+            FROM `events`
+            WHERE registration_open_at IS NOT NULL
+              AND registration_open_at <= $opened_by
+              AND registration_open_notification_completed_at IS NULL
+              AND archived_at IS NULL
+              AND status != $closed_status
+            ORDER BY registration_open_at, event_id
+            LIMIT $limit;
+            """,
+            {
+                "$opened_by": opened_by.astimezone(UTC),
+                "$closed_status": EventStatus.CLOSED.value,
+                "$limit": limit,
+            },
+            read_only=True,
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def mark_registration_open_notification_delivered(self, event_id: str, recipient: str) -> None:
+        event = await self.get(event_id)
+        if event is None or recipient in event.registration_open_notified_recipients:
+            return
+        notified_recipients = [*event.registration_open_notified_recipients, recipient]
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $notified_recipients_json AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET registration_open_notified_recipients_json = $notified_recipients_json,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND registration_open_notification_completed_at IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$notified_recipients_json": json.dumps(notified_recipients, separators=(",", ":")),
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
+    async def complete_registration_open_notification(self, event_id: str, completed_at: datetime) -> None:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $completed_at AS Timestamp;
+            UPDATE `events`
+            SET registration_open_notification_completed_at = $completed_at,
+                updated_at = $completed_at
+            WHERE event_id = $event_id
+              AND registration_open_notification_completed_at IS NULL;
+            """,
+            {"$event_id": event_id, "$completed_at": completed_at.astimezone(UTC)},
+        )
 
     async def set_player_amount(self, event_id: str, player_amount: int) -> bool:
         if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:

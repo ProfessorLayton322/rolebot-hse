@@ -158,9 +158,17 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   # Null keeps legacy and immediately published games available. A future
-  # timestamp delays player-facing registration without requiring a cron job.
+  # timestamp gates player-facing registration independently from notifications.
   column {
     name = "registration_open_at"
+    type = "Timestamp"
+  }
+  column {
+    name = "registration_open_notified_recipients_json"
+    type = "Utf8"
+  }
+  column {
+    name = "registration_open_notification_completed_at"
     type = "Timestamp"
   }
   column {

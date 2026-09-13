@@ -64,6 +64,25 @@ class EventRepository(Protocol):
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool: ...
 
+    async def list_due_registration_notifications(
+        self,
+        opened_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]: ...
+
+    async def mark_registration_open_notification_delivered(
+        self,
+        event_id: str,
+        recipient: str,
+    ) -> None: ...
+
+    async def complete_registration_open_notification(
+        self,
+        event_id: str,
+        completed_at: datetime,
+    ) -> None: ...
+
     async def set_player_amount(self, event_id: str, player_amount: int) -> bool: ...
 
     async def archive(self, event_id: str, archived_at: datetime) -> bool: ...

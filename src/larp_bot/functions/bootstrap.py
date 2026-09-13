@@ -19,6 +19,7 @@ from larp_bot.adapters.yandex_disk.repository import (
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.conversation import ConversationEngine
+from larp_bot.application.registration_openings import RegistrationOpeningNotificationService
 from larp_bot.application.services import (
     ConfirmationNotificationService,
     EventAdministrationService,
@@ -44,6 +45,7 @@ class AppContainer:
     transport: MultiplexedDeferredTransport
     conversation: ConversationEngine
     worker: OrderedWorker
+    registration_opening_notifications: RegistrationOpeningNotificationService
 
 
 def iam_token_from_context(context: Any) -> str | None:
@@ -126,6 +128,11 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         transport,
         secrets["PARTICIPANT_KEY_HMAC_SECRET"],
     )
+    registration_opening_notifications = RegistrationOpeningNotificationService(
+        events,
+        config,
+        transport,
+    )
     worker = OrderedWorker(
         consumer,
         mutations,
@@ -152,4 +159,5 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         transport=transport,
         conversation=conversation,
         worker=worker,
+        registration_opening_notifications=registration_opening_notifications,
     )

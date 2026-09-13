@@ -149,6 +149,36 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 
+    async def list_due_registration_notifications(
+        self,
+        opened_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]:
+        values = [
+            event
+            for event in self.rows.values()
+            if event.registration_open_at is not None
+            and event.registration_open_at <= opened_by
+            and event.registration_open_notification_completed_at is None
+            and event.archived_at is None
+            and event.status is not EventStatus.CLOSED
+        ]
+        values.sort(key=lambda event: (event.registration_open_at or opened_by, event.event_id))
+        return deepcopy(values[:limit])
+
+    async def mark_registration_open_notification_delivered(self, event_id: str, recipient: str) -> None:
+        event = self.rows[event_id]
+        if recipient not in event.registration_open_notified_recipients:
+            event.registration_open_notified_recipients.append(recipient)
+            event.updated_at = datetime.now(event.updated_at.tzinfo)
+
+    async def complete_registration_open_notification(self, event_id: str, completed_at: datetime) -> None:
+        event = self.rows[event_id]
+        if event.registration_open_notification_completed_at is None:
+            event.registration_open_notification_completed_at = completed_at
+            event.updated_at = completed_at
+
     async def set_player_amount(self, event_id: str, player_amount: int) -> bool:
         event = self.rows.get(event_id)
         if event is None:

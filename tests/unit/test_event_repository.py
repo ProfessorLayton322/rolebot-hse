@@ -91,6 +91,20 @@ def test_persisted_registration_opening_time_is_loaded() -> None:
     assert event.registration_open_at == opening
 
 
+def test_persisted_registration_open_notification_state_is_loaded() -> None:
+    completed_at = datetime(2026, 9, 18, 15, 1, tzinfo=UTC)
+    event = YdbEventRepository._from_row(
+        event_row("CREATED")
+        | {
+            "registration_open_notified_recipients_json": '["telegram:10","vk:20"]',
+            "registration_open_notification_completed_at": completed_at,
+        }
+    )
+
+    assert event.registration_open_notified_recipients == ["telegram:10", "vk:20"]
+    assert event.registration_open_notification_completed_at == completed_at
+
+
 def test_persisted_signup_token_is_loaded() -> None:
     event = YdbEventRepository._from_row(event_row("CREATED") | {"signup_token": "Game_14_11_2026_A7z"})
 
@@ -218,6 +232,43 @@ async def test_event_creation_persists_scheduled_registration_time() -> None:
 
     assert "registration_open_at" in executor.query_text
     assert executor.params["$registration_open_at"] == opening
+
+
+@pytest.mark.asyncio
+async def test_due_registration_notification_query_excludes_completed_and_closed_games() -> None:
+    opening = datetime(2026, 9, 18, 15, tzinfo=UTC)
+    executor = RecordingExecutor([event_row("CREATED") | {"registration_open_at": opening}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    events = await repository.list_due_registration_notifications(opening, limit=25)
+
+    assert [event.event_id for event in events] == ["event-a1"]
+    assert "registration_open_at <= $opened_by" in executor.query_text
+    assert "registration_open_notification_completed_at IS NULL" in executor.query_text
+    assert "status != $closed_status" in executor.query_text
+    assert executor.params["$opened_by"] == opening
+    assert executor.params["$limit"] == 25
+
+
+@pytest.mark.asyncio
+async def test_registration_open_notification_delivery_and_completion_are_persisted() -> None:
+    delivery_executor = RecordingExecutor(
+        [event_row("CREATED") | {"registration_open_notified_recipients_json": '["telegram:10"]'}]
+    )
+    repository = YdbEventRepository(delivery_executor)  # type: ignore[arg-type]
+
+    await repository.mark_registration_open_notification_delivered("event-a1", "vk:20")
+
+    assert "registration_open_notified_recipients_json = $notified_recipients_json" in (delivery_executor.query_text)
+    assert json.loads(delivery_executor.params["$notified_recipients_json"]) == ["telegram:10", "vk:20"]
+
+    completed_at = datetime(2026, 9, 18, 15, 1, tzinfo=UTC)
+    completion_executor = RecordingExecutor([])
+    repository = YdbEventRepository(completion_executor)  # type: ignore[arg-type]
+    await repository.complete_registration_open_notification("event-a1", completed_at)
+
+    assert "registration_open_notification_completed_at = $completed_at" in completion_executor.query_text
+    assert completion_executor.params["$completed_at"] == completed_at
 
 
 @pytest.mark.asyncio

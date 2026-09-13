@@ -112,6 +112,41 @@ resource "yandex_function" "ordered_worker" {
   ]
 }
 
+resource "yandex_function" "registration_notifier" {
+  name               = "${var.project_name}-registration-notifier"
+  description        = "Notify admins and moderators after scheduled registration opens"
+  folder_id          = var.yandex_folder_id
+  runtime            = "python312"
+  entrypoint         = "registration_notifier.handler"
+  memory             = 512
+  execution_timeout  = "60"
+  concurrency        = 1
+  service_account_id = yandex_iam_service_account.worker.id
+  environment = merge(local.function_environment, {
+    RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
+  })
+  tags      = ["production"]
+  user_hash = local.function_package_hash
+
+  metadata_options {
+    gce_http_endpoint    = 1
+    aws_v1_http_endpoint = 2
+  }
+
+  package {
+    bucket_name = yandex_storage_object.function_package.bucket
+    object_name = yandex_storage_object.function_package.key
+    sha_256     = local.function_package_hash
+  }
+
+  log_options {
+    log_group_id = yandex_logging_group.application.id
+    min_level    = "INFO"
+  }
+
+  depends_on = [yandex_ydb_table.events]
+}
+
 resource "yandex_function_scaling_policy" "gateway" {
   function_id = yandex_function.gateway.id
   policy {
@@ -126,6 +161,15 @@ resource "yandex_function_scaling_policy" "ordered_worker" {
   policy {
     tag                  = "production"
     zone_instances_limit = var.worker_max_instances
+    zone_requests_limit  = 1
+  }
+}
+
+resource "yandex_function_scaling_policy" "registration_notifier" {
+  function_id = yandex_function.registration_notifier.id
+  policy {
+    tag                  = "production"
+    zone_instances_limit = 1
     zone_requests_limit  = 1
   }
 }

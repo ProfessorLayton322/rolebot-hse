@@ -46,3 +46,24 @@ def test_ordered_worker_reuses_event_loop_between_warm_invocations(monkeypatch: 
     assert worker.handler({}, None) == {"processed": 0}
     assert loops[0] is loops[1]
     assert not loops[0].is_closed()
+
+
+def test_registration_notifier_reuses_event_loop_between_warm_invocations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notifier = _module("larp_bot.functions.registration_notifier.handler")
+    loops: list[asyncio.AbstractEventLoop] = []
+
+    async def fake_run(context: Any) -> dict[str, int]:
+        del context
+        loops.append(asyncio.get_running_loop())
+        await asyncio.sleep(0)
+        return {"events_completed": 0, "notifications_delivered": 0}
+
+    monkeypatch.setattr(notifier, "_run", fake_run)
+
+    expected = {"events_completed": 0, "notifications_delivered": 0}
+    assert notifier.handler({}, None) == expected
+    assert notifier.handler({}, None) == expected
+    assert loops[0] is loops[1]
+    assert not loops[0].is_closed()
