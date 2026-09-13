@@ -1924,6 +1924,7 @@ class OrderedMutationService:
                     operation_id=command.operation_id,
                     participant_key=command.participant_key,
                     display_name=surname_and_name(user.full_name),
+                    nickname=user.nickname,
                     larp_experience=bool(user.larp_experience),
                     crossplay=bool(user.crossplay),
                     vk_profile=vk_profile,
@@ -1947,12 +1948,14 @@ class OrderedMutationService:
                 raise OperationNotAllowed(f"Вы уже записаны на игру {event_reference(event.name, event.game_date)}")
             larp_experience = command.payload.larp_experience
             crossplay = command.payload.crossplay
+            nickname = command.payload.nickname
             vk_profile = command.payload.vk_profile
             telegram_profile = command.payload.telegram_profile
             if self.users is not None:
                 user = await self.users.get(command.platform, command.platform_user_id)
                 if user is None or not user.profile_complete:
                     raise OperationNotAllowed("Сначала полностью заполните профиль")
+                nickname = user.nickname
                 if larp_experience is None or crossplay is None or not vk_profile:
                     larp_experience = user.larp_experience
                     crossplay = user.crossplay
@@ -1967,6 +1970,7 @@ class OrderedMutationService:
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
                 display_name=surname_and_name(command.payload.display_name),
+                nickname=nickname,
                 wish_play=command.payload.wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,

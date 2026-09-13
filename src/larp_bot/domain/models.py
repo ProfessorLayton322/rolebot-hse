@@ -45,7 +45,12 @@ class StrictModel(BaseModel):
 
 
 PassEmail = Annotated[str, StringConstraints(max_length=254, pattern=r"^[^=\s@][^\s@]*@[^\s@]+\.[^\s@]+$")]
+Nickname = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=100, pattern=r"^[^\r\n]+$"),
+]
 _PASS_EMAIL_ADAPTER = TypeAdapter(PassEmail)
+_NICKNAME_ADAPTER = TypeAdapter(Nickname)
 _CYRILLIC_NAME_RE = re.compile(r"^[А-ЯЁа-яё](?:[А-ЯЁа-яё -]{0,98}[А-ЯЁа-яё])?$")
 _LATIN_NAME_RE = re.compile(r"^[A-Za-z](?:[A-Za-z '\-]{0,98}[A-Za-z])?$")
 _CYRILLIC_FULL_NAME_PART_RE = re.compile(r"^[А-ЯЁа-яё]+(?:-[А-ЯЁа-яё]+)*$")
@@ -57,6 +62,12 @@ def validate_pass_email(value: str) -> str:
     """Validate an email before a dialogue is allowed to leave its email step."""
 
     return _PASS_EMAIL_ADAPTER.validate_python(value.strip())
+
+
+def normalize_nickname(value: str) -> str:
+    """Normalize a one-line public nickname entered in the profile editor."""
+
+    return _NICKNAME_ADAPTER.validate_python(value)
 
 
 def validate_cyrillic_name(value: str, *, patronym: bool = False) -> str:
@@ -281,6 +292,7 @@ def normalize_telegram_profile(value: str) -> str:
 
 class UserBase(StrictModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=300)
+    nickname: Nickname | None = None
     crossplay: bool | None = None
     larp_experience: bool | None = None
     needs_pass: bool | None = None
@@ -434,6 +446,7 @@ class Registration(StrictModel):
     event_id: str
     participant_key: str = Field(min_length=43, max_length=64)
     display_name: str
+    nickname: Nickname | None = None
     vk_profile: str = ""
     telegram_profile: str | None = None
     wish_play: str
@@ -448,6 +461,7 @@ class Registration(StrictModel):
 
 class EnlistPayload(StrictModel):
     display_name: str = Field(min_length=2, max_length=300)
+    nickname: Nickname | None = None
     wish_play: str = Field(min_length=1, max_length=2000)
     # Optional defaults keep commands already persisted by the previous schema
     # readable while the worker is being rolled forward.

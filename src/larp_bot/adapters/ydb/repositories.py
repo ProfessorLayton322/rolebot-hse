@@ -211,7 +211,7 @@ def _date(value: object) -> date:
 
 class YdbUserRepository:
     COMMON_COLUMNS = """
-        full_name, crossplay, larp_experience, needs_pass, pass_details_json,
+        full_name, nickname, crossplay, larp_experience, needs_pass, pass_details_json,
         dialog_state, dialog_context_json, last_update_id, last_update_at,
         last_delivery_operation_id, last_bot_buttons_json, is_gamemaster,
         gamemaster_grant_operation_id, created_at, updated_at
@@ -245,6 +245,7 @@ class YdbUserRepository:
     def _from_row(platform: Platform, user_id: int, row: dict[str, Any]) -> User:
         common = {
             "full_name": row.get("full_name"),
+            "nickname": row.get("nickname"),
             "crossplay": row.get("crossplay"),
             "larp_experience": row.get("larp_experience"),
             "needs_pass": row.get("needs_pass"),
@@ -336,6 +337,7 @@ class YdbUserRepository:
             DECLARE $user_id AS Uint64;
             {contact_declarations}
             DECLARE $full_name AS Optional<Utf8>;
+            DECLARE $nickname AS Optional<Utf8>;
             DECLARE $crossplay AS Optional<Bool>;
             DECLARE $larp_experience AS Optional<Bool>;
             DECLARE $needs_pass AS Optional<Bool>;
@@ -349,12 +351,12 @@ class YdbUserRepository:
             DECLARE $created_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             UPSERT INTO `{table}` (
-                {id_column}, {contact_columns} full_name, crossplay, larp_experience,
+                {id_column}, {contact_columns} full_name, nickname, crossplay, larp_experience,
                 needs_pass, pass_details_json, dialog_state, dialog_context_json,
                 last_update_id, last_update_at, last_delivery_operation_id, last_bot_buttons_json,
                 created_at, updated_at
             ) VALUES (
-                $user_id, {contact_values} $full_name, $crossplay, $larp_experience,
+                $user_id, {contact_values} $full_name, $nickname, $crossplay, $larp_experience,
                 $needs_pass, $pass_details, $dialog_state, $dialog_context,
                 $last_update_id, $last_update_at, $last_delivery_operation_id, $last_bot_buttons,
                 $created_at, $updated_at
@@ -366,6 +368,7 @@ class YdbUserRepository:
                 "$user_id": user_id,
                 **contact_params,
                 "$full_name": user.full_name,
+                "$nickname": user.nickname,
                 "$crossplay": user.crossplay,
                 "$larp_experience": user.larp_experience,
                 "$needs_pass": user.needs_pass,
@@ -1278,7 +1281,7 @@ class YdbEventRepository:
 
 class YdbRegistrationRepository:
     COLUMNS = """
-        event_id, participant_key, display_name, vk_profile, telegram_profile,
+        event_id, participant_key, display_name, nickname, vk_profile, telegram_profile,
         wish_play, larp_experience,
         crossplay, character_wish, attendance_status, last_operation_id,
         created_at, updated_at
@@ -1286,18 +1289,19 @@ class YdbRegistrationRepository:
     INSERT = """
         DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
         DECLARE $display_name AS Utf8; DECLARE $vk_profile AS Utf8;
+        DECLARE $nickname AS Optional<Utf8>;
         DECLARE $telegram_profile AS Optional<Utf8>; DECLARE $wish_play AS Utf8;
         DECLARE $larp_experience AS Optional<Bool>; DECLARE $crossplay AS Optional<Bool>;
         DECLARE $character_wish AS Utf8; DECLARE $attendance_status AS Utf8;
         DECLARE $last_operation_id AS Utf8; DECLARE $created_at AS Timestamp;
         DECLARE $updated_at AS Timestamp;
         INSERT INTO `registrations` (
-            event_id, participant_key, display_name, vk_profile, telegram_profile,
+            event_id, participant_key, display_name, nickname, vk_profile, telegram_profile,
             wish_play, larp_experience,
             crossplay, character_wish, attendance_status, last_operation_id,
             created_at, updated_at
         ) VALUES (
-            $event_id, $participant_key, $display_name, $vk_profile, $telegram_profile,
+            $event_id, $participant_key, $display_name, $nickname, $vk_profile, $telegram_profile,
             $wish_play, $larp_experience,
             $crossplay, $character_wish, $attendance_status, $last_operation_id,
             $created_at, $updated_at
@@ -1313,6 +1317,7 @@ class YdbRegistrationRepository:
             event_id=row["event_id"],
             participant_key=row["participant_key"],
             display_name=row["display_name"],
+            nickname=row.get("nickname"),
             vk_profile=row.get("vk_profile") or "",
             telegram_profile=row.get("telegram_profile"),
             wish_play=row["wish_play"],
@@ -1423,18 +1428,19 @@ class YdbRegistrationRepository:
             """
             DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
             DECLARE $display_name AS Utf8; DECLARE $vk_profile AS Utf8;
+            DECLARE $nickname AS Optional<Utf8>;
             DECLARE $telegram_profile AS Optional<Utf8>; DECLARE $wish_play AS Utf8;
             DECLARE $larp_experience AS Optional<Bool>; DECLARE $crossplay AS Optional<Bool>;
             DECLARE $character_wish AS Utf8; DECLARE $attendance_status AS Utf8;
             DECLARE $last_operation_id AS Utf8; DECLARE $created_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
             UPSERT INTO `registrations` (
-                event_id, participant_key, display_name, vk_profile, telegram_profile,
+                event_id, participant_key, display_name, nickname, vk_profile, telegram_profile,
                 wish_play, larp_experience,
                 crossplay, character_wish, attendance_status, last_operation_id,
                 created_at, updated_at
             ) VALUES (
-                $event_id, $participant_key, $display_name, $vk_profile, $telegram_profile,
+                $event_id, $participant_key, $display_name, $nickname, $vk_profile, $telegram_profile,
                 $wish_play, $larp_experience,
                 $crossplay, $character_wish, $attendance_status, $last_operation_id,
                 $created_at, $updated_at
@@ -1444,6 +1450,7 @@ class YdbRegistrationRepository:
                 "$event_id": registration.event_id,
                 "$participant_key": registration.participant_key,
                 "$display_name": registration.display_name,
+                "$nickname": registration.nickname,
                 "$vk_profile": registration.vk_profile,
                 "$telegram_profile": registration.telegram_profile,
                 "$wish_play": registration.wish_play,
@@ -1463,6 +1470,7 @@ class YdbRegistrationRepository:
             "$event_id": registration.event_id,
             "$participant_key": registration.participant_key,
             "$display_name": registration.display_name,
+            "$nickname": registration.nickname,
             "$vk_profile": registration.vk_profile,
             "$telegram_profile": registration.telegram_profile,
             "$wish_play": registration.wish_play,
@@ -1498,6 +1506,7 @@ class YdbRegistrationRepository:
         operation_id: str,
         participant_key: str,
         display_name: str,
+        nickname: str | None = None,
         wish_play: str,
         larp_experience: bool | None = None,
         crossplay: bool | None = None,
@@ -1512,6 +1521,7 @@ class YdbRegistrationRepository:
                 event_id=event_id,
                 participant_key=participant_key,
                 display_name=display_name,
+                nickname=nickname,
                 wish_play=wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,
@@ -1520,6 +1530,7 @@ class YdbRegistrationRepository:
             )
         else:
             registration.display_name = display_name
+            registration.nickname = nickname
             registration.wish_play = wish_play
             registration.larp_experience = larp_experience
             registration.crossplay = crossplay
@@ -1540,6 +1551,7 @@ class YdbRegistrationRepository:
         operation_id: str,
         participant_key: str,
         display_name: str,
+        nickname: str | None,
         larp_experience: bool,
         crossplay: bool,
         vk_profile: str,
@@ -1549,11 +1561,13 @@ class YdbRegistrationRepository:
             """
             DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8;
             DECLARE $operation_id AS Utf8; DECLARE $display_name AS Utf8;
+            DECLARE $nickname AS Optional<Utf8>;
             DECLARE $larp_experience AS Bool; DECLARE $crossplay AS Bool;
             DECLARE $vk_profile AS Utf8; DECLARE $telegram_profile AS Optional<Utf8>;
             DECLARE $updated_at AS Timestamp;
             UPDATE `registrations`
             SET display_name = $display_name,
+                nickname = $nickname,
                 larp_experience = $larp_experience,
                 crossplay = $crossplay,
                 vk_profile = $vk_profile,
@@ -1568,6 +1582,7 @@ class YdbRegistrationRepository:
                 "$participant_key": participant_key,
                 "$operation_id": operation_id,
                 "$display_name": display_name,
+                "$nickname": nickname,
                 "$larp_experience": larp_experience,
                 "$crossplay": crossplay,
                 "$vk_profile": vk_profile,

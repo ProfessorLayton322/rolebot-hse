@@ -27,6 +27,7 @@ resource "time_sleep" "ydb_ready" {
 locals {
   common_user_columns = [
     { name = "full_name", type = "Utf8", not_null = false },
+    { name = "nickname", type = "Utf8", not_null = false },
     { name = "crossplay", type = "Bool", not_null = false },
     { name = "larp_experience", type = "Bool", not_null = false },
     { name = "needs_pass", type = "Bool", not_null = false },
@@ -299,6 +300,10 @@ resource "yandex_ydb_table" "registrations" {
     name     = "display_name"
     type     = "Utf8"
     not_null = true
+  }
+  column {
+    name = "nickname"
+    type = "Utf8"
   }
   column {
     name = "vk_profile"

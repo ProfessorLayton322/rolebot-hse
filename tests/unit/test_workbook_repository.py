@@ -98,6 +98,7 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
         event_id=event.event_id,
         participant_key="a" * 43,
         display_name="Иванов Иван Иванович",
+        nickname="Ворон",
         vk_profile="https://vk.com/private-player",
         telegram_profile="https://t.me/private-player",
         wish_play="Anyone",
@@ -115,7 +116,7 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
         assert tuple(cell.value for cell in workbook.active[1]) == PUBLIC_HEADERS
         assert tuple(workbook.active.cell(2, column).value for column in range(1, 7)) == (
             1,
-            "Иванов Иван",
+            "Ворон",
             "Нет",
             "Anyone",
             "Doctor",
@@ -123,6 +124,27 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
         )
         assert workbook.active.max_column == 6
         assert not any("vk.com" in str(value) or "t.me" in str(value) for value in values)
+    finally:
+        workbook.close()
+
+    master = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]), data_only=False)
+    try:
+        assert master.active["B2"].value == "Иванов Иван"
+    finally:
+        master.close()
+
+
+def test_public_showcase_falls_back_to_surname_and_name_without_nickname() -> None:
+    registration = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Петров Пётр Петрович",
+        wish_play="Без пожеланий",
+    )
+
+    workbook = load_workbook(BytesIO(public_showcase_workbook_bytes([registration])))
+    try:
+        assert workbook.active["B2"].value == "Петров Пётр"
     finally:
         workbook.close()
 
@@ -228,7 +250,7 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
             event_id="event-a1",
             participant_key="d" * 43,
             display_name="Орлов Олег Олегович",
-            wish_play="фёдоров фёдор",
+            wish_play="фёдор фёд",
         ),
         Registration(
             event_id="event-a1",
@@ -253,8 +275,44 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
                     for column in range(1, column_count + 1)
                     if column != 2
                 )
-            assert sheet.cell(5, 2).fill.fill_type is None
-            assert sheet.cell(6, 2).fill.fill_type is None
+            for row in (5, 6):
+                assert sheet.cell(row, 2).fill.fill_type == "solid"
+                assert sheet.cell(row, 2).fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
+        finally:
+            workbook.close()
+
+
+def test_co_player_wishes_match_all_whitespace_tokens_against_name_or_nickname_substrings() -> None:
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key="a" * 43,
+            display_name="Ищущий Игрок",
+            wish_play="кен eyep",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="b" * 43,
+            display_name="Сасаки Хайсе",
+            nickname="Канеки Кен/Eyepatch",
+            wish_play="Без пожеланий",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="c" * 43,
+            display_name="Иванов Пётр",
+            nickname="Кен",
+            wish_play="Без пожеланий",
+        ),
+    ]
+
+    for content in (showcase_workbook_bytes(registrations), public_showcase_workbook_bytes(registrations)):
+        workbook = load_workbook(BytesIO(content))
+        try:
+            sheet = workbook.active
+            assert sheet["B2"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+            assert sheet["B3"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+            assert sheet["B4"].fill.fill_type is None
         finally:
             workbook.close()
 

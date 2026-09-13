@@ -173,6 +173,7 @@ async def test_user_repository_serializes_the_last_bot_keyboard() -> None:
     executor = SimpleNamespace(query=AsyncMock(return_value=[]))
     user = TelegramUser(
         tg_id=42,
+        nickname="Сова",
         last_bot_buttons=[Button(label="Visible", value="callback:value")],
     )
 
@@ -180,6 +181,7 @@ async def test_user_repository_serializes_the_last_bot_keyboard() -> None:
 
     query, params = executor.query.await_args.args
     assert "last_bot_buttons_json" in query
+    assert params["$nickname"] == "Сова"
     assert params["$last_bot_buttons"] == '[{"label":"Visible","value":"callback:value"}]'
 
 
