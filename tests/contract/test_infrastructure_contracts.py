@@ -19,6 +19,8 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "signup_token"' in ydb
     assert 'name = "vk_profile"' in ydb
     assert 'name = "telegram_profile"' in ydb
+    assert '{ name = "nickname", type = "Utf8", not_null = false }' in ydb
+    assert ydb.count('name = "nickname"') == 2
     assert 'name = "public_table_resource_path"' in ydb
     assert 'name = "public_table_public_url"' in ydb
     assert 'name = "pass_table_resource_path"' in ydb

@@ -23,6 +23,17 @@ from larp_bot.domain.models import (
 )
 
 
+def test_nickname_is_optional_normalized_public_profile_data() -> None:
+    user = TelegramUser(tg_id=1, nickname="  Серый Волк  ")
+
+    assert user.nickname == "Серый Волк"
+    assert TelegramUser(tg_id=2).nickname is None
+    with pytest.raises(ValidationError):
+        TelegramUser(tg_id=3, nickname="первая строка\nвторая строка")
+    with pytest.raises(ValidationError):
+        TelegramUser(tg_id=4, nickname="x" * 101)
+
+
 @pytest.mark.parametrize("value", [None, "", "-"])
 def test_telegram_profile_requires_vk_url(value: str | None) -> None:
     if value is None:

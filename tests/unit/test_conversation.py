@@ -58,6 +58,7 @@ from larp_bot.application.conversation import (
     MANAGE_PLAYERS,
     MASTER_TABLE_DISCLAIMER,
     MY_GAMES,
+    NICKNAME_PROMPT,
     PAGE_BACK,
     PAGE_FORWARD,
     PAGE_SIZE,
@@ -66,6 +67,7 @@ from larp_bot.application.conversation import (
     PROFILE_EDITED,
     REFILL_PROFILE,
     REMOVE_EVENT_LEADER,
+    REMOVE_NICKNAME,
     REMOVE_PLAYER,
     REMOVE_WAITING_PLAYERS,
     REVOKE_GAMEMASTER,
@@ -419,7 +421,11 @@ async def test_unsupported_content_is_rejected_without_advancing_dialog(
 async def test_enlist_finishes_without_confirmation_or_character_wishes(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
-    engine, _, publisher, _ = await engine_setup(disk_store, event)
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+    user = await users.get(Platform.TELEGRAM, 1)
+    assert user is not None
+    user.nickname = "Серый Волк"
+    await users.save(user)
     responses = [await engine.handle(inbound(1, ENLIST))]
     responses.append(await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True)))
     responses.append(await engine.handle(inbound(3, "Алиса", telegram_username="ivan_player")))
@@ -432,6 +438,7 @@ async def test_enlist_finishes_without_confirmation_or_character_wishes(
     assert queued.operation is Operation.ENLIST
     assert isinstance(queued.payload, EnlistPayload)
     assert not hasattr(queued.payload, "character_wish")
+    assert queued.payload.nickname == "Серый Волк"
     assert queued.payload.larp_experience is True
     assert queued.payload.crossplay is True
     assert queued.payload.vk_profile == "https://vk.com/id1"
@@ -1459,6 +1466,7 @@ async def test_profile_completion_shows_confirmation_before_main_menu(
 
     completed = responses[-1]
     assert completed.text == "✅ Профиль успешно заполнен."
+    assert all(NICKNAME_PROMPT not in response.text for response in responses)
     assert completed.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
     assert not completed.deferred and not completed.command_enqueued
 
@@ -1576,6 +1584,7 @@ async def test_completed_profile_display_and_edit_menu_include_pass_fields(
     assert [button.label for button in menu.buttons] == [
         REFILL_PROFILE,
         "ФИО",
+        "Никнейм",
         "Профиль ВКонтакте",
         "Кросспол",
         "Пропуск",
@@ -1585,6 +1594,36 @@ async def test_completed_profile_display_and_edit_menu_include_pass_fields(
         "ФИО латиницей",
         BACK,
     ]
+
+
+@pytest.mark.asyncio
+async def test_nickname_is_a_separate_one_step_profile_edit_and_can_be_removed(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+
+    menu = await engine.handle(inbound(1, "profile:menu", callback=True))
+    prompt = await engine.handle(inbound(2, "profile:field:nickname", callback=True))
+    changed = await engine.handle(inbound(3, "  Серый Волк  "))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert "Никнейм" in [button.label for button in menu.buttons]
+    assert prompt.text == NICKNAME_PROMPT
+    assert [button.label for button in prompt.buttons] == ["Отмена"]
+    assert saved is not None and saved.nickname == "Серый Волк"
+    assert "Никнейм: Серый Волк" in changed.text
+    assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE]
+
+    await engine.handle(inbound(4, "profile:menu", callback=True))
+    remove_prompt = await engine.handle(inbound(5, "profile:field:nickname", callback=True))
+    removed = await engine.handle(inbound(6, "profile:nickname:clear", callback=True))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert [button.label for button in remove_prompt.buttons] == [REMOVE_NICKNAME, "Отмена"]
+    assert saved is not None and saved.nickname is None
+    assert "Никнейм: не указан" in removed.text
+    assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE, Operation.SYNC_PROFILE]
 
 
 @pytest.mark.asyncio

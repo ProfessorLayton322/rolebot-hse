@@ -433,6 +433,7 @@ class MemoryRegistrationRepository:
         operation_id: str,
         participant_key: str,
         display_name: str,
+        nickname: str | None = None,
         wish_play: str,
         larp_experience: bool | None = None,
         crossplay: bool | None = None,
@@ -448,6 +449,7 @@ class MemoryRegistrationRepository:
                 event_id=event_id,
                 participant_key=participant_key,
                 display_name=display_name,
+                nickname=nickname,
                 wish_play=wish_play,
                 larp_experience=larp_experience,
                 crossplay=crossplay,
@@ -457,6 +459,7 @@ class MemoryRegistrationRepository:
             self.rows[key] = registration
         else:
             registration.display_name = display_name
+            registration.nickname = nickname
             registration.wish_play = wish_play
             registration.larp_experience = larp_experience
             registration.crossplay = crossplay
@@ -476,6 +479,7 @@ class MemoryRegistrationRepository:
         operation_id: str,
         participant_key: str,
         display_name: str,
+        nickname: str | None,
         larp_experience: bool,
         crossplay: bool,
         vk_profile: str,
@@ -485,6 +489,7 @@ class MemoryRegistrationRepository:
         if registration is None or registration.last_operation_id == operation_id:
             return False
         registration.display_name = display_name
+        registration.nickname = nickname
         registration.larp_experience = larp_experience
         registration.crossplay = crossplay
         registration.vk_profile = vk_profile

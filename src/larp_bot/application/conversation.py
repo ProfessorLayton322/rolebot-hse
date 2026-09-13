@@ -38,6 +38,7 @@ from larp_bot.domain.models import (
     event_reference,
     format_game_date,
     normalize_mobile_phone,
+    normalize_nickname,
     normalize_telegram_handle,
     normalize_telegram_profile,
     normalize_vk_url,
@@ -82,6 +83,7 @@ PROFILE = "📝 Профиль"
 EDIT_PROFILE = "Редактировать профиль"
 REFILL_PROFILE = "Заполнить профиль заново"
 PROFILE_EDITED = "Профиль успешно изменён!"
+REMOVE_NICKNAME = "Убрать никнейм"
 ENLIST = "🎮 Записаться на игру"
 CONFIRM = "✅ Подтвердить участие"
 # Keep the former value recognizable for keyboards sent before this rollout.
@@ -210,6 +212,7 @@ ADMIN_ACTIONS = frozenset(
 FREE_TEXT_DIALOG_STATES = frozenset(
     {
         "PROFILE_FULL_NAME_CYRILLIC",
+        "PROFILE_NICKNAME",
         "PROFILE_CONTACT",
         "PROFILE_PASS_FULL_NAME_LATIN",
         "PROFILE_PASS_PHONE",
@@ -256,9 +259,16 @@ CYRILLIC_FULL_NAME_RETRY_PROMPT = "Введите ФИО кириллицей, �
 LATIN_FULL_NAME_RETRY_PROMPT = "Введите ФИО латиницей, либо фамилию имя, если отчества нету"
 PHONE_PROMPT = "Введите ваш номер телефона. Он необходим для оформления пропуска."
 EMAIL_PROMPT = "Введите ваш email. Он необходим для оформления пропуска."
+NICKNAME_PROMPT = (
+    "Ваш никнейм - то, как вы будете отображаться в публичных таблицах записи на игры. "
+    "Важно - организатором будет видно введенное вами паспортное имя!\n\n"
+    "Пожалуйста, используйте узнаваемый никнейм. Если хотите, можете добавить в никнейм ваше имя, "
+    'например "Канеки Кен/Eyepatch".'
+)
 
 PROFILE_EDIT_ACTIONS = {
     "profile:field:name": "ФИО",
+    "profile:field:nickname": "Никнейм",
     "profile:field:crossplay": "Кросспол",
     "profile:field:pass": "Пропуск",
     "profile:field:phone": "Номер телефона",
@@ -283,6 +293,14 @@ def profile_yes_no_buttons(user: User) -> list[Button]:
         Button(label="Нет", value="Нет"),
         profile_dialog_exit_button(user),
     ]
+
+
+def nickname_buttons(user: User) -> list[Button]:
+    buttons = []
+    if user.nickname is not None:
+        buttons.append(Button(label=REMOVE_NICKNAME, value="profile:nickname:clear"))
+    buttons.append(profile_dialog_exit_button(user))
+    return buttons
 
 
 def main_buttons(has_admin_access: bool) -> list[Button]:
@@ -790,6 +808,7 @@ class ConversationEngine:
             "Профиль",
             "",
             f"ФИО: {full_name}",
+            f"Никнейм: {user.nickname or 'не указан'}",
             f"Статус: {role}",
             f"{contact_label}: {contact or 'не указан'}",
             f"Кросспол: {_bool_text(user.crossplay)}",
@@ -824,6 +843,7 @@ class ConversationEngine:
         buttons = [
             Button(label=REFILL_PROFILE, value="profile:reset"),
             Button(label=PROFILE_EDIT_ACTIONS["profile:field:name"], value="profile:field:name"),
+            Button(label=PROFILE_EDIT_ACTIONS["profile:field:nickname"], value="profile:field:nickname"),
             Button(label=contact_label, value="profile:field:contact"),
             Button(label=PROFILE_EDIT_ACTIONS["profile:field:crossplay"], value="profile:field:crossplay"),
             Button(label=PROFILE_EDIT_ACTIONS["profile:field:pass"], value="profile:field:pass"),
@@ -889,6 +909,9 @@ class ConversationEngine:
         if field == "name":
             user.dialog_state = "PROFILE_FULL_NAME_CYRILLIC"
             return BotResponse(text=CYRILLIC_FULL_NAME_PROMPT, buttons=[profile_dialog_exit_button(user)])
+        if field == "nickname":
+            user.dialog_state = "PROFILE_NICKNAME"
+            return BotResponse(text=NICKNAME_PROMPT, buttons=nickname_buttons(user))
         if field == "contact":
             return self._profile_contact_prompt(user)
         if field == "crossplay":
@@ -1116,6 +1139,18 @@ class ConversationEngine:
         context = user.dialog_context
         state = user.dialog_state
         field = str(context["profile_field"])
+        if state == "PROFILE_NICKNAME":
+            if value == "profile:nickname:clear":
+                user.nickname = None
+            else:
+                try:
+                    user.nickname = normalize_nickname(value)
+                except ValidationError:
+                    return BotResponse(
+                        text=f"Никнейм должен быть одной строкой длиной до 100 символов.\n\n{NICKNAME_PROMPT}",
+                        buttons=nickname_buttons(user),
+                    )
+            return await self._complete_profile_edit(user, message)
         if state == "PROFILE_FULL_NAME_CYRILLIC":
             try:
                 name_parts = parse_full_name(value, alphabet="cyrillic")
@@ -1950,6 +1985,7 @@ class ConversationEngine:
             user_id=message.identity.platform_user_id,
             payload=EnlistPayload(
                 display_name=surname_and_name(user.full_name or ""),
+                nickname=user.nickname,
                 wish_play=str(context["wish_play"]),
                 larp_experience=user.larp_experience,
                 crossplay=user.crossplay,

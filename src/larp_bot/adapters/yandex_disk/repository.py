@@ -157,15 +157,25 @@ def _ordered_active_registrations(registrations: Sequence[Registration]) -> list
 
 
 def _player_component_colors(registrations: Sequence[Registration]) -> dict[str, str]:
-    names: dict[str, list[int]] = {}
-    for index, registration in enumerate(registrations):
-        names.setdefault(surname_and_name(registration.display_name), []).append(index)
+    identifiers = [
+        tuple(
+            identifier.casefold()
+            for identifier in (surname_and_name(registration.display_name), registration.nickname)
+            if identifier
+        )
+        for registration in registrations
+    ]
 
     adjacency = [set[int]() for _ in registrations]
     for index, registration in enumerate(registrations):
-        for wished_name in (name.strip() for name in registration.wish_play.split(",")):
-            for wished_index in names.get(wished_name, ()):
+        for wished_name in registration.wish_play.split(","):
+            tokens = wished_name.casefold().split()
+            if not tokens:
+                continue
+            for wished_index, candidate_identifiers in enumerate(identifiers):
                 if wished_index == index:
+                    continue
+                if not any(all(token in candidate for token in tokens) for candidate in candidate_identifiers):
                     continue
                 adjacency[index].add(wished_index)
                 adjacency[wished_index].add(index)
@@ -287,7 +297,7 @@ def public_showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(surname_and_name(registration.display_name)),
+                safe_cell(registration.nickname or surname_and_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 safe_cell(registration.character_wish),
@@ -302,7 +312,7 @@ def public_showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(surname_and_name(registration.display_name)),
+                safe_cell(registration.nickname or surname_and_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 safe_cell(registration.character_wish),

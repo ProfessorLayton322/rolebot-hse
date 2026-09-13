@@ -247,6 +247,7 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
         TelegramUser(
             tg_id=1,
             full_name="Player",
+            nickname="Night Owl",
             vk_url="https://vk.com/player",
             crossplay=False,
             larp_experience=True,
@@ -270,6 +271,7 @@ async def test_legacy_enlist_command_backfills_profile_columns(disk_store: Memor
     public_workbook = load_workbook(BytesIO(disk_store.files[stored_event.public_table_resource_path]))
     try:
         assert tuple(cell.value for cell in public_workbook.active[1]) == PUBLIC_HEADERS
+        assert public_workbook.active["B2"].value == "Night Owl"
         assert public_workbook.active.max_column == 6
         assert "https://vk.com/player" not in {cell.value for row in public_workbook.active.iter_rows() for cell in row}
     finally:
@@ -332,6 +334,7 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
         TelegramUser(
             tg_id=1,
             full_name="Новиков Новый Нович",
+            nickname="Новый Ник",
             vk_url="https://vk.com/new-profile",
             telegram_handle="@new_profile",
             crossplay=True,
@@ -358,6 +361,7 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
     assert result.notifications_enabled is False
     assert stored is not None
     assert stored.display_name == "Новиков Новый"
+    assert stored.nickname == "Новый Ник"
     assert stored.vk_profile == "https://vk.com/new-profile"
     assert stored.telegram_profile == "https://t.me/new_profile"
     assert stored.larp_experience is False
@@ -376,7 +380,7 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
         assert master.active["D2"].value == "https://t.me/new_profile"
         assert master.active["E2"].value == "Нет"
         assert master.active["F2"].value == "Да"
-        assert public.active["B2"].value == "Новиков Новый"
+        assert public.active["B2"].value == "Новый Ник"
         assert public.active["C2"].value == "Да"
         assert passes.active["A2"].value == "Новиков"
         assert passes.active["C2"].value == "Нович"
