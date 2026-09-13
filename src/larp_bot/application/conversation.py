@@ -636,11 +636,21 @@ class ConversationEngine:
         current_button_values = {button.value for button in user.last_bot_buttons}
         if is_start:
             await self._clear(user)
-            response = (
-                await self._start_game_signup(user, message, start_parameter)
-                if start_parameter is not None and is_profile_complete(user)
-                else await self._main(user, WELCOME_TEXT)
+            signup_event = (
+                await self.events.get_by_signup_token(start_parameter) if start_parameter is not None else None
             )
+            if signup_event is not None and signup_event.archived_at is not None:
+                signup_event = None
+            if signup_event is not None and is_profile_complete(user):
+                response = await self._start_game_signup(user, message, signup_event)
+            elif not is_profile_complete(user):
+                response = await self._begin_profile(
+                    user,
+                    signup_event_id=None if signup_event is None else signup_event.event_id,
+                )
+                response.text = f"{WELCOME_TEXT}\n\n{response.text}"
+            else:
+                response = await self._main(user, WELCOME_TEXT)
         elif message.has_unsupported_content:
             await self._save(user, message)
             return BotResponse(
@@ -701,11 +711,8 @@ class ConversationEngine:
         self,
         user: User,
         message: InboundMessage,
-        signup_token: str,
+        event: Event,
     ) -> BotResponse:
-        event = await self.events.get_by_signup_token(signup_token)
-        if event is None:
-            return await self._main(user, WELCOME_TEXT)
         if not event.registration_is_open():
             assert event.registration_open_at is not None
             return await self._main(
@@ -843,12 +850,20 @@ class ConversationEngine:
         buttons.append(Button(label=BACK, value=PROFILE))
         return BotResponse(text="Что вы хотите изменить?", buttons=buttons)
 
-    async def _begin_profile(self, user: User, *, editing_existing: bool = False) -> BotResponse:
+    async def _begin_profile(
+        self,
+        user: User,
+        *,
+        editing_existing: bool = False,
+        signup_event_id: str | None = None,
+    ) -> BotResponse:
         user.dialog_state = "PROFILE_FULL_NAME_CYRILLIC"
         user.dialog_context = {
             "profile_format": PROFILE_FORMAT,
             "profile_flow": "reset" if editing_existing else "initial",
         }
+        if signup_event_id is not None:
+            user.dialog_context["signup_event_id"] = signup_event_id
         return BotResponse(
             text=CYRILLIC_FULL_NAME_PROMPT,
             buttons=[profile_dialog_exit_button(user)],
@@ -1272,6 +1287,7 @@ class ConversationEngine:
 
     async def _finish_profile(self, user: User, message: InboundMessage) -> BotResponse:
         context = user.dialog_context
+        signup_event_id = context.get("signup_event_id")
         full_name = str(context["full_name"])
         profile_names = {full_name}
         if user.full_name is not None:
@@ -1304,6 +1320,10 @@ class ConversationEngine:
         await self._clear(user)
         if editing_existing:
             return await self._profile_response(user, prefix=PROFILE_EDITED)
+        if isinstance(signup_event_id, str):
+            response = await self._select_event(user, message, f"select:enlist:{signup_event_id}")
+            response.text = f"✅ Профиль успешно заполнен.\n\n{response.text}"
+            return response
         return BotResponse(
             text="✅ Профиль успешно заполнен.",
             buttons=[main_menu_button()],
