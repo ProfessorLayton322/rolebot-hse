@@ -33,6 +33,7 @@ from larp_bot.application.conversation import (
     CO_PLAYER_WISHES,
     CONFIRM,
     CREATION_MASTER_QUESTION,
+    CYRILLIC_FULL_NAME_PROMPT,
     EDIT_PROFILE,
     EMAIL_PROMPT,
     ENLIST,
@@ -78,6 +79,7 @@ from larp_bot.application.conversation import (
     UNARCHIVE_GAME,
     UNSUPPORTED_CONTENT_RESPONSE,
     VENUE_ADDRESS,
+    WELCOME_TEXT,
     ConversationEngine,
 )
 from larp_bot.application.deadlines import MOSCOW_TIMEZONE
@@ -274,7 +276,7 @@ async def test_vk_game_deep_link_starts_the_same_signup_dialogue(
 
 
 @pytest.mark.asyncio
-async def test_unknown_or_incomplete_profile_deep_link_behaves_like_normal_start(
+async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -284,11 +286,72 @@ async def test_unknown_or_incomplete_profile_deep_link_behaves_like_normal_start
     await users.save(TelegramUser(tg_id=2))
 
     unknown = await engine.handle(inbound(1, "/start missing_token", user_id=1))
-    incomplete = await engine.handle(inbound(2, f"/start {signup_token}", user_id=2))
+    started = await engine.handle(inbound(2, f"/start {signup_token}", user_id=2))
+    pending = await users.get(Platform.TELEGRAM, 2)
+    await engine.handle(inbound(3, "Иванов Иван", user_id=2))
+    await engine.handle(inbound(4, "Нет", user_id=2))
+    await engine.handle(inbound(5, "https://vk.com/id2", user_id=2))
+    completed = await engine.handle(inbound(6, "Да", user_id=2))
+    saved = await users.get(Platform.TELEGRAM, 2)
 
     assert unknown.text.startswith("Привет!")
-    assert incomplete.text.startswith("Привет!")
-    assert [button.value for button in incomplete.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+    assert started.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert pending is not None and pending.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
+    assert pending.dialog_context["signup_event_id"] == event.event_id
+    assert completed.text.startswith("✅ Профиль успешно заполнен.\n\nЕсть ли игроки")
+    assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
+    assert saved.dialog_context["event_id"] == event.event_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("preexisting_user", [False, True])
+async def test_incomplete_user_start_greets_and_immediately_begins_profile(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    preexisting_user: bool,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event)
+    if preexisting_user:
+        await users.save(TelegramUser(tg_id=2))
+
+    response = await engine.handle(inbound(1, "/start", user_id=2))
+    saved = await users.get(Platform.TELEGRAM, 2)
+
+    assert response.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert [button.value for button in response.buttons] == ["Отмена"]
+    assert saved is not None and saved.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
+    assert saved.dialog_context == {
+        "profile_format": "combined-full-name-v2-statistics-experience",
+        "profile_flow": "initial",
+    }
+
+
+@pytest.mark.asyncio
+async def test_archived_game_link_is_not_retained_during_new_user_profile(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    signup_token = "Archived_game_14_11_2026_A7z"
+    archived_event = event.model_copy(
+        update={
+            "signup_token": signup_token,
+            "status": EventStatus.CLOSED,
+            "archived_at": datetime.now(UTC),
+        }
+    )
+    engine, users, _, _ = await engine_setup(disk_store, archived_event)
+
+    started = await engine.handle(inbound(1, f"/start {signup_token}", user_id=2))
+    pending = await users.get(Platform.TELEGRAM, 2)
+    for update, answer in enumerate(("Иванов Иван", "Нет", "https://vk.com/id2", "Да"), start=2):
+        completed = await engine.handle(inbound(update, answer, user_id=2))
+    saved = await users.get(Platform.TELEGRAM, 2)
+
+    assert started.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert pending is not None and "signup_event_id" not in pending.dialog_context
+    assert completed.text == "✅ Профиль успешно заполнен."
+    assert completed.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
+    assert saved is not None and saved.dialog_state == "IDLE"
 
 
 @pytest.mark.asyncio
@@ -781,25 +844,26 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
 
 
 @pytest.mark.asyncio
-async def test_vk_start_message_matches_slash_start_greeting(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_vk_start_messages_greet_new_users_and_begin_profiles(disk_store: MemoryDiskStore, event: Event) -> None:
     engine, users, publisher, _ = await engine_setup(disk_store, event)
 
-    def vk(update: int, value: str) -> InboundMessage:
+    def vk(update: int, value: str, user_id: int) -> InboundMessage:
         return InboundMessage(
-            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=user_id),
             update_id=str(update),
             text=value,
-            peer_id=7,
+            peer_id=user_id,
         )
 
-    slash_start = await engine.handle(vk(1, "/start"))
-    await engine.handle(vk(2, PROFILE))
-    vk_start = await engine.handle(vk(3, "Начать"))
-    saved = await users.get(Platform.VK, 7)
+    slash_start = await engine.handle(vk(1, "/start", 7))
+    vk_start = await engine.handle(vk(2, "Начать", 8))
+    slash_user = await users.get(Platform.VK, 7)
+    vk_user = await users.get(Platform.VK, 8)
 
     assert vk_start == slash_start
-    assert saved is not None and saved.dialog_state == "IDLE"
-    assert saved.dialog_context == {}
+    assert slash_start.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert slash_user is not None and slash_user.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
+    assert vk_user is not None and vk_user.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert not publisher.commands
 
 
