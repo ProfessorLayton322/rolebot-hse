@@ -363,6 +363,10 @@ class Event(StrictModel):
     # Null means immediate publication. A future timestamp hides registration
     # from players until that instant while leaving it manageable by masters.
     registration_open_at: datetime | None = None
+    # Scheduled-opening notifications are maintained independently from the
+    # timestamp gate so notification delivery can never delay registration.
+    registration_open_notified_recipients: list[str] = Field(default_factory=list)
+    registration_open_notification_completed_at: datetime | None = None
     # Legacy games predate deep-link signup tokens. Every newly created game
     # receives one whose alphabet and length fit Telegram start parameters.
     signup_token: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
@@ -392,6 +396,13 @@ class Event(StrictModel):
     def registration_opening_has_timezone(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("registration opening must include a timezone")
+        return value
+
+    @field_validator("registration_open_notification_completed_at")
+    @classmethod
+    def registration_open_notification_completion_has_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("registration opening notification completion must include a timezone")
         return value
 
     @model_validator(mode="after")

@@ -12,7 +12,7 @@ resource "yandex_iam_service_account" "worker" {
 
 resource "yandex_iam_service_account" "trigger" {
   name        = "${var.project_name}-kick-trigger"
-  description = "Reads only the standard kick queue and invokes the worker"
+  description = "Invokes background Functions and reads the standard kick queue"
   folder_id   = var.yandex_folder_id
 }
 
@@ -87,6 +87,12 @@ resource "yandex_function_iam_member" "gateway_from_api_gateway" {
 
 resource "yandex_function_iam_member" "worker_from_trigger" {
   function_id = yandex_function.ordered_worker.id
+  role        = "functions.functionInvoker"
+  member      = "serviceAccount:${yandex_iam_service_account.trigger.id}"
+}
+
+resource "yandex_function_iam_member" "registration_notifier_from_trigger" {
+  function_id = yandex_function.registration_notifier.id
   role        = "functions.functionInvoker"
   member      = "serviceAccount:${yandex_iam_service_account.trigger.id}"
 }

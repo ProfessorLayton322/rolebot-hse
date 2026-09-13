@@ -49,3 +49,20 @@ resource "yandex_function_trigger" "worker_kicks" {
     yandex_function_iam_member.worker_from_trigger,
   ]
 }
+
+resource "yandex_function_trigger" "scheduled_registration_notifications" {
+  name        = "${var.project_name}-scheduled-registration-notifications"
+  description = "Check every minute for scheduled registrations that have opened"
+  folder_id   = var.yandex_folder_id
+
+  function {
+    id                 = yandex_function.registration_notifier.id
+    service_account_id = yandex_iam_service_account.trigger.id
+  }
+
+  timer {
+    cron_expression = "* * * * ? *"
+  }
+
+  depends_on = [yandex_function_iam_member.registration_notifier_from_trigger]
+}
