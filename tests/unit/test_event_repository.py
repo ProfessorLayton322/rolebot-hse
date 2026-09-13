@@ -91,6 +91,12 @@ def test_persisted_registration_opening_time_is_loaded() -> None:
     assert event.registration_open_at == opening
 
 
+def test_persisted_signup_token_is_loaded() -> None:
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"signup_token": "Game_14_11_2026_A7z"})
+
+    assert event.signup_token == "Game_14_11_2026_A7z"
+
+
 def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
     row = event_row("CONFIRMATION_OPEN") | {
         "confirmed_notifications_json": json.dumps(
@@ -173,6 +179,32 @@ async def test_event_creation_persists_optional_game_date() -> None:
 
     assert "game_date" in executor.query_text
     assert executor.params["$game_date"] == date(2026, 11, 14)
+
+
+@pytest.mark.asyncio
+async def test_event_creation_persists_signup_token() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"signup_token": "Game_14_11_2026_A7z"})
+
+    await repository.create(event)
+
+    assert "signup_token" in executor.query_text
+    assert executor.params["$signup_token"] == "Game_14_11_2026_A7z"
+
+
+@pytest.mark.asyncio
+async def test_event_is_resolved_by_signup_token() -> None:
+    row = event_row("CREATED") | {"signup_token": "Game_14_11_2026_A7z"}
+    executor = RecordingExecutor([row])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    event = await repository.get_by_signup_token("Game_14_11_2026_A7z")
+
+    assert event is not None and event.event_id == "event-a1"
+    assert "signup_token = $signup_token" in executor.query_text
+    assert "LIMIT 2" in executor.query_text
+    assert executor.params["$signup_token"] == "Game_14_11_2026_A7z"
 
 
 @pytest.mark.asyncio

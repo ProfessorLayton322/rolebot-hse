@@ -44,6 +44,10 @@ if ! printf '%s' "${YANDEX_SERVICE_ACCOUNT_IDS}" | jq -e \
   exit 1
 fi
 
+telegram_bot_username="$(curl --fail-with-body --silent --show-error \
+  "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" \
+  | jq -er '.result.username | select(type == "string" and test("^[A-Za-z0-9_]{5,32}$"))')"
+
 jq -n \
   --arg webhook "${TG_WEBHOOK_SECRET}" \
   --arg hmac "${CF_TO_YANDEX_HMAC_SECRET}" \
@@ -55,6 +59,7 @@ jq -n \
 
 jq -n \
   --arg token "${TG_BOT_TOKEN}" \
+  --arg telegram_username "${telegram_bot_username}" \
   --arg hmac "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
   --arg disk "${YANDEX_DISK_TOKEN}" \
   --arg google_service_account "${GOOGLE_SERVICE_ACCOUNT_JSON}" \
@@ -74,6 +79,7 @@ jq -n \
   --arg subjects "${YANDEX_SERVICE_ACCOUNT_IDS}" \
   '{
     TG_BOT_TOKEN:$token,
+    TG_BOT_USERNAME:$telegram_username,
     YANDEX_TO_CF_EGRESS_HMAC_SECRET:$hmac,
     YANDEX_DISK_TOKEN:$disk,
     GOOGLE_SERVICE_ACCOUNT_JSON:$google_service_account,

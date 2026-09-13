@@ -3,6 +3,7 @@ import { handle, sign, type Env } from "../src/index";
 
 const env: Env = {
   TG_BOT_TOKEN: "123:token",
+  TG_BOT_USERNAME: "rolebot_test_bot",
   YANDEX_TO_CF_EGRESS_HMAC_SECRET: "egress-secret",
   YANDEX_DISK_TOKEN: "disk-token",
   GOOGLE_SERVICE_ACCOUNT_JSON: '{"type":"service_account"}',
@@ -114,6 +115,7 @@ describe("telegram egress", () => {
     expect(payload.values.YMQ_SECRET_ACCESS_KEY).toBe("ymq-secret");
     expect(payload.values.TG_GAMEMASTER_IDS).toBe("[3]");
     expect(payload.values.VK_GAMEMASTER_IDS).toBe("[4]");
+    expect(payload.values.TG_BOT_USERNAME).toBe("rolebot_test_bot");
     expect(payload.values.TG_BOT_TOKEN).toBeUndefined();
   });
 

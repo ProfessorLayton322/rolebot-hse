@@ -102,6 +102,12 @@ class MemoryEventRepository:
         event = self.rows.get(event_id)
         return None if event is None else deepcopy(event)
 
+    async def get_by_signup_token(self, signup_token: str) -> Event | None:
+        matches = [event for event in self.rows.values() if event.signup_token == signup_token]
+        if len(matches) > 1:
+            raise RuntimeError("duplicate game signup token")
+        return None if not matches else deepcopy(matches[0])
+
     async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None:
         if event.event_id in self.rows:
             raise ValueError("event exists")

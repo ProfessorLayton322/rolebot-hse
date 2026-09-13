@@ -1,5 +1,6 @@
 export interface Env {
   TG_BOT_TOKEN: string;
+  TG_BOT_USERNAME: string;
   YANDEX_TO_CF_EGRESS_HMAC_SECRET: string;
   YANDEX_DISK_TOKEN: string;
   GOOGLE_SERVICE_ACCOUNT_JSON: string;
@@ -32,6 +33,7 @@ const OIDC_ISSUER = "https://auth.yandex.cloud";
 const JWKS_URL = "https://auth.yandex.cloud/oauth/jwks/keys";
 const RUNTIME_CONFIG_PATH = "/runtime/config";
 const RUNTIME_CONFIG_KEYS = [
+  "TG_BOT_USERNAME",
   "YANDEX_DISK_TOKEN",
   "GOOGLE_SERVICE_ACCOUNT_JSON",
   "VK_ACCESS_TOKEN",
