@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
+import string
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -51,6 +53,44 @@ from .ports import (
 )
 
 LOGGER = logging.getLogger("larp_bot.application.services")
+
+_CYRILLIC_TRANSLITERATION = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "yo",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+_START_PARAMETER_ALPHABET = string.ascii_letters + string.digits
+_MAX_START_PARAMETER_LENGTH = 64
 
 
 class DomainError(RuntimeError):
@@ -118,6 +158,32 @@ def event_table_paths(event_id: str, name: str) -> tuple[str, str]:
         f"{directory}/master_table_{safe_name}.xlsx",
         f"{directory}/public_table_{safe_name}.xlsx",
     )
+
+
+def game_signup_token(name: str, game_date: date, *, random_suffix: str | None = None) -> str:
+    """Build a readable token that is valid as a Telegram start parameter."""
+
+    characters: list[str] = []
+    for character in name.strip():
+        replacement = _CYRILLIC_TRANSLITERATION.get(character.casefold())
+        if replacement is not None:
+            characters.append(replacement.capitalize() if character.isupper() else replacement)
+        elif character.isascii() and character.isalnum():
+            characters.append(character)
+        else:
+            characters.append("_")
+    transliterated = "".join(characters)
+    name_part = re.sub(r"_+", "_", transliterated).strip("_") or "game"
+    suffix = (
+        random_suffix
+        if random_suffix is not None
+        else "".join(secrets.choice(_START_PARAMETER_ALPHABET) for _ in range(3))
+    )
+    if len(suffix) != 3 or any(character not in _START_PARAMETER_ALPHABET for character in suffix):
+        raise ValueError("signup token suffix must contain three alphanumeric characters")
+    tail = f"_{game_date:%d_%m_%Y}_{suffix}"
+    name_part = name_part[: _MAX_START_PARAMETER_LENGTH - len(tail)].rstrip("_") or "game"
+    return f"{name_part}{tail}"
 
 
 class RegistrationCatalog:
@@ -726,6 +792,14 @@ class EventAdministrationService:
             raise ValueError(f"Количество игроков должно быть от 1 до {MAX_PLAYER_AMOUNT}")
         if not leaders:
             raise ValueError("У игры должен быть хотя бы один мастер")
+        signup_token: str | None = None
+        for _ in range(20):
+            candidate = game_signup_token(clean_name, game_date)
+            if await self.events.get_by_signup_token(candidate) is None:
+                signup_token = candidate
+                break
+        if signup_token is None:
+            raise RuntimeError("Не удалось создать уникальный токен регистрации")
         event_id = str(uuid4())
         master_path, public_path = event_table_paths(event_id, clean_name)
         pass_path = f"disk:/larp-bot/passes/{event_id}.xlsx"
@@ -758,6 +832,7 @@ class EventAdministrationService:
                 pass_table_resource_path=pass_path,
                 pass_table_public_url=pass_url,
                 registration_open_at=registration_open_at,
+                signup_token=signup_token,
             )
             await self.events.create(event, leaders)
         except Exception:

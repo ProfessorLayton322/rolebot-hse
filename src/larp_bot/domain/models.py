@@ -363,6 +363,9 @@ class Event(StrictModel):
     # Null means immediate publication. A future timestamp hides registration
     # from players until that instant while leaving it manageable by masters.
     registration_open_at: datetime | None = None
+    # Legacy games predate deep-link signup tokens. Every newly created game
+    # receives one whose alphabet and length fit Telegram start parameters.
+    signup_token: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
@@ -638,6 +641,7 @@ class InboundMessage(StrictModel):
     chat_id: int | None = None
     peer_id: int | None = None
     telegram_username: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_]{5,32}$")
+    start_parameter: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 EnlistPayloadT = Annotated[EnlistPayload, Field()]

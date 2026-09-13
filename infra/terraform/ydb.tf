@@ -128,6 +128,12 @@ resource "yandex_ydb_table" "events" {
     name = "player_amount"
     type = "Uint64"
   }
+  # Nullable for games created before deep-link registration. New application
+  # versions always populate a Telegram-safe, human-readable signup token.
+  column {
+    name = "signup_token"
+    type = "Utf8"
+  }
   column {
     name     = "disk_resource_path"
     type     = "Utf8"

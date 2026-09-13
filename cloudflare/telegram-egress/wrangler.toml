@@ -6,6 +6,7 @@ workers_dev = true
 [secrets]
 required = [
   "TG_BOT_TOKEN",
+  "TG_BOT_USERNAME",
   "YANDEX_TO_CF_EGRESS_HMAC_SECRET",
   "YANDEX_DISK_TOKEN",
   "GOOGLE_SERVICE_ACCOUNT_JSON",

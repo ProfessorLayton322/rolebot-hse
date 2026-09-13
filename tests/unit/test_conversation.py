@@ -85,6 +85,7 @@ from larp_bot.application.services import (
     EventAdministrationService,
     RegistrationCatalog,
     RegistrationService,
+    game_signup_token,
 )
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -198,11 +199,129 @@ async def engine_setup(
             tg_ids=({1} if admin else set()) | (tg_admin_ids or set()),
             vk_ids=vk_admin_ids,
             tg_gamemaster_ids={1} if gamemaster else set(),
+            secrets={"TG_BOT_USERNAME": "rolebot_test_bot", "VK_GROUP_ID": "42"},
         ),
         transport=transport,
         vk_user_ids=MemoryVkUserIdResolver(vk_profile_ids),
     )
     return conversation, users, publisher, tables
+
+
+def test_game_signup_token_transliterates_words_date_and_random_suffix() -> None:
+    token = game_signup_token("Ёжик в тумане!", date(2026, 11, 14), random_suffix="A7z")
+
+    assert token == "Yozhik_v_tumane_14_11_2026_A7z"
+
+
+def test_game_signup_token_stays_within_telegram_start_limit() -> None:
+    token = game_signup_token("Щ" * 200, date(2026, 11, 14), random_suffix="123")
+
+    assert len(token) == 64
+    assert token.endswith("_14_11_2026_123")
+    assert token.replace("_", "").isalnum()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start_message", ["/start {token}", "/start={token}"])
+async def test_game_deep_link_starts_signup_for_complete_profile(
+    start_message: str,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    signup_token = "Lesnoi_predel_14_11_2026_A7z"
+    linked_event = event.model_copy(update={"signup_token": signup_token})
+    engine, users, _, _ = await engine_setup(disk_store, linked_event)
+
+    response = await engine.handle(inbound(1, start_message.format(token=signup_token)))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert "Есть ли игроки" in response.text
+    assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
+    assert saved.dialog_context["event_id"] == event.event_id
+
+
+@pytest.mark.asyncio
+async def test_vk_game_deep_link_starts_the_same_signup_dialogue(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    signup_token = "Lesnoi_predel_14_11_2026_A7z"
+    linked_event = event.model_copy(update={"signup_token": signup_token})
+    engine, users, _, _ = await engine_setup(disk_store, linked_event)
+    await users.save(
+        VkUser(
+            vk_id=7,
+            full_name="Иван Иванов",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=False,
+        )
+    )
+
+    response = await engine.handle(
+        InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id="vk-start-1",
+            peer_id=7,
+            start_parameter=signup_token,
+        )
+    )
+    saved = await users.get(Platform.VK, 7)
+
+    assert "Есть ли игроки" in response.text
+    assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
+    assert saved.dialog_context["event_id"] == event.event_id
+
+
+@pytest.mark.asyncio
+async def test_unknown_or_incomplete_profile_deep_link_behaves_like_normal_start(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    signup_token = "Lesnoi_predel_14_11_2026_A7z"
+    linked_event = event.model_copy(update={"signup_token": signup_token})
+    engine, users, _, _ = await engine_setup(disk_store, linked_event)
+    await users.save(TelegramUser(tg_id=2))
+
+    unknown = await engine.handle(inbound(1, "/start missing_token", user_id=1))
+    incomplete = await engine.handle(inbound(2, f"/start {signup_token}", user_id=2))
+
+    assert unknown.text.startswith("Привет!")
+    assert incomplete.text.startswith("Привет!")
+    assert [button.value for button in incomplete.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_game_deep_link_reports_not_open_and_returns_to_main_menu(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    signup_token = "Budushchaya_igra_31_12_2040_X9q"
+    linked_event = event.model_copy(
+        update={
+            "name": "Будущая игра",
+            "game_date": date(2041, 1, 10),
+            "signup_token": signup_token,
+            "registration_open_at": datetime(2040, 12, 31, 15, tzinfo=UTC),
+        }
+    )
+    engine, users, _, _ = await engine_setup(disk_store, linked_event)
+
+    response = await engine.handle(inbound(1, f"/start {signup_token}"))
+    saved = await users.get(Platform.TELEGRAM, 1)
+
+    assert response.text == (
+        "Регистрация на игру «Будущая игра» (10.01.41) ещё не открыта. Она откроется 31.12.40 18:00 (МСК)."
+    )
+    assert [button.value for button in response.buttons] == [
+        PROFILE,
+        ENLIST,
+        CONFIRM,
+        GAME_WISHES,
+        CANCEL,
+        MY_GAMES,
+    ]
+    assert saved is not None and saved.dialog_state == "IDLE"
 
 
 @pytest.mark.asyncio
@@ -2314,6 +2433,9 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert created.game_date == date(2026, 11, 14)
     assert created.player_amount == 24
     assert created.registration_open_at is None
+    assert created.signup_token is not None
+    assert created.signup_token.startswith("Bal_v_zimnem_dvortse_14_11_2026_")
+    assert len(created.signup_token.rsplit("_", 1)[1]) == 3
     assert created.public_table_resource_path is not None
     assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
     assert created.pass_table_resource_path == f"disk:/larp-bot/passes/{created.event_id}.xlsx"
@@ -2334,6 +2456,8 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert "Публичная таблица (без контактов Telegram и VK)" in response.text
     assert "Административная таблица" in response.text
     assert "Таблица пропусков" in response.text
+    assert f"https://t.me/rolebot_test_bot?start={created.signup_token}" in response.text
+    assert f"https://vk.com/write-42?start={created.signup_token}&ref={created.signup_token}" in response.text
     assert response.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{created.event_id}")]
     assert await engine.events.list_leaders(created.event_id) == [
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)

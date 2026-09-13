@@ -462,7 +462,7 @@ class YdbUserRepository:
 
 class YdbEventRepository:
     COLUMNS = """
-        event_id, name, game_date, player_amount, disk_resource_path, public_registration_url,
+        event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
         public_table_resource_path, public_table_public_url,
         status, registration_open_at, confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
@@ -491,6 +491,7 @@ class YdbEventRepository:
             name=row["name"],
             game_date=_date(row["game_date"]) if row.get("game_date") is not None else None,
             player_amount=row.get("player_amount") or DEFAULT_PLAYER_AMOUNT,
+            signup_token=row.get("signup_token"),
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
             public_table_resource_path=row.get("public_table_resource_path"),
@@ -543,6 +544,21 @@ class YdbEventRepository:
         )
         return None if not rows else self._from_row(rows[0])
 
+    async def get_by_signup_token(self, signup_token: str) -> Event | None:
+        rows = await self.db.query(
+            f"""
+            DECLARE $signup_token AS Utf8;
+            SELECT {self.COLUMNS}
+            FROM `events` WHERE signup_token = $signup_token
+            LIMIT 2;
+            """,
+            {"$signup_token": signup_token},
+            read_only=True,
+        )
+        if len(rows) > 1:
+            raise RuntimeError("duplicate game signup token")
+        return None if not rows else self._from_row(rows[0])
+
     async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None:
         unique_leaders = sorted(
             {(leader.platform, leader.platform_user_id) for leader in leaders},
@@ -573,7 +589,7 @@ class YdbEventRepository:
         await self.db.query(
             f"""
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8; DECLARE $game_date AS Optional<Date>;
-            DECLARE $player_amount AS Uint64;
+            DECLARE $player_amount AS Uint64; DECLARE $signup_token AS Optional<Utf8>;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
@@ -598,7 +614,7 @@ class YdbEventRepository:
             DECLARE $updated_at AS Timestamp;
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
-                event_id, name, game_date, player_amount, disk_resource_path, public_registration_url,
+                event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
                 public_table_resource_path, public_table_public_url,
                 status, registration_open_at, confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
@@ -612,7 +628,7 @@ class YdbEventRepository:
                 archived_at,
                 created_at, updated_at
             ) VALUES (
-                $event_id, $name, $game_date, $player_amount, $disk_resource_path, $public_url,
+                $event_id, $name, $game_date, $player_amount, $signup_token, $disk_resource_path, $public_url,
                 $public_table_resource_path, $public_table_public_url,
                 $status, $registration_open_at, $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
@@ -633,6 +649,7 @@ class YdbEventRepository:
                 "$name": event.name,
                 "$game_date": event.game_date,
                 "$player_amount": event.player_amount,
+                "$signup_token": event.signup_token,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
                 "$public_table_resource_path": event.public_table_resource_path,

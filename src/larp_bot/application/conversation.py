@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, date, datetime
 from secrets import token_urlsafe
 from uuid import NAMESPACE_URL, uuid5
@@ -311,6 +312,21 @@ def is_profile_complete(user: User) -> bool:
     return user.profile_complete
 
 
+def _start_command(value: str, message: InboundMessage) -> tuple[bool, str | None]:
+    if message.start_parameter is not None:
+        return True, message.start_parameter
+    if message.identity.platform is Platform.VK:
+        match = re.fullmatch(r"(?:Начать|/start)(?:[ =](\S+))?", value)
+    else:
+        match = re.fullmatch(r"/start(?:@[A-Za-z0-9_]{5,32})?(?:[ =](\S+))?", value)
+    if match is None:
+        return False, None
+    parameter = match.group(1)
+    if parameter is None or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", parameter) is None:
+        return True, None
+    return True, parameter
+
+
 def _bool_text(value: bool | None) -> str:
     return "Да" if value else "Нет"
 
@@ -607,6 +623,7 @@ class ConversationEngine:
         if isinstance(user, TelegramUser):
             user.telegram_handle = normalize_telegram_handle(message.telegram_username)
         value = (message.callback or message.text).strip()
+        is_start, start_parameter = _start_command(value, message)
         admin_branch = (
             user.dialog_state.startswith("ADMIN_")
             or value in {ADMIN, ADMIN_MENU}
@@ -617,9 +634,13 @@ class ConversationEngine:
             )
         )
         current_button_values = {button.value for button in user.last_bot_buttons}
-        if value == "/start" or (platform is Platform.VK and value == "Начать"):
+        if is_start:
             await self._clear(user)
-            response = await self._main(user, WELCOME_TEXT)
+            response = (
+                await self._start_game_signup(user, message, start_parameter)
+                if start_parameter is not None and is_profile_complete(user)
+                else await self._main(user, WELCOME_TEXT)
+            )
         elif message.has_unsupported_content:
             await self._save(user, message)
             return BotResponse(
@@ -675,6 +696,26 @@ class ConversationEngine:
         user.last_bot_buttons = response.buttons.copy()
         await self._save(user, message)
         return response
+
+    async def _start_game_signup(
+        self,
+        user: User,
+        message: InboundMessage,
+        signup_token: str,
+    ) -> BotResponse:
+        event = await self.events.get_by_signup_token(signup_token)
+        if event is None:
+            return await self._main(user, WELCOME_TEXT)
+        if not event.registration_is_open():
+            assert event.registration_open_at is not None
+            return await self._main(
+                user,
+                (
+                    f"Регистрация на игру {event_reference(event.name, event.game_date)} ещё не открыта. "
+                    f"Она откроется {format_confirmation_deadline(event.registration_open_at)} (МСК)."
+                ),
+            )
+        return await self._select_event(user, message, f"select:enlist:{event.event_id}")
 
     async def _start(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if value == PROFILE:
@@ -2476,7 +2517,7 @@ class ConversationEngine:
         )
         if master_identity == self._identity(user):
             await self._clear(user)
-            return self._game_created_response(event, game_date)
+            return await self._game_created_response(event, game_date)
         # Persist the game before notifying, so a retried update finishes it instead of creating another.
         context["created_event_id"] = event.event_id
         context["master_platform"] = master_identity.platform.value
@@ -2510,10 +2551,29 @@ class ConversationEngine:
             )
         game_date = date.fromisoformat(str(context["game_date"]))
         await self._clear(user)
-        return self._game_created_response(event, game_date, master_label=self._person_label(identity, master))
+        return await self._game_created_response(event, game_date, master_label=self._person_label(identity, master))
 
-    @staticmethod
-    def _game_created_response(event: Event, game_date: date, *, master_label: str | None = None) -> BotResponse:
+    async def _game_created_response(
+        self,
+        event: Event,
+        game_date: date,
+        *,
+        master_label: str | None = None,
+    ) -> BotResponse:
+        if event.signup_token is None:
+            raise RuntimeError("new game has no signup token")
+        telegram_username, vk_group_id = await asyncio.gather(
+            self.admins.get_secret("TG_BOT_USERNAME"),
+            self.admins.get_secret("VK_GROUP_ID"),
+        )
+        if re.fullmatch(r"[A-Za-z0-9_]{5,32}", telegram_username) is None:
+            raise RuntimeError("TG_BOT_USERNAME is invalid")
+        if not vk_group_id.isdecimal() or int(vk_group_id) <= 0:
+            raise RuntimeError("VK_GROUP_ID is invalid")
+        telegram_start = f"https://t.me/{telegram_username}?start={event.signup_token}"
+        # VK delivers ``ref`` in message_new callbacks. Retaining the matching
+        # ``start`` query parameter keeps the shared public link self-describing.
+        vk_start = f"https://vk.com/write-{vk_group_id}?start={event.signup_token}&ref={event.signup_token}"
         master_line = "" if master_label is None else f"Мастер: {master_label}\n\n"
         if event.registration_open_at is None:
             registration_line = (
@@ -2532,6 +2592,8 @@ class ConversationEngine:
                 f"Количество игроков: {event.player_amount}\n\n"
                 f"{master_line}"
                 f"{registration_line}\n\n"
+                f"Telegram — начать запись:\n{telegram_start}\n\n"
+                f"VK — начать запись:\n{vk_start}\n\n"
                 f"{event_table_links(event)}"
             ),
             buttons=[game_management_button(event.event_id)],
