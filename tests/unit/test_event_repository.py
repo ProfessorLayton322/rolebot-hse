@@ -111,6 +111,19 @@ def test_persisted_signup_token_is_loaded() -> None:
     assert event.signup_token == "Game_14_11_2026_A7z"
 
 
+def test_persisted_announcement_post_links_are_loaded() -> None:
+    event = YdbEventRepository._from_row(
+        event_row("CREATED")
+        | {
+            "telegram_post_url": "https://t.me/rolebot_news/42",
+            "vk_post_url": "https://vk.com/wall-123_456",
+        }
+    )
+
+    assert event.telegram_post_url == "https://t.me/rolebot_news/42"
+    assert event.vk_post_url == "https://vk.com/wall-123_456"
+
+
 def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
     row = event_row("CONFIRMATION_OPEN") | {
         "confirmed_notifications_json": json.dumps(
@@ -205,6 +218,38 @@ async def test_event_creation_persists_signup_token() -> None:
 
     assert "signup_token" in executor.query_text
     assert executor.params["$signup_token"] == "Game_14_11_2026_A7z"
+
+
+@pytest.mark.asyncio
+async def test_event_creation_persists_nullable_announcement_post_links() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    event = YdbEventRepository._from_row(event_row("CREATED"))
+
+    await repository.create(event)
+
+    assert "telegram_post_url" in executor.query_text
+    assert "vk_post_url" in executor.query_text
+    assert executor.params["$telegram_post_url"] is None
+    assert executor.params["$vk_post_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_event_announcement_post_links_can_be_updated_together() -> None:
+    executor = RecordingExecutor([event_row("CREATED")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    changed = await repository.set_post_links(
+        "event-a1",
+        "https://t.me/rolebot_news/42",
+        "https://vk.com/wall-123_456",
+    )
+
+    assert changed
+    assert "SET telegram_post_url = $telegram_post_url" in executor.query_text
+    assert "vk_post_url = $vk_post_url" in executor.query_text
+    assert executor.params["$telegram_post_url"] == "https://t.me/rolebot_news/42"
+    assert executor.params["$vk_post_url"] == "https://vk.com/wall-123_456"
 
 
 @pytest.mark.asyncio

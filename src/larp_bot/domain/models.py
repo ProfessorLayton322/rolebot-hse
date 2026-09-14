@@ -4,6 +4,7 @@ import re
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, field_validator, model_validator
 
@@ -250,12 +251,12 @@ def normalize_telegram_handle(value: str | None) -> str | None:
 
 _TELEGRAM_PROFILE_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
 _VK_TELEGRAM_MENTION_RE = re.compile(r"^\[id[1-9][0-9]*\|(?P<handle>@[A-Za-z0-9_]{5,32})\]$")
+_TELEGRAM_POST_PATH_RE = re.compile(r"^/(?:s/)?(?:[A-Za-z][A-Za-z0-9_]{3,31}/[1-9][0-9]*|c/[1-9][0-9]*/[1-9][0-9]*)/?$")
+_VK_POST_PATH_RE = re.compile(r"^/wall-?[1-9][0-9]*_[1-9][0-9]*/?$")
 
 
 def normalize_telegram_profile(value: str) -> str:
     """Normalize an admin-supplied Telegram @handle or public profile URL."""
-
-    from urllib.parse import urlsplit
 
     candidate = value.strip()
     vk_mention = _VK_TELEGRAM_MENTION_RE.fullmatch(candidate)
@@ -288,6 +289,57 @@ def normalize_telegram_profile(value: str) -> str:
     if handle is None:
         raise ValueError("Некорректная ссылка на профиль Telegram")
     return handle
+
+
+def _post_url(value: str, *, hosts: set[str], path_pattern: re.Pattern[str], error: str) -> str:
+    candidate = value.strip()
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        raise ValueError(error) from None
+    if (
+        parsed.scheme != "https"
+        or hostname not in hosts
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or path_pattern.fullmatch(parsed.path) is None
+    ):
+        raise ValueError(error)
+    return f"https://{hostname.removeprefix('www.')}{parsed.path.rstrip('/')}"
+
+
+def normalize_telegram_post_url(value: str) -> str:
+    """Normalize a link to an individual Telegram channel post."""
+
+    return _post_url(
+        value,
+        hosts=_TELEGRAM_PROFILE_HOSTS,
+        path_pattern=_TELEGRAM_POST_PATH_RE,
+        error="Нужна HTTPS-ссылка на пост в Telegram",
+    )
+
+
+def normalize_vk_post_url(value: str) -> str:
+    """Normalize a link to an individual VK wall post."""
+
+    return (
+        _post_url(
+            value,
+            hosts=_VK_HOSTS,
+            path_pattern=_VK_POST_PATH_RE,
+            error="Нужна HTTPS-ссылка на пост во VK",
+        )
+        .replace("https://vk.ru/", "https://vk.com/")
+        .replace("https://m.vk.com/", "https://vk.com/")
+        .replace("https://m.vk.ru/", "https://vk.com/")
+    )
 
 
 class UserBase(StrictModel):
@@ -382,6 +434,10 @@ class Event(StrictModel):
     # Legacy games predate deep-link signup tokens. Every newly created game
     # receives one whose alphabet and length fit Telegram start parameters.
     signup_token: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    # Announcement posts are added after game creation and remain nullable for
+    # legacy games and newly created games whose announcements are not ready.
+    telegram_post_url: str | None = Field(default=None, max_length=2048)
+    vk_post_url: str | None = Field(default=None, max_length=2048)
     confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
@@ -416,6 +472,16 @@ class Event(StrictModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("registration opening notification completion must include a timezone")
         return value
+
+    @field_validator("telegram_post_url")
+    @classmethod
+    def validate_telegram_post_url(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_telegram_post_url(value)
+
+    @field_validator("vk_post_url")
+    @classmethod
+    def validate_vk_post_url(cls, value: str | None) -> str | None:
+        return None if value is None else normalize_vk_post_url(value)
 
     @model_validator(mode="after")
     def table_fields_are_atomic(self) -> Event:

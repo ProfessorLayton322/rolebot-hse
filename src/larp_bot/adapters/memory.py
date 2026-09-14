@@ -188,6 +188,16 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 
+    async def set_post_links(self, event_id: str, telegram_post_url: str, vk_post_url: str) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        changed = event.telegram_post_url != telegram_post_url or event.vk_post_url != vk_post_url
+        event.telegram_post_url = telegram_post_url
+        event.vk_post_url = vk_post_url
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return changed
+
     async def open_confirmation(self, event_id: str, deadline: datetime) -> bool:
         event = self.rows.get(event_id)
         if event is None:

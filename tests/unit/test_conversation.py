@@ -19,6 +19,7 @@ from larp_bot.adapters.memory import (
 from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADD_EVENT_LEADER,
+    ADD_POST_LINKS,
     ADD_SELF_EVENT_LEADER,
     ADMIN,
     ADMIN_MENU,
@@ -75,6 +76,7 @@ from larp_bot.application.conversation import (
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_LINK,
     SEND_CONFIRMED_NOTIFICATION,
+    STATS_ADD_GAME,
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
     STATUS_REGISTRATION,
@@ -112,6 +114,7 @@ from larp_bot.domain.models import (
     Registration,
     TelegramUser,
     VkUser,
+    event_name_with_date,
 )
 from tests.conftest import MemoryDiskStore
 
@@ -300,7 +303,8 @@ async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
     assert started.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
     assert pending is not None and pending.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert pending.dialog_context["signup_event_id"] == event.event_id
-    assert completed.text.startswith("✅ Профиль успешно заполнен.\n\nЕсть ли игроки")
+    assert completed.text.startswith("✅ Профиль успешно заполнен.\n\nИгра: «Лесной предел»")
+    assert "\n\nЕсть ли игроки" in completed.text
     assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
     assert saved.dialog_context["event_id"] == event.event_id
 
@@ -513,6 +517,9 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     await engine.handle(inbound(1, ENLIST))
     prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
     assert prompt.text == (
+        f"Игра: «{event.name}»\n"
+        "Дата: не указана\n"
+        "Пост об игре: ссылка пока не добавлена\n\n"
         "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
         "Укажите каждого как «Фамилия Имя», через запятую. "
         "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
@@ -530,6 +537,56 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     assert response.deferred
     assert isinstance(publisher.commands[-1].payload, EnlistPayload)
     assert publisher.commands[-1].payload.wish_play == "Без пожеланий"
+
+
+@pytest.mark.asyncio
+async def test_signup_prompt_uses_the_current_bots_announcement_link_and_dated_game_button(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    linked_event = event.model_copy(
+        update={
+            "game_date": date(2026, 11, 14),
+            "telegram_post_url": "https://t.me/rolebot_news/42",
+            "vk_post_url": "https://vk.com/wall-123_456",
+        }
+    )
+    engine, users, _, _ = await engine_setup(disk_store, linked_event)
+
+    telegram_games = await engine.handle(inbound(1, ENLIST))
+    telegram_button = next(
+        button for button in telegram_games.buttons if button.value == f"select:enlist:{event.event_id}"
+    )
+    telegram_prompt = await engine.handle(inbound(2, telegram_button.value, callback=True))
+
+    assert telegram_button.label == "Лесной предел (14.11.26)"
+    assert telegram_prompt.text.startswith(
+        "Игра: «Лесной предел»\nДата: 14.11.26\nПост об игре: https://t.me/rolebot_news/42\n\nЕсть ли игроки"
+    )
+    assert "https://vk.com/wall-123_456" not in telegram_prompt.text
+
+    await users.save(
+        VkUser(
+            vk_id=7,
+            full_name="Иван Иванов",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=False,
+        )
+    )
+    vk_prompt = await engine.handle(
+        InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id="vk-signup-link",
+            callback=f"select:enlist:{event.event_id}",
+            peer_id=7,
+        )
+    )
+
+    assert vk_prompt.text.startswith(
+        "Игра: «Лесной предел»\nДата: 14.11.26\nПост об игре: https://vk.com/wall-123_456\n\nЕсть ли игроки"
+    )
+    assert "https://t.me/rolebot_news/42" not in vk_prompt.text
 
 
 @pytest.mark.asyncio
@@ -718,6 +775,9 @@ async def test_signup_wish_prompt_warns_about_another_registration_on_the_same_d
     prompt = await engine.handle(inbound(1, f"select:enlist:{event.event_id}", callback=True))
 
     assert prompt.text.startswith(
+        f"Игра: «{event.name}»\n"
+        "Дата: 14.11.26\n"
+        "Пост об игре: ссылка пока не добавлена\n\n"
         "Важно: вы уже записаны на другую игру, которая проводится 14.11.26. "
         "Вы сможете подтвердить своё участие только в одной игре, когда решите, "
         "в какую именно хотите играть.\n\nЕсть ли игроки"
@@ -972,7 +1032,11 @@ async def test_confirmation_picker_filters_games_before_paginating(disk_store: M
     game_buttons = [button for button in response.buttons if button.value.startswith("select:confirm:")]
 
     assert response.text == "✅ Выберите игру, участие в которой хотите подтвердить:"
-    assert [button.label for button in game_buttons] == ["Eligible 0", "Eligible 1", "Eligible 2"]
+    assert [button.label for button in game_buttons] == [
+        "Eligible 0 (14.11.26)",
+        "Eligible 1 (14.11.26)",
+        "Eligible 2 (14.11.26)",
+    ]
     assert PAGE_FORWARD not in {button.label for button in response.buttons}
     assert "Already confirmed" not in {button.label for button in response.buttons}
 
@@ -2539,6 +2603,8 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert created.signup_token is not None
     assert created.signup_token.startswith("Bal_v_zimnem_dvortse_14_11_2026_")
     assert len(created.signup_token.rsplit("_", 1)[1]) == 3
+    assert created.telegram_post_url is None
+    assert created.vk_post_url is None
     assert created.public_table_resource_path is not None
     assert created.public_table_resource_path.endswith("/public_table_Бал в зимнем дворце.xlsx")
     assert created.pass_table_resource_path == f"disk:/larp-bot/passes/{created.event_id}.xlsx"
@@ -3209,6 +3275,25 @@ async def test_admin_game_buttons_are_newest_first_and_paginated(disk_store: Mem
 
 
 @pytest.mark.asyncio
+async def test_management_and_statistics_game_buttons_include_the_game_date(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.game_date = date(2026, 11, 14)
+    engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
+
+    management = await engine.handle(inbound(1, MANAGE_GAMES))
+    statistics = await engine.handle(inbound(2, STATS_ADD_GAME, callback=True))
+
+    assert next(button.label for button in management.buttons if button.value.startswith("ag:manage:")) == (
+        "Лесной предел (14.11.26)"
+    )
+    assert next(button.label for button in statistics.buttons if button.value.startswith("stats:game:")) == (
+        "Лесной предел (14.11.26)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_admin_can_unarchive_game_from_archive_menu(disk_store: MemoryDiskStore, event: Event) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     closed = Event(
@@ -3299,6 +3384,46 @@ async def test_gamemaster_cannot_list_or_open_archived_games(disk_store: MemoryD
     assert event.name not in forged_action.text
     assert forged_unarchive.text == "Игра не найдена."
     assert event.name not in forged_unarchive.text
+
+
+@pytest.mark.asyncio
+async def test_game_master_adds_telegram_then_vk_announcement_post_links(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.game_date = date(2026, 11, 14)
+    engine, users, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    links_button = next(button for button in management.buttons if button.label == ADD_POST_LINKS)
+    telegram_prompt = await engine.handle(inbound(2, links_button.value, callback=True))
+    invalid_telegram = await engine.handle(inbound(3, "https://example.com/post/42"))
+    vk_prompt = await engine.handle(inbound(4, "t.me/rolebot_news/42"))
+    invalid_vk = await engine.handle(inbound(5, "https://t.me/rolebot_news/42"))
+    saved_response = await engine.handle(inbound(6, "https://m.vk.ru/wall-123_456"))
+
+    saved_event = await engine.events.get(event.event_id)
+    saved_user = await users.get(Platform.TELEGRAM, 1)
+    assert "Пост в Telegram: не добавлен" in management.text
+    assert "Пост во VK: не добавлен" in management.text
+    assert links_button.value == f"ag:post-links:{event.event_id}"
+    assert telegram_prompt.text == "Отправьте ссылку на пост об игре в Telegram:"
+    assert "HTTPS-ссылка на пост в Telegram" in invalid_telegram.text
+    assert vk_prompt.text == "Теперь отправьте ссылку на пост об игре во VK:"
+    assert "HTTPS-ссылка на пост во VK" in invalid_vk.text
+    assert saved_event is not None
+    assert saved_event.telegram_post_url == "https://t.me/rolebot_news/42"
+    assert saved_event.vk_post_url == "https://vk.com/wall-123_456"
+    assert saved_user is not None and saved_user.dialog_state == "IDLE"
+    assert saved_response.text == (
+        "✅ Ссылки на посты игры «Лесной предел» (14.11.26) сохранены.\n\n"
+        "Telegram: https://t.me/rolebot_news/42\n"
+        "VK: https://vk.com/wall-123_456"
+    )
 
 
 @pytest.mark.asyncio
@@ -3787,7 +3912,13 @@ async def test_my_games_lists_player_and_master_games_with_status_and_links(disk
 
     assert listing.text == "Выберите игру, чтобы посмотреть информацию о ней:"
     assert listing.buttons == [
-        *(Button(label=game.name, value=f"select:mine:{game.event_id}") for game in (confirmed, led, reserve, undated)),
+        *(
+            Button(
+                label=event_name_with_date(game.name, game.game_date),
+                value=f"select:mine:{game.event_id}",
+            )
+            for game in (confirmed, led, reserve, undated)
+        ),
         Button(label=MAIN_MENU_LABEL, value="Отмена"),
     ]
 
@@ -3855,9 +3986,9 @@ async def test_my_games_pages_hold_five_games(disk_store: MemoryDiskStore) -> No
     def game_labels(buttons: list[Button]) -> list[str]:
         return [button.label for button in buttons if button.value.startswith("select:mine:")]
 
-    assert game_labels(first.buttons) == [f"Game {index}" for index in range(PAGE_SIZE)]
+    assert game_labels(first.buttons) == [f"Game {index} ({index + 1:02d}.10.26)" for index in range(PAGE_SIZE)]
     assert PAGE_BACK not in {button.label for button in first.buttons}
-    assert game_labels(second.buttons) == [f"Game {PAGE_SIZE}"]
+    assert game_labels(second.buttons) == [f"Game {PAGE_SIZE} ({PAGE_SIZE + 1:02d}.10.26)"]
     assert PAGE_FORWARD not in {button.label for button in second.buttons}
     assert game_labels(returned.buttons) == game_labels(first.buttons)
 
