@@ -2626,7 +2626,8 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert "Административная таблица" in response.text
     assert "Таблица пропусков" in response.text
     assert f"https://t.me/rolebot_test_bot?start={created.signup_token}" in response.text
-    assert f"https://vk.com/write-42?start={created.signup_token}&ref={created.signup_token}" in response.text
+    assert f"https://vk.me/club42?ref={created.signup_token}" in response.text
+    assert "https://vk.com/write-" not in response.text
     assert response.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{created.event_id}")]
     assert await engine.events.list_leaders(created.event_id) == [
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1)

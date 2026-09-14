@@ -2650,9 +2650,9 @@ class ConversationEngine:
         if not vk_group_id.isdecimal() or int(vk_group_id) <= 0:
             raise RuntimeError("VK_GROUP_ID is invalid")
         telegram_start = f"https://t.me/{telegram_username}?start={event.signup_token}"
-        # VK delivers ``ref`` in message_new callbacks. Retaining the matching
-        # ``start`` query parameter keeps the shared public link self-describing.
-        vk_start = f"https://vk.com/write-{vk_group_id}?start={event.signup_token}&ref={event.signup_token}"
+        # VK deep links use ``ref`` rather than Telegram's ``start`` query key.
+        # VK delivers that value as ``message.ref`` in message_new callbacks.
+        vk_start = f"https://vk.me/club{vk_group_id}?ref={event.signup_token}"
         master_line = "" if master_label is None else f"Мастер: {master_label}\n\n"
         if event.registration_open_at is None:
             registration_line = (
