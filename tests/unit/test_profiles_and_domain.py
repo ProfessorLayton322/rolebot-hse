@@ -16,7 +16,9 @@ from larp_bot.domain.models import (
     VkUser,
     event_reference,
     format_game_date,
+    normalize_telegram_post_url,
     normalize_telegram_profile,
+    normalize_vk_post_url,
     parse_full_name,
     parse_game_date,
     surname_and_name,
@@ -168,6 +170,42 @@ def test_game_date_uses_strict_two_digit_russian_format() -> None:
     for invalid in ("14.11.2026", "1.11.26", "31.02.26"):
         with pytest.raises(ValueError):
             parse_game_date(invalid)
+
+
+def test_game_announcement_post_links_are_platform_specific_and_normalized() -> None:
+    event = Event(
+        event_id="event-a1",
+        name="Game",
+        disk_resource_path="disk:/larp-bot/events/event-a1-game.xlsx",
+        public_registration_url="https://disk.example/game",
+        telegram_post_url="t.me/rolebot_news/42",
+        vk_post_url="https://m.vk.ru/wall-123_456",
+    )
+
+    assert event.telegram_post_url == "https://t.me/rolebot_news/42"
+    assert event.vk_post_url == "https://vk.com/wall-123_456"
+    assert normalize_telegram_post_url("telegram.me/rolebot_news/42") == "https://telegram.me/rolebot_news/42"
+    assert normalize_vk_post_url("vk.com/wall123_456") == "https://vk.com/wall123_456"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("telegram_post_url", "https://example.com/rolebot_news/42"),
+        ("telegram_post_url", "https://t.me/rolebot_news"),
+        ("vk_post_url", "https://example.com/wall-123_456"),
+        ("vk_post_url", "https://vk.com/id123"),
+    ],
+)
+def test_game_announcement_fields_reject_non_post_links(field: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        Event(
+            event_id="event-a1",
+            name="Game",
+            disk_resource_path="disk:/larp-bot/events/event-a1-game.xlsx",
+            public_registration_url="https://disk.example/game",
+            **{field: value},
+        )
 
 
 @pytest.mark.parametrize("value", [0, 10_001])

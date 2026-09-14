@@ -466,6 +466,7 @@ class YdbUserRepository:
 class YdbEventRepository:
     COLUMNS = """
         event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
+        telegram_post_url, vk_post_url,
         public_table_resource_path, public_table_public_url,
         status, registration_open_at, registration_open_notified_recipients_json,
         registration_open_notification_completed_at,
@@ -497,6 +498,8 @@ class YdbEventRepository:
             game_date=_date(row["game_date"]) if row.get("game_date") is not None else None,
             player_amount=row.get("player_amount") or DEFAULT_PLAYER_AMOUNT,
             signup_token=row.get("signup_token"),
+            telegram_post_url=row.get("telegram_post_url"),
+            vk_post_url=row.get("vk_post_url"),
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
             public_table_resource_path=row.get("public_table_resource_path"),
@@ -604,6 +607,7 @@ class YdbEventRepository:
             f"""
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8; DECLARE $game_date AS Optional<Date>;
             DECLARE $player_amount AS Uint64; DECLARE $signup_token AS Optional<Utf8>;
+            DECLARE $telegram_post_url AS Optional<Utf8>; DECLARE $vk_post_url AS Optional<Utf8>;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
@@ -631,6 +635,7 @@ class YdbEventRepository:
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
                 event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
+                telegram_post_url, vk_post_url,
                 public_table_resource_path, public_table_public_url,
                 status, registration_open_at, registration_open_notified_recipients_json,
                 registration_open_notification_completed_at,
@@ -647,6 +652,7 @@ class YdbEventRepository:
                 created_at, updated_at
             ) VALUES (
                 $event_id, $name, $game_date, $player_amount, $signup_token, $disk_resource_path, $public_url,
+                $telegram_post_url, $vk_post_url,
                 $public_table_resource_path, $public_table_public_url,
                 $status, $registration_open_at, $registration_open_notified_recipients_json,
                 $registration_open_notification_completed_at,
@@ -670,6 +676,8 @@ class YdbEventRepository:
                 "$game_date": event.game_date,
                 "$player_amount": event.player_amount,
                 "$signup_token": event.signup_token,
+                "$telegram_post_url": event.telegram_post_url,
+                "$vk_post_url": event.vk_post_url,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
                 "$public_table_resource_path": event.public_table_resource_path,
@@ -891,6 +899,31 @@ class YdbEventRepository:
             {
                 "$event_id": event_id,
                 "$player_amount": player_amount,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def set_post_links(self, event_id: str, telegram_post_url: str, vk_post_url: str) -> bool:
+        event = await self.get(event_id)
+        if event is None:
+            return False
+        if event.telegram_post_url == telegram_post_url and event.vk_post_url == vk_post_url:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $telegram_post_url AS Utf8;
+            DECLARE $vk_post_url AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET telegram_post_url = $telegram_post_url,
+                vk_post_url = $vk_post_url,
+                updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$telegram_post_url": telegram_post_url,
+                "$vk_post_url": vk_post_url,
                 "$updated_at": datetime.now(UTC),
             },
         )

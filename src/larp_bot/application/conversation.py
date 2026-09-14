@@ -35,12 +35,15 @@ from larp_bot.domain.models import (
     TelegramUser,
     User,
     VkUser,
+    event_name_with_date,
     event_reference,
     format_game_date,
     normalize_mobile_phone,
     normalize_nickname,
     normalize_telegram_handle,
+    normalize_telegram_post_url,
     normalize_telegram_profile,
+    normalize_vk_post_url,
     normalize_vk_url,
     parse_full_name,
     parse_game_date,
@@ -106,6 +109,7 @@ SKIP = "Пропустить"
 NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 CHANGE_PLAYER_AMOUNT = "👥 Изменить количество игроков"
+ADD_POST_LINKS = "Добавить ссылки на посты"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 MANAGE_NOTIFICATIONS = "Уведомления"
 SEND_CONFIRMED_LINK = "Отправить подтвержденным ссылку на чат"
@@ -229,6 +233,8 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_SCHEDULE_CHOICE",
         "ADMIN_CREATE_SCHEDULE_TIME",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
+        "ADMIN_POST_LINK_TELEGRAM",
+        "ADMIN_POST_LINK_VK",
         "ADMIN_CONFIRMATION_DEADLINE",
         "ADMIN_NOTIFICATION_LINK_TEXT",
         "ADMIN_NOTIFICATION_MESSAGE_TEXT",
@@ -382,7 +388,16 @@ def _no_games_for_action_text(flow: str) -> str:
 
 
 def _event_buttons(events: list[Event], flow: str) -> list[Button]:
-    return [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event in events]
+    return [
+        Button(label=event_name_with_date(event.name, event.game_date), value=f"select:{flow}:{event.event_id}")
+        for event in events
+    ]
+
+
+def _signup_game_text(event: Event, platform: Platform) -> str:
+    game_date = format_game_date(event.game_date) if event.game_date is not None else "не указана"
+    post_url = event.telegram_post_url if platform is Platform.TELEGRAM else event.vk_post_url
+    return f"Игра: «{event.name}»\nДата: {game_date}\nПост об игре: {post_url or 'ссылка пока не добавлена'}"
 
 
 def _my_game_text(
@@ -1666,7 +1681,13 @@ class ConversationEngine:
             ]
         if flow == "wishes" and len(matches) == 1 and not page.has_previous and not page.has_next:
             return self._game_wishes_menu(matches[0][0])
-        buttons = [Button(label=event.name, value=f"select:{flow}:{event.event_id}") for event, _ in actionable_matches]
+        buttons = [
+            Button(
+                label=event_name_with_date(event.name, event.game_date),
+                value=f"select:{flow}:{event.event_id}",
+            )
+            for event, _ in actionable_matches
+        ]
         buttons.extend(
             _pagination_buttons(
                 previous=(
@@ -1748,10 +1769,12 @@ class ConversationEngine:
                 "same_day_warning_shown": bool(same_day_registrations),
             }
             user.dialog_state = "ENLIST_WISH_PLAY"
-            return co_player_wish_prompt(
+            response = co_player_wish_prompt(
                 skip_value="enlist:wish-play:skip",
                 same_day_warning_date=event.game_date if same_day_registrations else None,
             )
+            response.text = f"{_signup_game_text(event, platform)}\n\n{response.text}"
+            return response
         if flow in {
             "admin-status",
             "admin-archive",
@@ -2937,6 +2960,8 @@ class ConversationEngine:
         event_bound_states = {
             "ADMIN_STATUS_SELECT",
             "ADMIN_UPDATE_PLAYER_AMOUNT",
+            "ADMIN_POST_LINK_TELEGRAM",
+            "ADMIN_POST_LINK_VK",
             "ADMIN_CONFIRMATION_DEADLINE",
             "ADMIN_NOTIFICATION_LINK_TEXT",
             "ADMIN_NOTIFICATION_MESSAGE_TEXT",
@@ -3098,6 +3123,56 @@ class ConversationEngine:
                 buttons=[game_management_button(str(context["event_id"]))],
                 deferred=True,
                 command_enqueued=True,
+            )
+        if user.dialog_state == "ADMIN_POST_LINK_TELEGRAM":
+            event_id = str(user.dialog_context["event_id"])
+            if message.callback is not None:
+                return BotResponse(
+                    text="Отправьте ссылку на пост об игре в Telegram обычным текстовым сообщением:",
+                    buttons=[game_management_button(event_id)],
+                )
+            try:
+                telegram_post_url = normalize_telegram_post_url(value)
+            except ValueError as exc:
+                return BotResponse(
+                    text=f"❌ {exc}. Попробуйте ещё раз:",
+                    buttons=[game_management_button(event_id)],
+                )
+            user.dialog_context["telegram_post_url"] = telegram_post_url
+            user.dialog_state = "ADMIN_POST_LINK_VK"
+            return BotResponse(
+                text="Теперь отправьте ссылку на пост об игре во VK:",
+                buttons=[game_management_button(event_id)],
+            )
+        if user.dialog_state == "ADMIN_POST_LINK_VK":
+            event_id = str(user.dialog_context["event_id"])
+            if message.callback is not None:
+                return BotResponse(
+                    text="Отправьте ссылку на пост об игре во VK обычным текстовым сообщением:",
+                    buttons=[game_management_button(event_id)],
+                )
+            try:
+                vk_post_url = normalize_vk_post_url(value)
+            except ValueError as exc:
+                return BotResponse(
+                    text=f"❌ {exc}. Попробуйте ещё раз:",
+                    buttons=[game_management_button(event_id)],
+                )
+            telegram_post_url = str(user.dialog_context["telegram_post_url"])
+            await self.events.set_post_links(event_id, telegram_post_url, vk_post_url)
+            event = await self.events.get(event_id)
+            await self._clear(user)
+            if event is None:
+                return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+            if event.telegram_post_url != telegram_post_url or event.vk_post_url != vk_post_url:
+                raise RuntimeError("game post links were not persisted")
+            return BotResponse(
+                text=(
+                    f"✅ Ссылки на посты игры {event_reference(event.name, event.game_date)} сохранены.\n\n"
+                    f"Telegram: {telegram_post_url}\n"
+                    f"VK: {vk_post_url}"
+                ),
+                buttons=[game_management_button(event_id)],
             )
         if user.dialog_state == "ADMIN_STATUS_SELECT":
             choice = ADMIN_STATUS_CHOICES.get(value)
@@ -3961,7 +4036,13 @@ class ConversationEngine:
                 limit=1,
             ),
         )
-        buttons = [Button(label=event.name, value=f"stats:game:{event.event_id}") for event in events]
+        buttons = [
+            Button(
+                label=event_name_with_date(event.name, event.game_date),
+                value=f"stats:game:{event.event_id}",
+            )
+            for event in events
+        ]
         buttons.extend(
             _pagination_buttons(
                 previous=self._statistics_cursor("p", first) if previous else None,
@@ -4048,7 +4129,13 @@ class ConversationEngine:
                 limit=1,
             ),
         )
-        buttons = [Button(label=event.name, value=f"ag:manage:{event.event_id}") for event in events]
+        buttons = [
+            Button(
+                label=event_name_with_date(event.name, event.game_date),
+                value=f"ag:manage:{event.event_id}",
+            )
+            for event in events
+        ]
         if not archived and is_admin:
             buttons.append(Button(label=ARCHIVED_GAMES, value=ARCHIVED_GAMES))
         buttons.extend(
@@ -4087,7 +4174,9 @@ class ConversationEngine:
         text = (
             f"Управление игрой {event_reference(event.name, event.game_date)}\n\n"
             f"Количество игроков: {event.player_amount}\n"
-            f"Статус: {EVENT_STATUS_LABELS[event.status]}"
+            f"Статус: {EVENT_STATUS_LABELS[event.status]}\n"
+            f"Пост в Telegram: {event.telegram_post_url or 'не добавлен'}\n"
+            f"Пост во VK: {event.vk_post_url or 'не добавлен'}"
         )
         if not event.registration_is_open():
             assert event.registration_open_at is not None
@@ -4102,6 +4191,7 @@ class ConversationEngine:
         actions = [
             (CHANGE_STATUS, "status"),
             (CHANGE_PLAYER_AMOUNT, "player-amount"),
+            (ADD_POST_LINKS, "post-links"),
             (MANAGE_NOTIFICATIONS, "notifications"),
             (LIST_WAITING_PLAYERS, "waiting"),
             (EVENT_TABLES, "tables"),
@@ -4213,6 +4303,12 @@ class ConversationEngine:
                     f"Текущее количество игроков: {event.player_amount}.\n\n"
                     f"Введите новое количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):"
                 ),
+                buttons=[game_management_button(event.event_id)],
+            )
+        if action == "post-links":
+            user.dialog_state = "ADMIN_POST_LINK_TELEGRAM"
+            return BotResponse(
+                text="Отправьте ссылку на пост об игре в Telegram:",
                 buttons=[game_management_button(event.event_id)],
             )
         if action == "notifications":

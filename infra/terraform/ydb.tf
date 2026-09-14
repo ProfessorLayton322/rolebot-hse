@@ -135,6 +135,16 @@ resource "yandex_ydb_table" "events" {
     name = "signup_token"
     type = "Utf8"
   }
+  # Announcement links are populated from game management after the posts are
+  # published, so both columns must stay nullable during creation and rollout.
+  column {
+    name = "telegram_post_url"
+    type = "Utf8"
+  }
+  column {
+    name = "vk_post_url"
+    type = "Utf8"
+  }
   column {
     name     = "disk_resource_path"
     type     = "Utf8"
