@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 from larp_bot.domain.models import (
+    MAX_EVENT_PAGE_SIZE,
     AttendanceStatus,
     BotIdentity,
     Button,
@@ -354,6 +355,10 @@ class MemoryEventRepository:
         newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]:
+        # Mirror the storage cap so tests catch callers asking for a page that
+        # the YDB repository would reject at runtime.
+        if limit < 1 or limit > MAX_EVENT_PAGE_SIZE:
+            raise ValueError(f"event page size must be between 1 and {MAX_EVENT_PAGE_SIZE}")
         if after is not None and before is not None:
             raise ValueError("only one event-page cursor may be supplied")
         values = sorted(

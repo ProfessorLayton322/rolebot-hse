@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
+    MAX_EVENT_PAGE_SIZE,
     MAX_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
@@ -344,15 +345,16 @@ async def player_registrations_on_date(
 ) -> list[tuple[Event, Registration]]:
     """Find a player's active registrations on one game date.
 
-    Events are paged because the YDB repository deliberately caps list queries
-    at ten rows. Archived legacy games have no date and never enter this scan.
+    Events are paged because the event repository deliberately caps list queries
+    at MAX_EVENT_PAGE_SIZE rows. Archived legacy games have no date and never
+    enter this scan.
     """
 
     accepted = set(statuses)
     after: tuple[datetime, str] | None = None
     matches: list[tuple[Event, Registration]] = []
     while True:
-        page = list(await events.list_page(after=after, archived=False, limit=10))
+        page = list(await events.list_page(after=after, archived=False, limit=MAX_EVENT_PAGE_SIZE))
         if not page:
             return matches
         dated_events = [event for event in page if event.game_date == game_date and event.event_id != exclude_event_id]
@@ -370,7 +372,7 @@ async def player_registrations_on_date(
             for event, registration in zip(dated_events, registrations, strict=True)
             if registration is not None and registration.attendance_status in accepted
         )
-        if len(page) < 10:
+        if len(page) < MAX_EVENT_PAGE_SIZE:
             return matches
         last = page[-1]
         after = (last.created_at, last.event_id)
@@ -630,10 +632,15 @@ class RegistrationService:
         user_id: int,
         *,
         idempotency_key: str,
-        page_size: int = 100,
+        page_size: int = MAX_EVENT_PAGE_SIZE,
         concurrency: int = 10,
     ) -> int:
-        """Queue a profile projection refresh for every unarchived game containing the user."""
+        """Queue a profile projection refresh for every unarchived game containing the user.
+
+        The page size must stay within the event repository's cap. A larger page
+        makes storage reject the very first scan, so no game table would ever
+        receive the edited name, nickname or pass data.
+        """
 
         queued = 0
         after: tuple[datetime, str] | None = None
