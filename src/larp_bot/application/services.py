@@ -709,6 +709,7 @@ class RegistrationService:
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.SEND_ALL_PLAYERS_NOTIFICATION,
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
@@ -949,6 +950,16 @@ class EventAdministrationService:
             registrations = _active_main_roster(registrations, event.player_amount)
         return sum(registration.attendance_status is AttendanceStatus.CONFIRMED for registration in registrations)
 
+    async def active_registration_count(self, event_id: str) -> int:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        return sum(
+            registration.attendance_status in {AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}
+            for registration in await self.catalog.registrations.list_for_event(event_id)
+        )
+
     async def registration_user(self, event_id: str, registration_key: str) -> User | None:
         if await self.events.get(event_id) is None:
             raise EventNotFound("Игра не найдена")
@@ -1062,11 +1073,15 @@ def is_plain_chat_link(value: str) -> bool:
     return host in {"vk.me", "www.vk.me"} and bool(_VK_CHAT_PATH_RE.fullmatch(parsed.path))
 
 
+def player_notification_text(event_name: str, message: str, game_date: date | None = None) -> str:
+    return f"Сообщение от мастеров игры {event_reference(event_name, game_date)}:\n\n{message.strip()}"
+
+
 def confirmed_notification_text(event_name: str, message: str, game_date: date | None = None) -> str:
     clean_message = message.strip()
-    reference = event_reference(event_name, game_date)
     if not is_plain_chat_link(clean_message):
-        return f"Сообщение от мастеров игры {reference}:\n\n{clean_message}"
+        return player_notification_text(event_name, clean_message, game_date)
+    reference = event_reference(event_name, game_date)
     return f"Вы в основном составе игры {reference}. Вступите в чат: {clean_message}"
 
 
@@ -1245,6 +1260,7 @@ class ConfirmationNotificationService:
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.SEND_ALL_PLAYERS_NOTIFICATION,
         }
     )
 
@@ -1271,7 +1287,7 @@ class ConfirmationNotificationService:
     async def _recipients(
         self,
         event: Event,
-        attendance_status: AttendanceStatus,
+        attendance_statuses: Collection[AttendanceStatus],
         *,
         main_roster_only: bool = False,
     ) -> list[NotificationRecipient]:
@@ -1288,7 +1304,7 @@ class ConfirmationNotificationService:
         registrations = [
             registration
             for registration in all_registrations
-            if registration.attendance_status is attendance_status
+            if registration.attendance_status in attendance_statuses
             and (main_roster_keys is None or registration.participant_key in main_roster_keys)
         ]
         registrations.sort(key=lambda registration: (registration.created_at, registration.participant_key))
@@ -1310,8 +1326,14 @@ class ConfirmationNotificationService:
         if command.operation is Operation.SEND_CONFIRMED_NOTIFICATION:
             assert isinstance(command.payload, NotificationPayload)
             text = confirmed_notification_text(event.name, command.payload.text, event.game_date)
-            attendance_status = AttendanceStatus.CONFIRMED
+            attendance_statuses = {AttendanceStatus.CONFIRMED}
             main_roster_only = is_plain_chat_link(command.payload.text)
+            buttons = [main_menu_button()]
+        elif command.operation is Operation.SEND_ALL_PLAYERS_NOTIFICATION:
+            assert isinstance(command.payload, NotificationPayload)
+            text = player_notification_text(event.name, command.payload.text, event.game_date)
+            attendance_statuses = {AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED}
+            main_roster_only = False
             buttons = [main_menu_button()]
         else:
             if event.confirmation_deadline is None:
@@ -1322,14 +1344,14 @@ class ConfirmationNotificationService:
                 text = f"Подтверждение участия в игре {reference} открыто! Подтвердите участие до {deadline} (мск)."
             else:
                 text = f"Напоминаем: подтвердите участие в игре {reference} до {deadline} (мск)."
-            attendance_status = AttendanceStatus.WAITING
+            attendance_statuses = {AttendanceStatus.WAITING}
             main_roster_only = False
             buttons = [confirmation_button(event.event_id)]
 
         delivered = 0
         for recipient in await self._recipients(
             event,
-            attendance_status,
+            attendance_statuses,
             main_roster_only=main_roster_only,
         ):
             request_id = (
@@ -1780,6 +1802,7 @@ class OrderedMutationService:
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.SEND_ALL_PLAYERS_NOTIFICATION,
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
@@ -1816,6 +1839,9 @@ class OrderedMutationService:
                 command.operation_id,
             )
             return MutationResult("Уведомление подтвердившим участие отправлено")
+        if command.operation is Operation.SEND_ALL_PLAYERS_NOTIFICATION:
+            assert isinstance(command.payload, NotificationPayload)
+            return MutationResult("Уведомление всем игрокам отправлено")
         if command.operation is Operation.UPDATE_PLAYER_AMOUNT:
             assert isinstance(command.payload, PlayerAmountPayload)
             event = await self.catalog.ensure_migrated(event)

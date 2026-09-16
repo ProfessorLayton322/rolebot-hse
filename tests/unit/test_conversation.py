@@ -73,6 +73,7 @@ from larp_bot.application.conversation import (
     REMOVE_WAITING_PLAYERS,
     REVOKE_GAMEMASTER,
     SCHEDULE_REGISTRATION_QUESTION,
+    SEND_ALL_PLAYERS_NOTIFICATION,
     SEND_CONFIRMATION_REMINDER,
     SEND_CONFIRMED_LINK,
     SEND_CONFIRMED_NOTIFICATION,
@@ -3566,8 +3567,9 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
     assert MANAGE_NOTIFICATIONS in management_labels
     assert SEND_CONFIRMED_NOTIFICATION not in management_labels
     notifications = await engine.handle(inbound(3, f"ag:notifications:{event.event_id}", callback=True))
-    assert [button.label for button in notifications.buttons[:3]] == [
+    assert [button.label for button in notifications.buttons[:4]] == [
         SEND_CONFIRMATION_REMINDER,
+        SEND_ALL_PLAYERS_NOTIFICATION,
         SEND_CONFIRMED_LINK,
         SEND_CONFIRMED_NOTIFICATION,
     ]
@@ -3589,6 +3591,53 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
     assert queued.deferred
     command = publisher.commands[-1]
     assert command.operation is Operation.SEND_CONFIRMED_NOTIFICATION
+    assert isinstance(command.payload, NotificationPayload)
+    assert command.payload.text == "Сбор в 18:30"
+
+
+@pytest.mark.asyncio
+async def test_admin_can_queue_message_for_all_active_players(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, _, publisher, tables = await engine_setup(disk_store, event, admin=True)
+    waiting_key = "w" * 43
+    confirmed_key = "c" * 43
+    cancelled_key = "x" * 43
+    for index, key in enumerate((waiting_key, confirmed_key, cancelled_key)):
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{index}",
+            participant_key=key,
+            display_name=f"Player {index}",
+            wish_play="A",
+        )
+    await tables.confirm(
+        event.event_id,
+        operation_id="confirm-player",
+        participant_key=confirmed_key,
+        character_wish="Doctor",
+    )
+    await tables.cancel(
+        event.event_id,
+        operation_id="cancel-player",
+        participant_key=cancelled_key,
+    )
+
+    notifications = await engine.handle(inbound(1, f"ag:notifications:{event.event_id}", callback=True))
+    all_players_button = next(button for button in notifications.buttons if button.value.startswith("ag:notify-all:"))
+    assert all_players_button.label == "Уведомить всех игроков"
+
+    prompt = await engine.handle(inbound(2, all_players_button.value, callback=True))
+    assert "ожидающим подтверждения и подтвердившим участие" in prompt.text
+    preview = await engine.handle(inbound(3, "Сбор в 18:30"))
+    assert "Получателей: 2" in preview.text
+    assert f"Сообщение от мастеров игры «{event.name}»:\n\nСбор в 18:30" in preview.text
+
+    queued = await engine.handle(inbound(4, "admin:notification:confirm", callback=True))
+    assert queued.deferred
+    command = publisher.commands[-1]
+    assert command.operation is Operation.SEND_ALL_PLAYERS_NOTIFICATION
     assert isinstance(command.payload, NotificationPayload)
     assert command.payload.text == "Сбор в 18:30"
 

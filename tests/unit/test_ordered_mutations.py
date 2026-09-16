@@ -69,6 +69,7 @@ def command(
                 Operation.OPEN_CONFIRMATION,
                 Operation.SEND_CONFIRMATION_REMINDER,
                 Operation.SEND_CONFIRMED_NOTIFICATION,
+                Operation.SEND_ALL_PLAYERS_NOTIFICATION,
                 Operation.UPDATE_PLAYER_AMOUNT,
                 Operation.REMOVE_WAITING_PARTICIPANTS,
                 Operation.CLOSE_EVENT,
@@ -114,9 +115,14 @@ async def test_confirmed_notification_retry_appends_to_event_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation",
+    [Operation.SEND_CONFIRMED_NOTIFICATION, Operation.SEND_ALL_PLAYERS_NOTIFICATION],
+)
 async def test_worker_rejects_privileged_mutation_from_nonleader(
     disk_store: MemoryDiskStore,
     event: Event,
+    operation: Operation,
 ) -> None:
     events = MemoryEventRepository([event])
     tables = MemoryRegistrationRepository()
@@ -129,7 +135,7 @@ async def test_worker_rejects_privileged_mutation_from_nonleader(
         await mutations.apply(
             command(
                 event,
-                Operation.SEND_CONFIRMED_NOTIFICATION,
+                operation,
                 NotificationPayload(text="Несанкционированное уведомление"),
             )
         )
