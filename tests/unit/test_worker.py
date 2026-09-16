@@ -1012,6 +1012,77 @@ async def test_confirmed_notifications_go_only_to_confirmed_players(
 
 
 @pytest.mark.asyncio
+async def test_all_player_notifications_go_to_waiting_and_confirmed_players(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    tables = MemoryRegistrationRepository()
+    catalog = RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store))
+    users = MemoryUserRepository()
+    waiting_user = TelegramUser(tg_id=2)
+    confirmed_user = VkUser(vk_id=3)
+    cancelled_user = TelegramUser(tg_id=4)
+    for user in [waiting_user, confirmed_user, cancelled_user, TelegramUser(tg_id=1)]:
+        await users.save(user)
+        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
+        uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
+        if uid == 1:
+            continue
+        key = participant_key(secret, platform, uid, event.event_id)
+        await tables.enlist(
+            event.event_id,
+            operation_id=f"enlist-{platform.value}-{uid}",
+            participant_key=key,
+            display_name=f"Player {uid}",
+            wish_play="A",
+        )
+        if user in (confirmed_user, cancelled_user):
+            await tables.confirm(
+                event.event_id,
+                operation_id=f"confirm-{platform.value}-{uid}",
+                participant_key=key,
+                character_wish="Doctor",
+            )
+        if user is cancelled_user:
+            await tables.cancel(
+                event.event_id,
+                operation_id="cancel-telegram-4",
+                participant_key=key,
+            )
+
+    message = "Сбор игроков в 18:30 у главного входа."
+    consumer = FakeConsumer(
+        [queued(event, Operation.SEND_ALL_PLAYERS_NOTIFICATION, NotificationPayload(text=message), 1)]
+    )
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        OrderedMutationService(events, catalog),
+        users,
+        transport,
+        ConfirmationNotificationService(events, catalog, users, transport, secret),
+        max_seconds=2,
+    )
+
+    assert await worker.run() == 1
+    expected_text = f"Сообщение от мастеров игры «{event.name}»:\n\n{message}"
+    assert {(sent[0], sent[1], sent[3]) for sent in transport.sent[:-1]} == {
+        (Platform.TELEGRAM, 2, expected_text),
+        (Platform.VK, 3, expected_text),
+    }
+    assert all(sent[4] == (Button(label=MAIN_MENU_LABEL, value=MAIN_MENU),) for sent in transport.sent[:-1])
+    assert transport.sent[-1][0:2] == (Platform.TELEGRAM, 1)
+    assert transport.sent[-1][3] == "Уведомление всем игрокам отправлено"
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.confirmed_notifications == []
+    assert consumer.deleted == ["receipt-1"]
+
+
+@pytest.mark.asyncio
 async def test_newly_confirmed_participant_receives_all_stored_notifications(
     disk_store: MemoryDiskStore,
     event: Event,

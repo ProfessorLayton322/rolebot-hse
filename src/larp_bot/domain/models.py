@@ -156,6 +156,7 @@ class Operation(StrEnum):
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
+    SEND_ALL_PLAYERS_NOTIFICATION = "SEND_ALL_PLAYERS_NOTIFICATION"
     UPDATE_PLAYER_AMOUNT = "UPDATE_PLAYER_AMOUNT"
     REMOVE_PARTICIPANT = "REMOVE_PARTICIPANT"
     REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
@@ -695,10 +696,12 @@ class OrderedRegistrationCommand(StrictModel):
             raise ValueError("UPDATE_CO_PLAYER_WISH requires CoPlayerWishPayload")
         if self.operation is Operation.OPEN_CONFIRMATION and not isinstance(self.payload, ConfirmationDeadlinePayload):
             raise ValueError("OPEN_CONFIRMATION requires ConfirmationDeadlinePayload")
-        if self.operation is Operation.SEND_CONFIRMED_NOTIFICATION and not isinstance(
-            self.payload, NotificationPayload
-        ):
-            raise ValueError("SEND_CONFIRMED_NOTIFICATION requires NotificationPayload")
+        notification_operations = {
+            Operation.SEND_CONFIRMED_NOTIFICATION,
+            Operation.SEND_ALL_PLAYERS_NOTIFICATION,
+        }
+        if self.operation in notification_operations and not isinstance(self.payload, NotificationPayload):
+            raise ValueError(f"{self.operation} requires NotificationPayload")
         if self.operation is Operation.UPDATE_PLAYER_AMOUNT and not isinstance(self.payload, PlayerAmountPayload):
             raise ValueError("UPDATE_PLAYER_AMOUNT requires PlayerAmountPayload")
         empty_payload_operations = {

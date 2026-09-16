@@ -79,6 +79,7 @@ from .services import (
     event_master_records,
     event_masters_text,
     is_plain_chat_link,
+    player_notification_text,
     same_day_signup_warning,
 )
 
@@ -114,6 +115,7 @@ SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтвержден�
 MANAGE_NOTIFICATIONS = "Уведомления"
 SEND_CONFIRMED_LINK = "Отправить подтвержденным ссылку на чат"
 SEND_CONFIRMED_NOTIFICATION = "Отправить подтвержденным сообщение"
+SEND_ALL_PLAYERS_NOTIFICATION = "Уведомить всех игроков"
 LEGACY_SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтвердивших"
 LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
 REMOVE_PLAYER = "🗑 Удалить игрока"
@@ -191,6 +193,7 @@ ADMIN_ACTIONS = frozenset(
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_LINK,
         SEND_CONFIRMED_NOTIFICATION,
+        SEND_ALL_PLAYERS_NOTIFICATION,
         LEGACY_SEND_CONFIRMED_NOTIFICATION,
         LIST_WAITING_PLAYERS,
         REMOVE_PLAYER,
@@ -553,12 +556,19 @@ def _confirmed_notification_prompt(
     event_id: str,
     *,
     link: bool,
+    all_players: bool = False,
     game_date: date | None = None,
     invalid: str = "",
 ) -> BotResponse:
     prefix = f"{invalid}\n\n" if invalid else ""
     reference = event_reference(event_name, game_date)
-    if link:
+    if all_players:
+        prompt = (
+            "Эта кнопка нужна для рассылки сообщения всем записавшимся на игру игрокам: "
+            "ожидающим подтверждения и подтвердившим участие.\n\n"
+            f"Отправьте текст сообщения для всех игроков игры {reference}."
+        )
+    elif link:
         prompt = (
             f"Отправьте ссылку-приглашение в чат игры {reference}.\n\n"
             "Сообщение должно состоять только из корректной ссылки на чат Telegram или VK."
@@ -581,13 +591,16 @@ def _confirmed_notification_preview(
     message: str,
     recipient_count: int,
     game_date: date | None = None,
+    *,
+    all_players: bool = False,
 ) -> BotResponse:
+    final_text = (
+        player_notification_text(event_name, message, game_date)
+        if all_players
+        else confirmed_notification_text(event_name, message, game_date)
+    )
     return BotResponse(
-        text=(
-            f"Получателей: {recipient_count}\n\n"
-            "Итоговое сообщение:\n\n"
-            f"{confirmed_notification_text(event_name, message, game_date)}"
-        ),
+        text=(f"Получателей: {recipient_count}\n\nИтоговое сообщение:\n\n{final_text}"),
         buttons=[
             Button(label=f"✅ Отправить ({recipient_count})", value="admin:notification:confirm"),
             notification_management_button(event_id),
@@ -3246,17 +3259,20 @@ class ConversationEngine:
             "ADMIN_NOTIFICATION_LINK_TEXT",
             "ADMIN_NOTIFICATION_MESSAGE_TEXT",
             "ADMIN_NOTIFICATION_TEXT",
+            "ADMIN_ALL_PLAYERS_NOTIFICATION_TEXT",
         }:
             event_name = str(user.dialog_context["event_name"])
             event_id = str(user.dialog_context["event_id"])
             raw_game_date = user.dialog_context.get("game_date")
             notification_game_date = date.fromisoformat(str(raw_game_date)) if raw_game_date is not None else None
             link = user.dialog_state == "ADMIN_NOTIFICATION_LINK_TEXT"
+            all_players = user.dialog_state == "ADMIN_ALL_PLAYERS_NOTIFICATION_TEXT"
             if message.callback is not None:
                 return _confirmed_notification_prompt(
                     event_name,
                     event_id,
                     link=link,
+                    all_players=all_players,
                     game_date=notification_game_date,
                     invalid="Отправьте содержимое обычным текстовым сообщением.",
                 )
@@ -3265,6 +3281,7 @@ class ConversationEngine:
                     event_name,
                     event_id,
                     link=link,
+                    all_players=all_players,
                     game_date=notification_game_date,
                     invalid="Сообщение не может быть пустым.",
                 )
@@ -3276,7 +3293,7 @@ class ConversationEngine:
                     game_date=notification_game_date,
                     invalid="Пришлите только корректную ссылку-приглашение в чат Telegram или VK.",
                 )
-            if not link and is_plain_chat_link(value):
+            if not link and not all_players and is_plain_chat_link(value):
                 return _confirmed_notification_prompt(
                     event_name,
                     event_id,
@@ -3284,19 +3301,31 @@ class ConversationEngine:
                     game_date=notification_game_date,
                     invalid=f"Для рассылки ссылки на чат используйте кнопку «{SEND_CONFIRMED_LINK}».",
                 )
-            if len(value) > 4000 or len(confirmed_notification_text(event_name, value, notification_game_date)) > 4000:
+            final_text = (
+                player_notification_text(event_name, value, notification_game_date)
+                if all_players
+                else confirmed_notification_text(event_name, value, notification_game_date)
+            )
+            if len(value) > 4000 or len(final_text) > 4000:
                 return _confirmed_notification_prompt(
                     event_name,
                     event_id,
                     link=link,
+                    all_players=all_players,
                     game_date=notification_game_date,
                     invalid="Итоговое сообщение не должно превышать 4000 символов.",
                 )
-            recipient_count = await self.administration.confirmed_registration_count(
-                event_id,
-                main_roster_only=link,
+            recipient_count = (
+                await self.administration.active_registration_count(event_id)
+                if all_players
+                else await self.administration.confirmed_registration_count(
+                    event_id,
+                    main_roster_only=link,
+                )
             )
-            user.dialog_state = "ADMIN_NOTIFICATION_CONFIRM"
+            user.dialog_state = (
+                "ADMIN_ALL_PLAYERS_NOTIFICATION_CONFIRM" if all_players else "ADMIN_NOTIFICATION_CONFIRM"
+            )
             user.dialog_context["notification_text"] = value
             user.dialog_context["notification_recipient_count"] = recipient_count
             return _confirmed_notification_preview(
@@ -3305,14 +3334,16 @@ class ConversationEngine:
                 value,
                 recipient_count,
                 notification_game_date,
+                all_players=all_players,
             )
-        if user.dialog_state == "ADMIN_NOTIFICATION_CONFIRM":
+        if user.dialog_state in {"ADMIN_NOTIFICATION_CONFIRM", "ADMIN_ALL_PLAYERS_NOTIFICATION_CONFIRM"}:
             event_name = str(user.dialog_context["event_name"])
             event_id = str(user.dialog_context["event_id"])
             raw_game_date = user.dialog_context.get("game_date")
             notification_game_date = date.fromisoformat(str(raw_game_date)) if raw_game_date is not None else None
             notification_text = str(user.dialog_context["notification_text"])
             recipient_count = int(user.dialog_context["notification_recipient_count"])
+            all_players = user.dialog_state == "ADMIN_ALL_PLAYERS_NOTIFICATION_CONFIRM"
             if value != "admin:notification:confirm":
                 return _confirmed_notification_preview(
                     event_name,
@@ -3320,16 +3351,20 @@ class ConversationEngine:
                     notification_text,
                     recipient_count,
                     notification_game_date,
+                    all_players=all_players,
                 )
+            operation = (
+                Operation.SEND_ALL_PLAYERS_NOTIFICATION if all_players else Operation.SEND_CONFIRMED_NOTIFICATION
+            )
             await self._clear(user)
             await self.registrations.enqueue(
-                operation=Operation.SEND_CONFIRMED_NOTIFICATION,
+                operation=operation,
                 event_id=event_id,
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
                 payload=NotificationPayload(text=notification_text),
                 reply_context=ReplyContext(buttons=[notification_management_button(event_id)]),
-                idempotency_key=f"{message.update_id}:{Operation.SEND_CONFIRMED_NOTIFICATION.value}",
+                idempotency_key=f"{message.update_id}:{operation.value}",
             )
             return BotResponse(
                 text="⏳ Уведомление принято в обработку.",
@@ -4209,6 +4244,7 @@ class ConversationEngine:
             text=f"Уведомления игры {event_reference(event.name, event.game_date)}\n\nВыберите действие:",
             buttons=[
                 Button(label=SEND_CONFIRMATION_REMINDER, value=f"ag:remind:{event.event_id}"),
+                Button(label=SEND_ALL_PLAYERS_NOTIFICATION, value=f"ag:notify-all:{event.event_id}"),
                 Button(label=SEND_CONFIRMED_LINK, value=f"ag:notify-link:{event.event_id}"),
                 Button(label=SEND_CONFIRMED_NOTIFICATION, value=f"ag:notify-message:{event.event_id}"),
                 game_management_button(event.event_id),
@@ -4352,6 +4388,15 @@ class ConversationEngine:
                 link=True,
                 game_date=event.game_date,
             )
+        if action == "notify-all":
+            user.dialog_state = "ADMIN_ALL_PLAYERS_NOTIFICATION_TEXT"
+            return _confirmed_notification_prompt(
+                event.name,
+                event.event_id,
+                link=False,
+                all_players=True,
+                game_date=event.game_date,
+            )
         if action in {"notify", "notify-message"}:
             user.dialog_state = "ADMIN_NOTIFICATION_MESSAGE_TEXT"
             return _confirmed_notification_prompt(
@@ -4471,6 +4516,7 @@ class ConversationEngine:
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_LINK,
             SEND_CONFIRMED_NOTIFICATION,
+            SEND_ALL_PLAYERS_NOTIFICATION,
             LEGACY_SEND_CONFIRMED_NOTIFICATION,
             LIST_WAITING_PLAYERS,
             CREATE_PASS_TABLE,
