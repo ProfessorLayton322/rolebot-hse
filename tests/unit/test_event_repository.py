@@ -6,8 +6,9 @@ from typing import Any
 
 import pytest
 
+from larp_bot.adapters.memory import MemoryEventRepository
 from larp_bot.adapters.ydb.repositories import YdbEventRepository
-from larp_bot.domain.models import DEFAULT_PLAYER_AMOUNT, BotIdentity, EventStatus, Platform
+from larp_bot.domain.models import DEFAULT_PLAYER_AMOUNT, MAX_EVENT_PAGE_SIZE, BotIdentity, EventStatus, Platform
 
 
 def event_row(status: str) -> dict[str, Any]:
@@ -463,6 +464,24 @@ async def test_newest_first_page_uses_reverse_keyset_order() -> None:
     assert "created_at < $after_time" in executor.query_text
     assert "event_id < $after_id" in executor.query_text
     assert "created_at DESC, event_id DESC" in executor.query_text
+
+
+@pytest.mark.asyncio
+async def test_both_event_repositories_enforce_the_same_page_size_cap() -> None:
+    # Callers scanning every game must page. A silently permissive in-memory
+    # repository would hide a page size that storage rejects at runtime.
+    repositories = [
+        YdbEventRepository(RecordingExecutor([])),  # type: ignore[arg-type]
+        MemoryEventRepository([]),
+    ]
+    message = f"event page size must be between 1 and {MAX_EVENT_PAGE_SIZE}"
+
+    for repository in repositories:
+        with pytest.raises(ValueError, match=message):
+            await repository.list_page(limit=MAX_EVENT_PAGE_SIZE + 1)
+        with pytest.raises(ValueError, match=message):
+            await repository.list_page(limit=0)
+        assert list(await repository.list_page(limit=MAX_EVENT_PAGE_SIZE)) == []
 
 
 @pytest.mark.asyncio

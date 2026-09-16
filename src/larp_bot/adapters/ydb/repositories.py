@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from larp_bot.domain.models import (
     DEFAULT_PLAYER_AMOUNT,
+    MAX_EVENT_PAGE_SIZE,
     MAX_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
@@ -1252,8 +1253,8 @@ class YdbEventRepository:
         newest_first: bool = False,
         limit: int = 10,
     ) -> Sequence[Event]:
-        if limit < 1 or limit > 10:
-            raise ValueError("event page size must be between 1 and 10")
+        if limit < 1 or limit > MAX_EVENT_PAGE_SIZE:
+            raise ValueError(f"event page size must be between 1 and {MAX_EVENT_PAGE_SIZE}")
         if after is not None and before is not None:
             raise ValueError("only one event-page cursor may be supplied")
         conditions: list[str] = []

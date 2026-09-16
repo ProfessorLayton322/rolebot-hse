@@ -94,6 +94,7 @@ from larp_bot.application.services import (
     game_signup_token,
 )
 from larp_bot.domain.models import (
+    MAX_EVENT_PAGE_SIZE,
     AttendanceStatus,
     BotIdentity,
     BotResponse,
@@ -3730,6 +3731,48 @@ async def test_admin_pagination_uses_shared_page_size(count: int, disk_store: Me
     assert (PAGE_FORWARD in labels) is (count > PAGE_SIZE)
     assert PAGE_BACK not in labels
     assert page.buttons[-1] == Button(label="Отмена", value=ADMIN_MENU)
+
+
+@pytest.mark.asyncio
+async def test_profile_fanout_pages_events_and_reaches_games_past_the_first_page(
+    disk_store: MemoryDiskStore,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        Event(
+            event_id=f"event-{index:04d}",
+            name=f"Game {index}",
+            disk_resource_path=f"disk:/larp-bot/events/event-{index:04d}-game.xlsx",
+            public_registration_url=f"https://disk.example/{index}",
+            created_at=base + timedelta(seconds=index),
+            updated_at=base + timedelta(seconds=index),
+        )
+        for index in range(MAX_EVENT_PAGE_SIZE + 2)
+    ]
+    event_repository = MemoryEventRepository(events)
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    publisher = MemoryCommandPublisher()
+    registrations = RegistrationService(
+        event_repository,
+        RegistrationCatalog(event_repository, tables, showcase),
+        publisher,
+        "secret",
+    )
+    last = events[-1]
+    await tables.enlist(
+        last.event_id,
+        operation_id="enlist",
+        participant_key=registrations.key(Platform.TELEGRAM, 1, last.event_id),
+        display_name="Иванов Иван",
+        wish_play="Без пожеланий",
+    )
+
+    queued = await registrations.enqueue_profile_updates(Platform.TELEGRAM, 1, idempotency_key="sync")
+
+    assert queued == 1
+    assert [command.operation for command in publisher.commands] == [Operation.UPDATE_PROFILE]
+    assert [command.event_id for command in publisher.commands] == [last.event_id]
 
 
 @pytest.mark.asyncio

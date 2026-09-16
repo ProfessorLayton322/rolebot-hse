@@ -15,6 +15,9 @@ def utc_now() -> datetime:
 
 DEFAULT_PLAYER_AMOUNT = 30
 MAX_PLAYER_AMOUNT = 10_000
+# Event listings are keyset-paged and storage rejects larger pages, so callers
+# that scan every game must walk the pages instead of asking for one big page.
+MAX_EVENT_PAGE_SIZE = 10
 
 
 def format_game_date(value: date) -> str:
