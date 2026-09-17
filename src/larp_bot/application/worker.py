@@ -139,6 +139,10 @@ class OrderedWorker:
                                 command,
                                 event_id=result.replaced_event_id,
                             )
+                            await self.notifications.notify_masters_of_replaced_participation(
+                                command,
+                                event_id=result.replaced_event_id,
+                            )
                         command_response_delivered = True
                     elif notifications_enabled and command.operation in {
                         Operation.CANCEL,
@@ -153,6 +157,8 @@ class OrderedWorker:
                             if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
                                 await self.notifications.notify_reserve_promotion(command)
                                 await self.notifications.notify_confirmed_link_promotion(command)
+                            if command.operation is Operation.CANCEL:
+                                await self.notifications.notify_masters_of_cancellation(command)
                     elif (
                         notifications_enabled
                         and command.operation is Operation.UPDATE_PLAYER_AMOUNT

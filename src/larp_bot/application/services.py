@@ -141,6 +141,29 @@ def _parse_sift_snapshot_entry(value: str) -> tuple[str, str] | None:
     return None
 
 
+# A player's cancellation keeps the attendance status the player had before
+# cancelling in the per-event retry snapshot, and records each master who has
+# been told about it as a delivered entry.
+CANCELLED_CONFIRMED_PREFIX = "cancelled-confirmed:"
+CANCELLED_WAITING_PREFIX = "cancelled-waiting:"
+CANCELLATION_MASTER_PREFIX = "master:"
+
+
+def _cancellation_snapshot_entry(registration: Registration) -> str:
+    confirmed = registration.attendance_status is AttendanceStatus.CONFIRMED
+    prefix = CANCELLED_CONFIRMED_PREFIX if confirmed else CANCELLED_WAITING_PREFIX
+    return f"{prefix}{registration.participant_key}"
+
+
+def _parse_cancellation_snapshot_entry(value: str) -> tuple[bool, str] | None:
+    """Return whether the cancelled player had confirmed, and their participant key."""
+
+    for prefix, confirmed in ((CANCELLED_CONFIRMED_PREFIX, True), (CANCELLED_WAITING_PREFIX, False)):
+        if value.startswith(prefix):
+            return confirmed, value.removeprefix(prefix)
+    return None
+
+
 def event_slug(name: str) -> str:
     transliterated = name.casefold().replace("ё", "е")
     slug = re.sub(r"[^a-z0-9]+", "-", transliterated).strip("-")
@@ -1096,6 +1119,27 @@ def confirmed_notification_text(event_name: str, message: str, game_date: date |
     return f"Вы в основном составе игры {reference}. Вступите в чат: {clean_message}"
 
 
+def cancellation_master_text(
+    event: Event,
+    player_name: str,
+    nickname: str | None,
+    *,
+    confirmed: bool,
+    same_day_replacement: bool = False,
+) -> str:
+    lines = [
+        f"Отмена участия в игре {event_reference(event.name, event.game_date)}",
+        "",
+        f"Игрок: {player_name}",
+    ]
+    if nickname is not None:
+        lines.append(f"Никнейм: {nickname}")
+    lines.append(f"Статус участия: {'подтверждено' if confirmed else 'не подтверждено'}")
+    if same_day_replacement:
+        lines.extend(["", "Причина: игрок подтвердил участие в другой игре в тот же день."])
+    return "\n".join(lines)
+
+
 def _active_main_roster(registrations: Sequence[Registration], player_amount: int) -> list[Registration]:
     active = [
         registration
@@ -1574,6 +1618,129 @@ class ConfirmationNotificationService:
                 [main_menu_button()],
             )
         return len(links)
+
+    async def _cancellation_masters(
+        self,
+        event_id: str,
+        command: OrderedRegistrationCommand,
+    ) -> list[tuple[BotIdentity, User | None]]:
+        """Every master of the game except the player who cancelled."""
+
+        return [
+            (identity, profile)
+            for identity, profile in await event_master_records(self.events, self.users, event_id)
+            if (identity.platform, identity.platform_user_id) != (command.platform, command.platform_user_id)
+        ]
+
+    async def _command_player_name(self, command: OrderedRegistrationCommand) -> tuple[str, str | None]:
+        player = await self.users.get(command.platform, command.platform_user_id)
+        if player is None:
+            return "не указан", None
+        name = surname_and_name(player.full_name) if player.full_name is not None else "не указан"
+        return name, player.nickname
+
+    async def notify_masters_of_cancellation(self, command: OrderedRegistrationCommand) -> int:
+        """Tell every master of the game that a player cancelled and whether they had confirmed."""
+
+        if command.operation is not Operation.CANCEL:
+            raise ValueError("command does not cancel participation")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.last_participant_removal_operation_id != command.operation_id:
+            return 0
+        cancellation = next(
+            (
+                parsed
+                for parsed in map(_parse_cancellation_snapshot_entry, event.participant_removal_keys)
+                if parsed is not None
+            ),
+            None,
+        )
+        if cancellation is None:
+            return 0
+        confirmed, key = cancellation
+        registration = await self.catalog.registrations.get(event.event_id, key)
+        if registration is not None:
+            player_name, nickname = registration.display_name, registration.nickname
+        else:
+            player_name, nickname = await self._command_player_name(command)
+        text = cancellation_master_text(event, player_name, nickname, confirmed=confirmed)
+
+        delivered = 0
+        notified_keys = set(event.participant_removal_notified_keys)
+        for identity, _ in await self._cancellation_masters(event.event_id, command):
+            recipient = f"{identity.platform.value}:{identity.platform_user_id}"
+            marker = f"{CANCELLATION_MASTER_PREFIX}{recipient}"
+            if marker in notified_keys:
+                continue
+            request_id = f"{command.operation_id}:cancellation-master:{recipient}"
+            await self.transport.send(
+                platform=identity.platform,
+                user_id=identity.platform_user_id,
+                request_id=request_id,
+                text=text,
+                buttons=[main_menu_button()],
+            )
+            await self.events.mark_participant_removal_delivered(event.event_id, command.operation_id, marker)
+            notified_keys.add(marker)
+            await self.users.claim_delivery(
+                identity.platform,
+                identity.platform_user_id,
+                request_id,
+                [main_menu_button()],
+            )
+            delivered += 1
+        return delivered
+
+    async def notify_masters_of_replaced_participation(
+        self,
+        command: OrderedRegistrationCommand,
+        *,
+        event_id: str,
+    ) -> int:
+        """Tell the masters of a same-day game that its confirmed player switched to another game."""
+
+        if command.operation is not Operation.CONFIRM:
+            raise ValueError("command does not replace a confirmed participation")
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        # The replaced registration is deleted by the confirmation, and only a
+        # confirmed participation can be replaced.
+        player_name, nickname = await self._command_player_name(command)
+        text = cancellation_master_text(
+            event,
+            player_name,
+            nickname,
+            confirmed=True,
+            same_day_replacement=True,
+        )
+
+        delivered = 0
+        for identity, profile in await self._cancellation_masters(event.event_id, command):
+            request_id = (
+                f"{command.operation_id}:cancellation-master:{identity.platform.value}:{identity.platform_user_id}"
+            )
+            # Confirmations run in a per-player FIFO group, so the per-event retry
+            # snapshot cannot be used; the delivery marker suppresses a repeat.
+            if profile is not None and profile.last_delivery_operation_id == request_id:
+                continue
+            await self.transport.send(
+                platform=identity.platform,
+                user_id=identity.platform_user_id,
+                request_id=request_id,
+                text=text,
+                buttons=[main_menu_button()],
+            )
+            await self.users.claim_delivery(
+                identity.platform,
+                identity.platform_user_id,
+                request_id,
+                [main_menu_button()],
+            )
+            delivered += 1
+        return delivered
 
     async def notify_capacity_promotions(self, command: OrderedRegistrationCommand) -> int:
         """Notify every reserve participant moved into the enlarged main roster."""
@@ -2334,6 +2501,16 @@ class OrderedMutationService:
             await self.catalog.refresh(event)
             return MutationResult("Пожелания по соигрокам обновлены")
         if command.operation is Operation.CANCEL:
+            if event.last_participant_removal_operation_id != command.operation_id:
+                # Save the status before cancelling so a retry still tells the
+                # masters whether the player had confirmed.
+                await self.events.set_participant_removal(
+                    event.event_id,
+                    command.operation_id,
+                    []
+                    if registration.attendance_status is AttendanceStatus.CANCELLED
+                    else [_cancellation_snapshot_entry(registration)],
+                )
             await self._record_reserve_promotion(event, command, registration)
             await self._record_confirmed_link_promotion(event, command, registration)
             await self.catalog.registrations.cancel(
