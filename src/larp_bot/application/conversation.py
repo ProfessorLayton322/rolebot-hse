@@ -120,6 +120,7 @@ LEGACY_SEND_CONFIRMED_NOTIFICATION = "📣 Уведомить подтверди
 LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
 REMOVE_PLAYER = "🗑 Удалить игрока"
 MANAGE_PLAYERS = "Управление игроками"
+LIST_PLAYER_PROFILES = "📋 Список профилей игроков"
 REMOVE_WAITING_PLAYERS = "Убрать не подтвердившихся в запас"
 LEGACY_REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
@@ -198,6 +199,7 @@ ADMIN_ACTIONS = frozenset(
         LIST_WAITING_PLAYERS,
         REMOVE_PLAYER,
         MANAGE_PLAYERS,
+        LIST_PLAYER_PROFILES,
         REMOVE_WAITING_PLAYERS,
         LEGACY_REMOVE_WAITING_PLAYERS,
         CREATE_PASS_TABLE,
@@ -258,6 +260,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_REMOVE_CONFIRM",
         "ADMIN_REMOVE_WAITING_CONFIRM",
         "ADMIN_WAITING_PICK",
+        "ADMIN_PROFILES_PICK",
     }
 )
 
@@ -824,21 +827,17 @@ class ConversationEngine:
             return admin_response
         return await self._main(user, "Не удалось распознать команду. Выберите действие кнопкой.")
 
-    async def _profile_response(self, user: User, *, prefix: str | None = None) -> BotResponse:
-        contact = user.vk_url if isinstance(user, TelegramUser) else user.telegram_handle
-        contact_label = "Профиль ВКонтакте" if isinstance(user, TelegramUser) else "Профиль Telegram"
-        role = await self._user_role_label(user)
+    @staticmethod
+    def _profile_lines(user: User, *, role: str, contacts: list[str]) -> list[str]:
         details = user.pass_details
         full_name = user.full_name or "не указано"
         if details is not None:
             full_name = _pass_name((details.surname_cyrillic, details.name_cyrillic, details.patronym_cyrillic))
         lines = [
-            "Профиль",
-            "",
             f"ФИО: {full_name}",
             f"Никнейм: {user.nickname or 'не указан'}",
             f"Статус: {role}",
-            f"{contact_label}: {contact or 'не указан'}",
+            *contacts,
             f"Кросспол: {_bool_text(user.crossplay)}",
             f"Нужен пропуск: {_bool_text(user.needs_pass)}",
         ]
@@ -854,6 +853,17 @@ class ConversationEngine:
                 lines.append(
                     f"ФИО латиницей: {_pass_name((details.surname_latin, details.name_latin, details.patronym_latin))}"
                 )
+        return lines
+
+    async def _profile_response(self, user: User, *, prefix: str | None = None) -> BotResponse:
+        contact = user.vk_url if isinstance(user, TelegramUser) else user.telegram_handle
+        contact_label = "Профиль ВКонтакте" if isinstance(user, TelegramUser) else "Профиль Telegram"
+        role = await self._user_role_label(user)
+        lines = [
+            "Профиль",
+            "",
+            *self._profile_lines(user, role=role, contacts=[f"{contact_label}: {contact or 'не указан'}"]),
+        ]
         text = "\n".join(lines)
         if prefix is not None:
             text = f"{prefix}\n\n{text}"
@@ -2992,6 +3002,7 @@ class ConversationEngine:
             "ADMIN_REMOVE_CONFIRM",
             "ADMIN_REMOVE_WAITING_CONFIRM",
             "ADMIN_WAITING_PICK",
+            "ADMIN_PROFILES_PICK",
         }
         if user.dialog_state in event_bound_states:
             event_id = str(user.dialog_context["event_id"])
@@ -3073,6 +3084,8 @@ class ConversationEngine:
             return await self._admin_remove_waiting_confirm(user, message, value)
         if user.dialog_state == "ADMIN_WAITING_PICK":
             return await self._admin_waiting_pick(user, value)
+        if user.dialog_state == "ADMIN_PROFILES_PICK":
+            return await self._admin_profiles_pick(user, value)
         if user.dialog_state in {"ADMIN_CREATE_MASTER_CHOICE", "ADMIN_CREATE_MASTER_PICK"}:
             return await self._creation_master_step(user, message, value)
         if user.dialog_state in {"ADMIN_CREATE_SCHEDULE_CHOICE", "ADMIN_CREATE_SCHEDULE_TIME"}:
@@ -3831,6 +3844,194 @@ class ConversationEngine:
             ],
         )
 
+    @classmethod
+    def _optional_registration_cursor(cls, user: User, name: str) -> tuple[datetime, str] | None:
+        if user.dialog_context.get(name) is None:
+            return None
+        return cls._stored_registration_cursor(user, name)
+
+    async def _show_player_profiles(
+        self,
+        user: User,
+        event: Event,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        invalid: str = "",
+    ) -> BotResponse:
+        page = await self.administration.active_registration_page(
+            event.event_id,
+            after=after,
+            before=before,
+            limit=PAGE_SIZE,
+        )
+        if not page.rows and (after is not None or before is not None):
+            # The remembered page emptied out after cancellations; start over from the first page.
+            return await self._show_player_profiles(user, event, invalid=invalid)
+        user.dialog_state = "ADMIN_PROFILES_PICK"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "game_date": event.game_date.isoformat() if event.game_date is not None else None,
+        }
+        if not page.rows:
+            return BotResponse(
+                text=(
+                    f"В игре {event_reference(event.name, event.game_date)} нет записавшихся "
+                    "или подтвердивших участие игроков."
+                ),
+                buttons=_pagination_buttons(
+                    previous=None,
+                    following=None,
+                    cancel=f"ag:players:{event.event_id}",
+                ),
+            )
+
+        choices: dict[str, str] = {}
+        buttons: list[Button] = []
+        for registration in page.rows:
+            token = token_urlsafe(8)
+            choices[token] = registration.participant_key
+            buttons.append(
+                Button(
+                    label=f"{registration.display_name} — {_attendance_status_text(registration.attendance_status)}",
+                    value=f"admin:profiles:pick:{token}",
+                )
+            )
+        page_token = token_urlsafe(8)
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"admin:profiles:page:p:{page_token}" if page.has_previous else None,
+                following=f"admin:profiles:page:n:{page_token}" if page.has_next else None,
+                cancel=f"ag:players:{event.event_id}",
+            )
+        )
+        user.dialog_context.update(
+            {
+                "profiles_choices": choices,
+                "profiles_page_token": page_token,
+                "profiles_first": [page.rows[0].created_at.isoformat(), page.rows[0].participant_key],
+                "profiles_last": [page.rows[-1].created_at.isoformat(), page.rows[-1].participant_key],
+                # Remember how this page was loaded so a viewed profile can return to it.
+                "profiles_after": None if after is None else [after[0].isoformat(), after[1]],
+                "profiles_before": None if before is None else [before[0].isoformat(), before[1]],
+            }
+        )
+        prefix = f"{invalid}\n\n" if invalid else ""
+        return BotResponse(
+            text=(
+                f"{prefix}Профили игроков игры {event_reference(event.name, event.game_date)}\n\n"
+                "Выберите игрока, чтобы посмотреть его профиль. Показаны все записавшиеся "
+                "и подтвердившие участие, в основном составе и в запасе."
+            ),
+            buttons=buttons,
+        )
+
+    async def _current_player_profiles(self, user: User, event: Event, *, invalid: str = "") -> BotResponse:
+        return await self._show_player_profiles(
+            user,
+            event,
+            after=self._optional_registration_cursor(user, "profiles_after"),
+            before=self._optional_registration_cursor(user, "profiles_before"),
+            invalid=invalid,
+        )
+
+    @classmethod
+    def _player_profile_text(
+        cls,
+        event: Event,
+        registration: Registration,
+        participant: User,
+        *,
+        role: str,
+        in_main_roster: bool,
+    ) -> str:
+        telegram_profile = registration.telegram_profile
+        if participant.telegram_handle is not None:
+            telegram_profile = f"https://t.me/{participant.telegram_handle.removeprefix('@')}"
+        if isinstance(participant, TelegramUser):
+            bot_name = "Telegram"
+            vk_profile = participant.vk_url or registration.vk_profile
+        else:
+            bot_name = "ВК"
+            vk_profile = f"https://vk.com/id{participant.vk_id}"
+        contacts = [
+            f"Профиль Telegram: {telegram_profile or 'не указан'}",
+            f"Профиль ВКонтакте: {vk_profile or 'не указан'}",
+        ]
+        roster = "основной состав" if in_main_roster else "запас"
+        lines = [
+            "Профиль",
+            "",
+            *cls._profile_lines(participant, role=role, contacts=contacts),
+            "",
+            f"Игра: {event_reference(event.name, event.game_date)}",
+            f"Запись: {_attendance_status_text(registration.attendance_status)}, {roster}",
+            f"Зарегистрирован через бота: {bot_name}",
+        ]
+        return "\n".join(lines)
+
+    async def _admin_profiles_pick(self, user: User, value: str) -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+
+        parts = value.split(":")
+        page_token = user.dialog_context.get("profiles_page_token")
+        if len(parts) == 5 and parts[:3] == ["admin", "profiles", "page"]:
+            direction, requested_token = parts[3:]
+            if requested_token != page_token or direction not in {"n", "p", "c"}:
+                return await self._show_player_profiles(user, event, invalid="Эта страница устарела.")
+            if direction == "p":
+                return await self._show_player_profiles(
+                    user,
+                    event,
+                    before=self._stored_registration_cursor(user, "profiles_first"),
+                )
+            if direction == "n":
+                return await self._show_player_profiles(
+                    user,
+                    event,
+                    after=self._stored_registration_cursor(user, "profiles_last"),
+                )
+            return await self._current_player_profiles(user, event)
+        if len(parts) != 4 or parts[:3] != ["admin", "profiles", "pick"]:
+            return await self._current_player_profiles(user, event, invalid="Выберите игрока кнопкой из списка.")
+        choices = user.dialog_context.get("profiles_choices")
+        registration_key = choices.get(parts[3]) if isinstance(choices, dict) else None
+        if not isinstance(registration_key, str):
+            return await self._current_player_profiles(user, event, invalid="Этот список устарел.")
+        registration = await self.administration.get_registration(event_id, registration_key)
+        if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
+            return await self._current_player_profiles(
+                user,
+                event,
+                invalid="Этот игрок больше не записан на игру.",
+            )
+        participant, in_main_roster = await asyncio.gather(
+            self.administration.registration_user(event_id, registration_key),
+            self.administration.in_main_roster(event_id, registration_key),
+        )
+        buttons = [
+            Button(label="⬅️ К списку", value=f"admin:profiles:page:c:{page_token}"),
+            player_management_button(event_id),
+        ]
+        if participant is None:
+            return BotResponse(text="Не удалось найти профиль этого пользователя.", buttons=buttons)
+        role = await self._user_role_label(participant)
+        return BotResponse(
+            text=self._player_profile_text(
+                event,
+                registration,
+                participant,
+                role=role,
+                in_main_roster=in_main_roster,
+            ),
+            buttons=buttons,
+        )
+
     @staticmethod
     def _remove_confirmation_response(user: User, *, invalid: str = "") -> BotResponse:
         event_id = str(user.dialog_context["event_id"])
@@ -4258,6 +4459,7 @@ class ConversationEngine:
             buttons=[
                 Button(label=REMOVE_PLAYER, value=f"ag:remove:{event.event_id}"),
                 Button(label=REMOVE_WAITING_PLAYERS, value=f"ag:remove-waiting:{event.event_id}"),
+                Button(label=LIST_PLAYER_PROFILES, value=f"ag:profiles:{event.event_id}"),
                 game_management_button(event.event_id),
             ],
         )
@@ -4424,6 +4626,8 @@ class ConversationEngine:
             return await self._show_removable_players(user, event)
         if action == "remove-waiting":
             return await self._remove_waiting_confirmation(user, event)
+        if action == "profiles":
+            return await self._show_player_profiles(user, event)
         if action == "masters":
             return await self._event_masters_menu(user, event)
         if action == "leader":
@@ -4524,6 +4728,7 @@ class ConversationEngine:
             EVENT_TABLES,
             REMOVE_PLAYER,
             MANAGE_PLAYERS,
+            LIST_PLAYER_PROFILES,
             REMOVE_WAITING_PLAYERS,
             LEGACY_REMOVE_WAITING_PLAYERS,
             ADD_EVENT_LEADER,

@@ -960,6 +960,17 @@ class EventAdministrationService:
             for registration in await self.catalog.registrations.list_for_event(event_id)
         )
 
+    async def in_main_roster(self, event_id: str, participant_key: str) -> bool:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        registrations = await self.catalog.registrations.list_for_event(event_id)
+        return any(
+            registration.participant_key == participant_key
+            for registration in _active_main_roster(registrations, event.player_amount)
+        )
+
     async def registration_user(self, event_id: str, registration_key: str) -> User | None:
         if await self.events.get(event_id) is None:
             raise EventNotFound("Игра не найдена")
