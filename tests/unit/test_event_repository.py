@@ -392,6 +392,24 @@ async def test_participant_removal_snapshot_and_delivery_are_persisted() -> None
     assert "participant_removal_notified_keys_json = $notified_keys_json" in delivery_executor.query_text
     assert json.loads(delivery_executor.params["$notified_keys_json"]) == keys
 
+    extension_executor = RecordingExecutor(
+        [
+            event_row("CREATED")
+            | {
+                "last_participant_removal_operation_id": "removal-operation",
+                "participant_removal_keys_json": json.dumps(keys),
+                "participant_removal_notified_keys_json": json.dumps([keys[0]]),
+            }
+        ]
+    )
+    repository = YdbEventRepository(extension_executor)  # type: ignore[arg-type]
+    await repository.add_participant_removal_keys("event-a1", "removal-operation", [keys[1], "c" * 43, "c" * 43])
+
+    assert "SET participant_removal_keys_json = $participant_keys_json," in extension_executor.query_text
+    assert "participant_removal_notified_keys_json" not in extension_executor.query_text
+    assert "last_participant_removal_operation_id = $operation_id" in extension_executor.query_text
+    assert json.loads(extension_executor.params["$participant_keys_json"]) == [*keys, "c" * 43]
+
 
 @pytest.mark.asyncio
 async def test_event_leaders_are_added_idempotently_and_listed_by_platform_identity() -> None:

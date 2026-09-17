@@ -488,7 +488,7 @@ async def test_ydb_registration_sift_moves_all_waiting_rows_with_one_update() ->
 
     query, params = executor.queries[1]
     assert query.count("UPDATE `registrations`") == 1
-    assert "SET created_at = created_at + $shift" in query
+    assert "SET created_at = Unwrap(created_at + $shift)" in query
     assert "event_id = $event_id AND attendance_status = $waiting_status" in query
     assert params == {
         "$event_id": "event-a1",

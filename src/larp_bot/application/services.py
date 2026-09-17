@@ -1105,6 +1105,36 @@ def _chat_link_recipient_keys(registrations: Sequence[Registration], player_amou
     }
 
 
+def _current_sift_entries(
+    snapshot: Sequence[str],
+    registrations: Sequence[Registration],
+    player_amount: int,
+) -> set[str]:
+    """Keep the saved confirmation-sift moves that still match the current roster.
+
+    Confirmations use per-player FIFO groups, so they can change attendance while
+    a sift retry waits in its per-event group, which makes an older move untrue.
+    """
+
+    statuses = {registration.participant_key: registration.attendance_status for registration in registrations}
+    main_roster_keys = {
+        registration.participant_key for registration in _active_main_roster(registrations, player_amount)
+    }
+    current: set[str] = set()
+    for entry in snapshot:
+        parsed = _parse_sift_snapshot_entry(entry)
+        if parsed is None:
+            continue
+        transition, key = parsed
+        if transition == SIFT_PROMOTED_PREFIX:
+            still_true = statuses.get(key) is AttendanceStatus.CONFIRMED and key in main_roster_keys
+        else:
+            still_true = statuses.get(key) is AttendanceStatus.WAITING and key not in main_roster_keys
+        if still_true:
+            current.add(entry)
+    return current
+
+
 # Telegram rejects longer message texts and counts them in UTF-16 code units.
 MAX_MESSAGE_LENGTH = 4096
 MASTER_NO_SHOW_WARNING = (
@@ -1681,6 +1711,11 @@ class ConfirmationNotificationService:
         delivered = 0
         notified_entries = set(event.participant_removal_notified_keys)
         chat_links = [text for text in event.confirmed_notifications if is_plain_chat_link(text)]
+        current_entries = _current_sift_entries(
+            event.participant_removal_keys,
+            await self.catalog.registrations.list_for_event(event.event_id),
+            event.player_amount,
+        )
         for snapshot_entry in event.participant_removal_keys:
             if snapshot_entry in notified_entries:
                 continue
@@ -1688,6 +1723,12 @@ class ConfirmationNotificationService:
             if parsed is None:
                 LOGGER.warning(
                     "confirmation_sift_snapshot_invalid",
+                    extra={"event_id": event.event_id, "operation_id": command.operation_id},
+                )
+                continue
+            if snapshot_entry not in current_entries:
+                LOGGER.info(
+                    "confirmation_sift_move_outdated",
                     extra={"event_id": event.event_id, "operation_id": command.operation_id},
                 )
                 continue
@@ -1713,7 +1754,7 @@ class ConfirmationNotificationService:
             else:
                 messages = [
                     (
-                        "Вы не усепели подтвердить или отменить ваше участие в игре "
+                        "Вы не успели подтвердить или отменить ваше участие в игре "
                         f"«{event.name}». Мы были вынуждены переместить вашу заявку в запас"
                     )
                 ]
@@ -1959,58 +2000,55 @@ class OrderedMutationService:
 
         event = await self.catalog.ensure_migrated(event)
         if command.operation is Operation.REMOVE_WAITING_PARTICIPANTS:
-            if event.last_participant_removal_operation_id == command.operation_id:
-                snapshot = event.participant_removal_keys
-            else:
-                registrations = [
-                    registration
-                    for registration in await self.catalog.registrations.list_for_event(event.event_id)
-                    if registration.attendance_status is not AttendanceStatus.CANCELLED
-                ]
-                registrations.sort(key=lambda row: (row.created_at, row.participant_key))
-                before_main = {row.participant_key for row in registrations[: event.player_amount]}
-                reordered = sorted(
-                    registrations,
-                    key=lambda row: (
-                        row.attendance_status is not AttendanceStatus.CONFIRMED,
-                        row.created_at,
-                        row.participant_key,
-                    ),
-                )
-                after_main = {row.participant_key for row in reordered[: event.player_amount]}
-                promoted_keys = [
-                    row.participant_key for row in reordered if row.participant_key in after_main - before_main
-                ]
-                demoted_keys = [
-                    row.participant_key for row in registrations if row.participant_key in before_main - after_main
-                ]
-                snapshot = [
-                    *(_sift_snapshot_entry(SIFT_PROMOTED_PREFIX, key) for key in promoted_keys),
-                    *(_sift_snapshot_entry(SIFT_DEMOTED_PREFIX, key) for key in demoted_keys),
-                ]
-                await self.events.set_participant_removal(
-                    event.event_id,
-                    command.operation_id,
-                    snapshot,
-                )
-            active_registrations = [
+            registrations = [
                 registration
                 for registration in await self.catalog.registrations.list_for_event(event.event_id)
                 if registration.attendance_status is not AttendanceStatus.CANCELLED
             ]
+            registrations.sort(key=lambda row: (row.created_at, row.participant_key))
             reordered = sorted(
-                active_registrations,
+                registrations,
                 key=lambda row: (
                     row.attendance_status is not AttendanceStatus.CONFIRMED,
                     row.created_at,
                     row.participant_key,
                 ),
             )
-            if [row.participant_key for row in active_registrations] != [row.participant_key for row in reordered]:
+            if [row.participant_key for row in registrations] != [row.participant_key for row in reordered]:
+                before_main = {row.participant_key for row in registrations[: event.player_amount]}
+                after_main = {row.participant_key for row in reordered[: event.player_amount]}
+                moves = [
+                    *(
+                        _sift_snapshot_entry(SIFT_PROMOTED_PREFIX, row.participant_key)
+                        for row in reordered
+                        if row.participant_key in after_main - before_main
+                    ),
+                    *(
+                        _sift_snapshot_entry(SIFT_DEMOTED_PREFIX, row.participant_key)
+                        for row in registrations
+                        if row.participant_key in before_main - after_main
+                    ),
+                ]
+                # Save the moves before making them so notifications survive a retry.
+                # A retry lands here again when an earlier attempt failed before the
+                # sift, or when a player confirmed after it; add this attempt's moves
+                # without resetting the notifications that were already delivered.
+                if event.last_participant_removal_operation_id == command.operation_id:
+                    await self.events.add_participant_removal_keys(event.event_id, command.operation_id, moves)
+                else:
+                    await self.events.set_participant_removal(event.event_id, command.operation_id, moves)
                 await self.catalog.registrations.sift_waiting_to_end(event.event_id)
+            elif event.last_participant_removal_operation_id != command.operation_id:
+                await self.events.set_participant_removal(event.event_id, command.operation_id, [])
             await self.catalog.refresh(event)
-            promoted_count = sum(entry.startswith(SIFT_PROMOTED_PREFIX) for entry in snapshot)
-            demoted_count = sum(entry.startswith(SIFT_DEMOTED_PREFIX) for entry in snapshot)
+            stored_event = await self.events.get(event.event_id)
+            current_entries = _current_sift_entries(
+                stored_event.participant_removal_keys if stored_event is not None else [],
+                await self.catalog.registrations.list_for_event(event.event_id),
+                event.player_amount,
+            )
+            promoted_count = sum(entry.startswith(SIFT_PROMOTED_PREFIX) for entry in current_entries)
+            demoted_count = sum(entry.startswith(SIFT_DEMOTED_PREFIX) for entry in current_entries)
             return MutationResult(
                 f"Заявки пересортированы: в основной состав перемещено {promoted_count}, в запас — {demoted_count}"
             )
