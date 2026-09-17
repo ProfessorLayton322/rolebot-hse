@@ -1490,3 +1490,204 @@ async def test_confirmed_reserve_gets_information_then_chat_link_after_cancellat
     assert stored_event is not None
     assert stored_event.last_confirmed_link_promotion_participant_key == keys[4]
     assert stored_event.last_confirmed_link_promotion_delivered_operation_id == cancel.command.operation_id
+
+
+class FailingOnceForRecipientTransport(MemoryDeferredTransport):
+    def __init__(self, platform: Platform, user_id: int) -> None:
+        super().__init__()
+        self.failing: tuple[Platform, int] | None = (platform, user_id)
+
+    async def send(
+        self,
+        *,
+        platform: Platform,
+        user_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None:
+        if (platform, user_id) == self.failing:
+            self.failing = None
+            raise RuntimeError("transport unavailable")
+        await super().send(platform=platform, user_id=user_id, request_id=request_id, text=text, buttons=buttons)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attendance_status", "status_text"),
+    [(AttendanceStatus.WAITING, "не подтверждено"), (AttendanceStatus.CONFIRMED, "подтверждено")],
+    ids=["waiting", "confirmed"],
+)
+async def test_cancellation_notifies_every_other_master_with_the_player_status_exactly_once(
+    attendance_status: AttendanceStatus,
+    status_text: str,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.game_date = date(2026, 11, 14)
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    # The cancelling player also masters the game and must not be told about themselves.
+    for platform, user_id in [(Platform.TELEGRAM, 1), (Platform.TELEGRAM, 7), (Platform.VK, 8)]:
+        await events.add_leader(event.event_id, BotIdentity(platform=platform, platform_user_id=user_id))
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1, full_name="Иванов Иван"))
+    await users.save(TelegramUser(tg_id=7, full_name="Петров Пётр"))
+    await users.save(VkUser(vk_id=8, full_name="Андреев Андрей"))
+    player_key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=player_key,
+                display_name="Иванов Иван",
+                nickname="Ваня",
+                wish_play="A",
+                attendance_status=attendance_status,
+            )
+        ]
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    # Masters are notified in name order, so the second master's failure
+    # leaves the first one already notified.
+    transport = FailingOnceForRecipientTransport(Platform.TELEGRAM, 7)
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    def cancel_command() -> OrderedRegistrationCommand:
+        return OrderedRegistrationCommand(
+            operation_id=str(uuid4()),
+            event_id=event.event_id,
+            operation=Operation.CANCEL,
+            platform=Platform.TELEGRAM,
+            platform_user_id=1,
+            participant_key=player_key,
+            payload=EmptyPayload(),
+            reply_context=ReplyContext(text_success="✅ Участие отменено."),
+        )
+
+    def worker_for(command: OrderedRegistrationCommand, receipt: str) -> OrderedWorker:
+        return OrderedWorker(
+            FakeConsumer([QueueEnvelope(command=command, receipt_handle=receipt)]),
+            mutations,
+            users,
+            transport,
+            notifications,
+            max_seconds=2,
+        )
+
+    command = cancel_command()
+    with pytest.raises(RuntimeError, match="transport unavailable"):
+        await worker_for(command, "receipt-first").run()
+    cancelled = await tables.get(event.event_id, player_key)
+    assert cancelled is not None
+    assert cancelled.attendance_status is AttendanceStatus.CANCELLED
+
+    master_text = (
+        f"Отмена участия в игре «{event.name}» (14.11.26)\n\n"
+        "Игрок: Иванов Иван\n"
+        "Никнейм: Ваня\n"
+        f"Статус участия: {status_text}"
+    )
+    assert [(sent[0], sent[1], sent[3], sent[4]) for sent in transport.sent] == [
+        (Platform.VK, 8, master_text, (Button(label=MAIN_MENU_LABEL, value=MAIN_MENU),)),
+    ]
+
+    # The retry still reports the status the player had before cancelling, and
+    # later unrelated deliveries must not make an already notified master repeat.
+    await users.claim_delivery(Platform.VK, 8, "unrelated-delivery")
+    assert await worker_for(command, "receipt-retry").run() == 1
+    assert await worker_for(command, "receipt-second-retry").run() == 1
+    assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
+        (Platform.VK, 8, master_text),
+        (Platform.TELEGRAM, 7, master_text),
+        (Platform.TELEGRAM, 1, "✅ Участие отменено."),
+    ]
+
+    # Cancelling an already cancelled registration changes nothing for the masters.
+    assert await worker_for(cancel_command(), "receipt-repeated-cancel").run() == 1
+    assert [(sent[1], sent[3]) for sent in transport.sent[3:]] == [(1, "✅ Участие отменено.")]
+
+
+@pytest.mark.asyncio
+async def test_same_day_replacement_notifies_masters_of_the_replaced_game_exactly_once(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.game_date = date(2026, 11, 14)
+    replaced_event = event.model_copy(
+        update={
+            "event_id": "event-b1",
+            "name": "Другая игра",
+            "disk_resource_path": "disk:/larp-bot/events/event-b1-other.xlsx",
+            "public_registration_url": "https://disk.example/public/other",
+        }
+    )
+    target_key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    replaced_key = participant_key(secret, Platform.TELEGRAM, 1, replaced_event.event_id)
+    target_registration = Registration(
+        event_id=event.event_id,
+        participant_key=target_key,
+        display_name="Иванов Иван",
+        wish_play="A",
+    )
+    replaced_registration = Registration(
+        event_id=replaced_event.event_id,
+        participant_key=replaced_key,
+        display_name="Иванов Иван",
+        wish_play="A",
+        character_wish="Врач",
+        attendance_status=AttendanceStatus.CONFIRMED,
+    )
+    events = MemoryEventRepository([event, replaced_event])
+    await events.add_leader(event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=9))
+    await events.add_leader(replaced_event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=7))
+    await events.add_leader(replaced_event.event_id, BotIdentity(platform=Platform.VK, platform_user_id=8))
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1, full_name="Иванов Иван Иванович"))
+    await users.save(TelegramUser(tg_id=7, full_name="Петров Пётр"))
+    await users.save(VkUser(vk_id=8, full_name="Андреев Андрей"))
+    await users.save(TelegramUser(tg_id=9, full_name="Сидоров Сидор"))
+    tables = MemoryRegistrationRepository([target_registration, replaced_registration])
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, [target_registration])
+    await showcase.create_event_workbook(replaced_event.disk_resource_path, [replaced_registration])
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog, users, secret)
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.CONFIRM,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        participant_key=target_key,
+        payload=CharacterWishPayload(character_wish="Детектив", replaced_event_id=replaced_event.event_id),
+    )
+
+    for receipt in ("receipt-first", "receipt-retry"):
+        worker = OrderedWorker(
+            FakeConsumer([QueueEnvelope(command=command, receipt_handle=receipt)]),
+            mutations,
+            users,
+            transport,
+            notifications,
+            max_seconds=2,
+        )
+        assert await worker.run() == 1
+
+    assert await tables.get(replaced_event.event_id, replaced_key) is None
+    master_text = (
+        f"Отмена участия в игре «{replaced_event.name}» (14.11.26)\n\n"
+        "Игрок: Иванов Иван\n"
+        "Статус участия: подтверждено\n\n"
+        "Причина: игрок подтвердил участие в другой игре в тот же день."
+    )
+    assert [(sent[0], sent[1], sent[3]) for sent in transport.sent if sent[1] != 1] == [
+        (Platform.VK, 8, master_text),
+        (Platform.TELEGRAM, 7, master_text),
+    ]
