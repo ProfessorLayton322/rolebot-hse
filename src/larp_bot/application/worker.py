@@ -153,6 +153,12 @@ class OrderedWorker:
                             if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
                                 await self.notifications.notify_reserve_promotion(command)
                                 await self.notifications.notify_confirmed_link_promotion(command)
+                    elif (
+                        notifications_enabled
+                        and command.operation is Operation.UPDATE_PLAYER_AMOUNT
+                        and self.notifications is not None
+                    ):
+                        await self.notifications.notify_capacity_promotions(command)
                 except DomainError as exc:
                     text = command.reply_context.text_failure or f"❌ {exc}"
                 except Exception as exc:

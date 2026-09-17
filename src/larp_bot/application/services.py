@@ -1534,6 +1534,81 @@ class ConfirmationNotificationService:
             )
         return len(links)
 
+    async def notify_capacity_promotions(self, command: OrderedRegistrationCommand) -> int:
+        """Notify every reserve participant moved into the enlarged main roster."""
+
+        if command.operation is not Operation.UPDATE_PLAYER_AMOUNT:
+            raise ValueError("command does not update player capacity")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.last_participant_removal_operation_id != command.operation_id:
+            return 0
+
+        promoted_keys = set(event.participant_removal_keys)
+        notified_keys = set(event.participant_removal_notified_keys)
+        registrations = {
+            registration.participant_key: registration
+            for registration in await self.catalog.registrations.list_for_event(event.event_id)
+            if registration.participant_key in promoted_keys
+        }
+        recipients: dict[str, NotificationRecipient] = {}
+        for user in await self.users.list_all():
+            platform, uid = self._identity(user)
+            key = participant_key(self.participant_secret, platform, uid, event.event_id)
+            if key in promoted_keys:
+                recipients[key] = NotificationRecipient(platform, uid, user)
+
+        delivered = 0
+        chat_links = [text for text in event.confirmed_notifications if is_plain_chat_link(text)]
+        for key in event.participant_removal_keys:
+            if key in notified_keys:
+                continue
+            recipient = recipients.get(key)
+            if recipient is None:
+                LOGGER.warning(
+                    "capacity_promotion_recipient_missing",
+                    extra={"event_id": event.event_id, "operation_id": command.operation_id},
+                )
+                continue
+            messages = [
+                (
+                    "Количество мест увеличилось: вы перешли из запаса в основной состав игры "
+                    f"{event_reference(event.name, event.game_date)}.\n\n"
+                    "Посмотрите актуальный состав игроков: "
+                    f"{event.public_table_public_url}"
+                )
+            ]
+            registration = registrations.get(key)
+            if registration is not None and registration.attendance_status is AttendanceStatus.CONFIRMED:
+                messages.extend(confirmed_notification_text(event.name, link, event.game_date) for link in chat_links)
+            last_request_id = ""
+            for index, text in enumerate(messages):
+                last_request_id = (
+                    f"{command.operation_id}:capacity-promotion:{recipient.platform.value}:{recipient.user_id}:{index}"
+                )
+                await self.transport.send(
+                    platform=recipient.platform,
+                    user_id=recipient.user_id,
+                    request_id=last_request_id,
+                    text=text,
+                    buttons=[main_menu_button()],
+                )
+            await self.events.mark_participant_removal_delivered(
+                event.event_id,
+                command.operation_id,
+                key,
+            )
+            notified_keys.add(key)
+            await self.users.claim_delivery(
+                recipient.platform,
+                recipient.user_id,
+                last_request_id,
+                [main_menu_button()],
+            )
+            delivered += 1
+        return delivered
+
     async def notify_removed_participants(self, command: OrderedRegistrationCommand) -> int:
         if command.operation is not Operation.REMOVE_PARTICIPANT:
             raise ValueError("command does not remove participants")
@@ -1845,6 +1920,27 @@ class OrderedMutationService:
         if command.operation is Operation.UPDATE_PLAYER_AMOUNT:
             assert isinstance(command.payload, PlayerAmountPayload)
             event = await self.catalog.ensure_migrated(event)
+            if event.last_participant_removal_operation_id != command.operation_id:
+                promoted_keys: list[str] = []
+                if command.payload.player_amount > event.player_amount:
+                    registrations = [
+                        registration
+                        for registration in await self.catalog.registrations.list_for_event(event.event_id)
+                        if registration.attendance_status is not AttendanceStatus.CANCELLED
+                    ]
+                    registrations.sort(key=lambda row: (row.created_at, row.participant_key))
+                    promoted_keys = [
+                        registration.participant_key
+                        for registration in registrations[event.player_amount : command.payload.player_amount]
+                    ]
+                # Reuse the per-event retry snapshot used by other multi-recipient
+                # transitions. FIFO ordering prevents another event command from
+                # replacing it before every notification attempt has completed.
+                await self.events.set_participant_removal(
+                    event.event_id,
+                    command.operation_id,
+                    promoted_keys,
+                )
             await self.events.set_player_amount(event.event_id, command.payload.player_amount)
             event.player_amount = command.payload.player_amount
             await self.catalog.refresh(event)
