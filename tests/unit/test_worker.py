@@ -42,6 +42,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    PlayerAmountPayload,
     ProfileSyncPayload,
     Registration,
     ReplyContext,
@@ -607,6 +608,110 @@ async def test_reserve_promotion_is_notified_exactly_once_after_cancel_or_remova
         assert workbook.active["A3"].value == "ЗАПАС"
     finally:
         workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_capacity_increase_notifies_every_promoted_player_exactly_once(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    actor_id = 9
+    event.player_amount = 1
+    event.confirmed_notifications = ["https://t.me/+GameChat_123"]
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    events = MemoryEventRepository([event])
+    await events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=actor_id),
+    )
+    identities = [
+        (Platform.TELEGRAM, 1),
+        (Platform.TELEGRAM, 2),
+        (Platform.VK, 3),
+        (Platform.TELEGRAM, 4),
+    ]
+    keys = [participant_key(secret, platform, user_id, event.event_id) for platform, user_id in identities]
+    signed_up_at = datetime(2026, 9, 1, tzinfo=UTC)
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key,
+                display_name=f"Player {index}",
+                wish_play="A",
+                attendance_status=(AttendanceStatus.CONFIRMED if index == 3 else AttendanceStatus.WAITING),
+                created_at=signed_up_at + timedelta(minutes=index),
+            )
+            for index, key in enumerate(keys, start=1)
+        ]
+    )
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=actor_id))
+    for platform, user_id in identities:
+        if platform is Platform.TELEGRAM:
+            await users.save(TelegramUser(tg_id=user_id))
+        else:
+            await users.save(VkUser(vk_id=user_id))
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.UPDATE_PLAYER_AMOUNT,
+        platform=Platform.TELEGRAM,
+        platform_user_id=actor_id,
+        payload=PlayerAmountPayload(player_amount=3),
+        reply_context=ReplyContext(text_success="Количество игроков изменено: 3"),
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    first_consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-first")])
+    first_worker = OrderedWorker(
+        first_consumer,
+        mutations,
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+    assert await first_worker.run() == 1
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    promotion = (
+        f"Количество мест увеличилось: вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+        f"Посмотрите актуальный состав игроков: {stored_event.public_table_public_url}"
+    )
+    assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
+        (Platform.TELEGRAM, 2, promotion),
+        (Platform.VK, 3, promotion),
+        (
+            Platform.VK,
+            3,
+            confirmed_notification_text(event.name, event.confirmed_notifications[0]),
+        ),
+        (Platform.TELEGRAM, actor_id, "Количество игроков изменено: 3"),
+    ]
+    assert stored_event.last_participant_removal_operation_id == command.operation_id
+    assert stored_event.participant_removal_keys == keys[1:3]
+    assert stored_event.participant_removal_notified_keys == keys[1:3]
+
+    for platform, user_id in identities[1:3]:
+        await users.claim_delivery(platform, user_id, f"unrelated-{platform.value}-{user_id}")
+    retry_consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
+    retry_worker = OrderedWorker(
+        retry_consumer,
+        mutations,
+        users,
+        transport,
+        notifications,
+        max_seconds=2,
+    )
+    assert await retry_worker.run() == 1
+    assert len(transport.sent) == 4
 
 
 @pytest.mark.asyncio
