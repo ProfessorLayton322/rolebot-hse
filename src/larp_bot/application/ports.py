@@ -126,6 +126,13 @@ class EventRepository(Protocol):
         participant_keys: Sequence[str],
     ) -> None: ...
 
+    async def add_participant_removal_keys(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> None: ...
+
     async def mark_participant_removal_delivered(
         self,
         event_id: str,

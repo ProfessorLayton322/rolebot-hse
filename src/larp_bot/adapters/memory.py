@@ -326,6 +326,20 @@ class MemoryEventRepository:
         event.participant_removal_notified_keys = []
         event.updated_at = datetime.now(event.updated_at.tzinfo)
 
+    async def add_participant_removal_keys(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> None:
+        event = self.rows[event_id]
+        if event.last_participant_removal_operation_id != operation_id:
+            return
+        added = [key for key in dict.fromkeys(participant_keys) if key not in event.participant_removal_keys]
+        if added:
+            event.participant_removal_keys.extend(added)
+            event.updated_at = datetime.now(event.updated_at.tzinfo)
+
     async def mark_participant_removal_delivered(
         self,
         event_id: str,

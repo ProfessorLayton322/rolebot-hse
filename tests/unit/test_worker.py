@@ -787,7 +787,7 @@ async def test_confirmation_sift_notifies_promoted_and_demoted_players_exactly_o
         f"Посмотрите актуальный состав игроков: {stored_event.public_table_public_url}"
     )
     demotion = (
-        f"Вы не усепели подтвердить или отменить ваше участие в игре «{event.name}». "
+        f"Вы не успели подтвердить или отменить ваше участие в игре «{event.name}». "
         "Мы были вынуждены переместить вашу заявку в запас"
     )
     assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
@@ -819,6 +819,113 @@ async def test_confirmation_sift_notifies_promoted_and_demoted_players_exactly_o
     retry_worker = OrderedWorker(retry, mutations, users, transport, notifications, max_seconds=2)
     assert await retry_worker.run() == 1
     assert len(transport.sent) == 4
+
+
+class SiftFailingOnceRegistrationRepository(MemoryRegistrationRepository):
+    def __init__(self, registrations: Sequence[Registration]) -> None:
+        super().__init__(registrations)
+        self.sift_failures = 1
+
+    async def sift_waiting_to_end(self, event_id: str) -> None:
+        if self.sift_failures:
+            self.sift_failures -= 1
+            raise RuntimeError("Can't set NULL or optional value to not null column: created_at")
+        await super().sift_waiting_to_end(event_id)
+
+
+@pytest.mark.asyncio
+async def test_confirmation_sift_retry_notifies_moves_of_the_current_roster(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    event.player_amount = 2
+    event.confirmed_notifications = ["https://t.me/+GameChat_123"]
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    users = MemoryUserRepository()
+    identities = [(Platform.TELEGRAM, 2), (Platform.VK, 3), (Platform.TELEGRAM, 4), (Platform.TELEGRAM, 5)]
+    await users.save(TelegramUser(tg_id=1))
+    for platform, user_id in identities:
+        await users.save(TelegramUser(tg_id=user_id) if platform is Platform.TELEGRAM else VkUser(vk_id=user_id))
+    keys = [participant_key(secret, platform, user_id, event.event_id) for platform, user_id in identities]
+    tables = SiftFailingOnceRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key,
+                display_name=f"Player {index}",
+                wish_play="A",
+                attendance_status=AttendanceStatus.CONFIRMED if index == 2 else AttendanceStatus.WAITING,
+                created_at=base + timedelta(seconds=index),
+            )
+            for index, key in enumerate(keys)
+        ]
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.REMOVE_WAITING_PARTICIPANTS,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=EmptyPayload(),
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-first")])
+    worker = OrderedWorker(consumer, mutations, users, transport, notifications, max_seconds=2)
+    with pytest.raises(RuntimeError, match="not null column"):
+        await worker.run()
+    assert consumer.deleted == []
+    assert transport.sent == []
+
+    # The first attempt planned to demote player 1. While the per-event FIFO
+    # group was blocked, that player confirmed through their own group, so the
+    # retry moves player 0 into the reserve instead.
+    stored_registration = tables.rows[(event.event_id, keys[1])]
+    stored_registration.attendance_status = AttendanceStatus.CONFIRMED
+
+    retry = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
+    retry_worker = OrderedWorker(retry, mutations, users, transport, notifications, max_seconds=2)
+    assert await retry_worker.run() == 1
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    promotion = (
+        f"Вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+        f"Посмотрите актуальный состав игроков: {stored_event.public_table_public_url}"
+    )
+    demotion = (
+        f"Вы не успели подтвердить или отменить ваше участие в игре «{event.name}». "
+        "Мы были вынуждены переместить вашу заявку в запас"
+    )
+    assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
+        (Platform.TELEGRAM, 4, promotion),
+        (
+            Platform.TELEGRAM,
+            4,
+            confirmed_notification_text(event.name, event.confirmed_notifications[0]),
+        ),
+        (Platform.TELEGRAM, 2, demotion),
+        (
+            Platform.TELEGRAM,
+            1,
+            "Заявки пересортированы: в основной состав перемещено 1, в запас — 1",
+        ),
+    ]
+    assert retry.deleted == ["receipt-retry"]
+    assert [row.participant_key for row in await tables.list_for_event(event.event_id)] == [
+        keys[1],
+        keys[2],
+        keys[0],
+        keys[3],
+    ]
 
 
 @pytest.mark.asyncio

@@ -1196,6 +1196,39 @@ class YdbEventRepository:
             },
         )
 
+    async def add_participant_removal_keys(
+        self,
+        event_id: str,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> None:
+        event = await self.get(event_id)
+        if event is None or event.last_participant_removal_operation_id != operation_id:
+            return
+        added = [key for key in dict.fromkeys(participant_keys) if key not in event.participant_removal_keys]
+        if not added:
+            return
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $participant_keys_json AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET participant_removal_keys_json = $participant_keys_json,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND last_participant_removal_operation_id = $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$participant_keys_json": json.dumps(
+                    [*event.participant_removal_keys, *added],
+                    separators=(",", ":"),
+                ),
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
     async def mark_participant_removal_delivered(
         self,
         event_id: str,
@@ -1776,12 +1809,15 @@ class YdbRegistrationRepository:
         created_times = [registration.created_at for registration in active]
         shift = max(created_times) - min(created_times) + timedelta(microseconds=1)
         shift_microseconds = shift // timedelta(microseconds=1)
+        # Timestamp + Interval is Optional<Timestamp> in YQL because it may overflow.
+        # YDB rejects the whole UPDATE when an optional value targets the NOT NULL
+        # created_at column, so the result must be unwrapped explicitly.
         await self.db.query(
             """
             DECLARE $event_id AS Utf8; DECLARE $waiting_status AS Utf8;
             DECLARE $shift AS Interval;
             UPDATE `registrations`
-            SET created_at = created_at + $shift
+            SET created_at = Unwrap(created_at + $shift)
             WHERE event_id = $event_id AND attendance_status = $waiting_status;
             """,
             {
