@@ -49,6 +49,7 @@ from larp_bot.application.conversation import (
     LATIN_FULL_NAME_PROMPT,
     LIST_EVENT_LEADERS,
     LIST_GAMEMASTERS,
+    LIST_PLAYER_PROFILES,
     LIST_WAITING_PLAYERS,
     MAIN_MENU,
     MAIN_MENU_LABEL,
@@ -2043,6 +2044,8 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     assert waiting_denied.text == "Только мастера этой игры могут изменять её данные."
     removal_denied = await engine.handle(inbound(8, f"ag:remove:{event.event_id}", callback=True))
     assert removal_denied.text == "Только мастера этой игры могут изменять её данные."
+    profiles_denied = await engine.handle(inbound(9, f"ag:profiles:{event.event_id}", callback=True))
+    assert profiles_denied.text == "Только мастера этой игры могут изменять её данные."
     assert publisher.commands == []
 
 
@@ -2153,6 +2156,170 @@ async def test_event_leader_pages_waiting_players_and_shows_signup_profiles(
         "Вот его профиль вк: https://vk.com/id250\n"
         "Вот его профиль Telegram: https://t.me/vk_player_profile"
     )
+
+
+@pytest.mark.asyncio
+async def test_event_leader_pages_all_active_players_and_shows_their_profiles(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event = event.model_copy(update={"player_amount": 3, "game_date": date(2026, 10, 3)})
+    engine, users, publisher, tables = await engine_setup(disk_store, event, admin=True)
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    registrations: list[Registration] = []
+    for index in range(6):
+        player = TelegramUser(
+            tg_id=100 + index,
+            full_name=f"Игрок Telegram {index}",
+            vk_url=f"https://vk.com/id{100 + index}",
+            telegram_handle=f"@telegram_player_{index}",
+            crossplay=index % 2 == 0,
+            larp_experience=True,
+            needs_pass=False,
+            is_gamemaster=index == 1,
+        )
+        await users.save(player)
+        registrations.append(
+            Registration(
+                event_id=event.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, player.tg_id, event.event_id),
+                display_name=player.full_name or "",
+                vk_profile=player.vk_url or "",
+                telegram_profile=f"https://t.me/{player.telegram_handle.removeprefix('@')}",
+                wish_play="Без пожеланий",
+                attendance_status=AttendanceStatus.CONFIRMED if index % 2 == 0 else AttendanceStatus.WAITING,
+                created_at=base + timedelta(seconds=index),
+            )
+        )
+    vk_player = VkUser(
+        vk_id=250,
+        full_name="Петров Пётр",
+        nickname="Пётр/Странник",
+        telegram_handle="@vk_player_profile",
+        crossplay=False,
+        larp_experience=True,
+        needs_pass=True,
+        pass_details=PassDetails(
+            surname_cyrillic="Петров",
+            name_cyrillic="Пётр",
+            patronym_cyrillic="Петрович",
+            foreigner=False,
+            mobile_phone="+7 999 765-43-21",
+            email="petr@example.com",
+        ),
+    )
+    await users.save(vk_player)
+    registrations.append(
+        Registration(
+            event_id=event.event_id,
+            participant_key=engine.registrations.key(Platform.VK, vk_player.vk_id, event.event_id),
+            display_name="Петров Пётр",
+            vk_profile="https://vk.com/id250",
+            telegram_profile="https://t.me/vk_player_profile",
+            wish_play="Без пожеланий",
+            attendance_status=AttendanceStatus.CONFIRMED,
+            created_at=base + timedelta(seconds=10),
+        )
+    )
+    await tables.import_missing(
+        [
+            *registrations,
+            Registration(
+                event_id=event.event_id,
+                participant_key="x" * 43,
+                display_name="Отменивший игрок",
+                wish_play="Без пожеланий",
+                attendance_status=AttendanceStatus.CANCELLED,
+                created_at=base + timedelta(seconds=2, microseconds=1),
+            ),
+        ]
+    )
+
+    player_management = await engine.handle(inbound(1, f"ag:players:{event.event_id}", callback=True))
+    assert (LIST_PLAYER_PROFILES, f"ag:profiles:{event.event_id}") in [
+        (button.label, button.value) for button in player_management.buttons
+    ]
+
+    first = await engine.handle(inbound(2, f"ag:profiles:{event.event_id}", callback=True))
+    first_players = [button for button in first.buttons if button.value.startswith("admin:profiles:pick:")]
+    assert [button.label for button in first_players] == [
+        "Игрок Telegram 0 — Подтверждено",
+        "Игрок Telegram 1 — Ожидает подтверждения",
+        "Игрок Telegram 2 — Подтверждено",
+        "Игрок Telegram 3 — Ожидает подтверждения",
+        "Игрок Telegram 4 — Подтверждено",
+    ]
+    assert "Профили игроков игры «Лесной предел» (03.10.26)" in first.text
+    assert PAGE_BACK not in [button.label for button in first.buttons]
+
+    moderator_profile = await engine.handle(inbound(3, first_players[1].value, callback=True))
+    assert moderator_profile.text == (
+        "Профиль\n\n"
+        "ФИО: Игрок Telegram 1\n"
+        "Никнейм: не указан\n"
+        "Статус: Модератор\n"
+        "Профиль Telegram: https://t.me/telegram_player_1\n"
+        "Профиль ВКонтакте: https://vk.com/id101\n"
+        "Кросспол: Нет\n"
+        "Нужен пропуск: Нет\n\n"
+        "Игра: «Лесной предел» (03.10.26)\n"
+        "Запись: Ожидает подтверждения, основной состав\n"
+        "Зарегистрирован через бота: Telegram"
+    )
+    assert moderator_profile.buttons[1] == Button(label=BACK, value=f"ag:players:{event.event_id}")
+
+    returned = await engine.handle(inbound(4, moderator_profile.buttons[0].value, callback=True))
+    assert [button.label for button in returned.buttons if button.value.startswith("admin:profiles:pick:")] == [
+        button.label for button in first_players
+    ]
+
+    stale = await engine.handle(inbound(5, first_players[0].value, callback=True))
+    assert "кнопка устарела" in stale.text.casefold()
+
+    next_button = next(button for button in returned.buttons if button.label == PAGE_FORWARD)
+    second = await engine.handle(inbound(6, next_button.value, callback=True))
+    second_players = [button for button in second.buttons if button.value.startswith("admin:profiles:pick:")]
+    assert [button.label for button in second_players] == [
+        "Игрок Telegram 5 — Ожидает подтверждения",
+        "Петров Пётр — Подтверждено",
+    ]
+    assert PAGE_FORWARD not in [button.label for button in second.buttons]
+
+    reserve_profile = await engine.handle(inbound(7, second_players[1].value, callback=True))
+    assert reserve_profile.text == (
+        "Профиль\n\n"
+        "ФИО: Петров Пётр Петрович\n"
+        "Никнейм: Пётр/Странник\n"
+        "Статус: Игрок\n"
+        "Профиль Telegram: https://t.me/vk_player_profile\n"
+        "Профиль ВКонтакте: https://vk.com/id250\n"
+        "Кросспол: Нет\n"
+        "Нужен пропуск: Да\n"
+        "Номер телефона: +7 999 765-43-21\n"
+        "Email: petr@example.com\n"
+        "Российское гражданство: Да\n\n"
+        "Игра: «Лесной предел» (03.10.26)\n"
+        "Запись: Подтверждено, запас\n"
+        "Зарегистрирован через бота: ВК"
+    )
+
+    back_to_second = await engine.handle(inbound(8, reserve_profile.buttons[0].value, callback=True))
+    second_players = [button for button in back_to_second.buttons if button.value.startswith("admin:profiles:pick:")]
+    assert [button.label for button in second_players] == [
+        "Игрок Telegram 5 — Ожидает подтверждения",
+        "Петров Пётр — Подтверждено",
+    ]
+
+    cancelled_key = (event.event_id, registrations[5].participant_key)
+    tables.rows[cancelled_key] = tables.rows[cancelled_key].model_copy(
+        update={"attendance_status": AttendanceStatus.CANCELLED}
+    )
+    cancelled = await engine.handle(inbound(9, second_players[0].value, callback=True))
+    assert cancelled.text.startswith("Этот игрок больше не записан на игру.")
+    assert [button.label for button in cancelled.buttons if button.value.startswith("admin:profiles:pick:")] == [
+        "Петров Пётр — Подтверждено"
+    ]
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio
