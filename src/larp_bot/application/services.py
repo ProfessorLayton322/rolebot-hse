@@ -34,6 +34,7 @@ from larp_bot.domain.models import (
     Registration,
     ReplyContext,
     TelegramUser,
+    UnreachableRecipient,
     User,
     event_reference,
     format_game_date,
@@ -1369,6 +1370,39 @@ class ConfirmationNotificationService:
             return Platform.TELEGRAM, user.tg_id
         return Platform.VK, user.vk_id
 
+    async def _deliver(
+        self,
+        *,
+        platform: Platform,
+        user_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button],
+    ) -> bool:
+        """Send one notification, reporting whether the recipient can receive it.
+
+        A recipient whose platform refuses the message permanently is treated as
+        finished by the caller: retrying only repeats the rejection, and the
+        command would hold its FIFO message and stall every later command for
+        the same game. Every other failure still propagates and is retried.
+        """
+
+        try:
+            await self.transport.send(
+                platform=platform,
+                user_id=user_id,
+                request_id=request_id,
+                text=text,
+                buttons=buttons,
+            )
+        except UnreachableRecipient as exc:
+            LOGGER.warning(
+                "notification_recipient_unreachable",
+                extra={"platform": platform.value, "recipient_id": user_id, "rejection": str(exc)},
+            )
+            return False
+        return True
+
     async def _recipients(
         self,
         event: Event,
@@ -1444,15 +1478,18 @@ class ConfirmationNotificationService:
             )
             if recipient.user.last_delivery_operation_id == request_id:
                 continue
-            await self.transport.send(
+            reached = await self._deliver(
                 platform=recipient.platform,
                 user_id=recipient.user_id,
                 request_id=request_id,
                 text=text,
                 buttons=buttons,
             )
+            # The marker is also written for a refused recipient so the rest of
+            # the fan-out is not repeated for them on a later attempt.
             await self.users.claim_delivery(recipient.platform, recipient.user_id, request_id, buttons)
-            delivered += 1
+            if reached:
+                delivered += 1
         return delivered
 
     async def notify_confirming_participant(
@@ -1472,13 +1509,22 @@ class ConfirmationNotificationService:
         if event is None:
             raise EventNotFound("Игра не найдена")
 
-        await self.transport.send(
+        if not await self._deliver(
             platform=command.platform,
             user_id=command.platform_user_id,
             request_id=f"{command.operation_id}:confirmation-result",
             text=confirmation_text,
             buttons=confirmation_buttons,
-        )
+        ):
+            # The player cannot receive bot messages at all, so the rest of the
+            # bundle is pointless. The command counts as answered and completes.
+            await self.users.claim_delivery(
+                command.platform,
+                command.platform_user_id,
+                command.operation_id,
+                confirmation_buttons,
+            )
+            return 0
         registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
         link_recipients = _chat_link_recipient_keys(registrations, event.player_amount)
         delivered_notifications = [
@@ -1487,13 +1533,14 @@ class ConfirmationNotificationService:
             if not is_plain_chat_link(stored_text) or command.participant_key in link_recipients
         ]
         for index, stored_text in delivered_notifications:
-            await self.transport.send(
+            if not await self._deliver(
                 platform=command.platform,
                 user_id=command.platform_user_id,
                 request_id=f"{command.operation_id}:past-confirmed-notification:{index}",
                 text=confirmed_notification_text(event.name, stored_text, event.game_date),
                 buttons=[main_menu_button()],
-            )
+            ):
+                break
         # One command-level marker is written only after the complete bundle is
         # accepted. No per-notification/per-recipient delivery state is stored.
         delivered_buttons = [main_menu_button()] if delivered_notifications else confirmation_buttons
@@ -1542,7 +1589,7 @@ class ConfirmationNotificationService:
         request_id = f"{command.operation_id}:reserve-promotion"
         if recipient.user.last_delivery_operation_id == request_id:
             return 0
-        await self.transport.send(
+        reached = await self._deliver(
             platform=recipient.platform,
             user_id=recipient.user_id,
             request_id=request_id,
@@ -1562,7 +1609,7 @@ class ConfirmationNotificationService:
             request_id,
             [main_menu_button()],
         )
-        return 1
+        return 1 if reached else 0
 
     async def notify_confirmed_link_promotion(
         self,
@@ -1600,15 +1647,18 @@ class ConfirmationNotificationService:
 
         links = [text for text in event.confirmed_notifications if is_plain_chat_link(text)]
         last_request_id: str | None = None
+        reached = True
         for index, link in enumerate(links):
             last_request_id = f"{command.operation_id}:confirmed-link-promotion:{index}"
-            await self.transport.send(
+            reached = await self._deliver(
                 platform=recipient.platform,
                 user_id=recipient.user_id,
                 request_id=last_request_id,
                 text=confirmed_notification_text(event.name, link, event.game_date),
                 buttons=[main_menu_button()],
             )
+            if not reached:
+                break
         await self.events.mark_confirmed_link_promotion_delivered(event.event_id, command.operation_id)
         if last_request_id is not None:
             await self.users.claim_delivery(
@@ -1617,7 +1667,7 @@ class ConfirmationNotificationService:
                 last_request_id,
                 [main_menu_button()],
             )
-        return len(links)
+        return len(links) if reached else 0
 
     async def _cancellation_masters(
         self,
@@ -1675,7 +1725,7 @@ class ConfirmationNotificationService:
             if marker in notified_keys:
                 continue
             request_id = f"{command.operation_id}:cancellation-master:{recipient}"
-            await self.transport.send(
+            reached = await self._deliver(
                 platform=identity.platform,
                 user_id=identity.platform_user_id,
                 request_id=request_id,
@@ -1690,7 +1740,8 @@ class ConfirmationNotificationService:
                 request_id,
                 [main_menu_button()],
             )
-            delivered += 1
+            if reached:
+                delivered += 1
         return delivered
 
     async def notify_masters_of_replaced_participation(
@@ -1726,7 +1777,7 @@ class ConfirmationNotificationService:
             # snapshot cannot be used; the delivery marker suppresses a repeat.
             if profile is not None and profile.last_delivery_operation_id == request_id:
                 continue
-            await self.transport.send(
+            reached = await self._deliver(
                 platform=identity.platform,
                 user_id=identity.platform_user_id,
                 request_id=request_id,
@@ -1739,7 +1790,8 @@ class ConfirmationNotificationService:
                 request_id,
                 [main_menu_button()],
             )
-            delivered += 1
+            if reached:
+                delivered += 1
         return delivered
 
     async def notify_capacity_promotions(self, command: OrderedRegistrationCommand) -> int:
@@ -1791,17 +1843,23 @@ class ConfirmationNotificationService:
             if registration is not None and registration.attendance_status is AttendanceStatus.CONFIRMED:
                 messages.extend(confirmed_notification_text(event.name, link, event.game_date) for link in chat_links)
             last_request_id = ""
+            reached = True
             for index, text in enumerate(messages):
                 last_request_id = (
                     f"{command.operation_id}:capacity-promotion:{recipient.platform.value}:{recipient.user_id}:{index}"
                 )
-                await self.transport.send(
+                reached = await self._deliver(
                     platform=recipient.platform,
                     user_id=recipient.user_id,
                     request_id=last_request_id,
                     text=text,
                     buttons=[main_menu_button()],
                 )
+                if not reached:
+                    break
+            # A refused recipient is recorded like a notified one: the snapshot
+            # exists to stop repeats, and retrying a permanent rejection would
+            # keep this capacity change ahead of every later command.
             await self.events.mark_participant_removal_delivered(
                 event.event_id,
                 command.operation_id,
@@ -1814,7 +1872,8 @@ class ConfirmationNotificationService:
                 last_request_id,
                 [main_menu_button()],
             )
-            delivered += 1
+            if reached:
+                delivered += 1
         return delivered
 
     async def notify_removed_participants(self, command: OrderedRegistrationCommand) -> int:
@@ -1849,7 +1908,7 @@ class ConfirmationNotificationService:
                 )
                 continue
             request_id = f"{command.operation_id}:participant-removal:{recipient.platform.value}:{recipient.user_id}"
-            await self.transport.send(
+            reached = await self._deliver(
                 platform=recipient.platform,
                 user_id=recipient.user_id,
                 request_id=request_id,
@@ -1868,7 +1927,8 @@ class ConfirmationNotificationService:
                 request_id,
                 [main_menu_button()],
             )
-            delivered += 1
+            if reached:
+                delivered += 1
         return delivered
 
     async def notify_sifted_participants(self, command: OrderedRegistrationCommand) -> int:
@@ -1938,18 +1998,21 @@ class ConfirmationNotificationService:
                 ]
                 transition_name = "demotion"
             last_request_id = ""
+            reached = True
             for index, text in enumerate(messages):
                 last_request_id = (
                     f"{command.operation_id}:confirmation-sift:{transition_name}:"
                     f"{recipient.platform.value}:{recipient.user_id}:{index}"
                 )
-                await self.transport.send(
+                reached = await self._deliver(
                     platform=recipient.platform,
                     user_id=recipient.user_id,
                     request_id=last_request_id,
                     text=text,
                     buttons=[main_menu_button()],
                 )
+                if not reached:
+                    break
             await self.events.mark_participant_removal_delivered(
                 event.event_id,
                 command.operation_id,
@@ -1962,7 +2025,8 @@ class ConfirmationNotificationService:
                 last_request_id,
                 [main_menu_button()],
             )
-            delivered += 1
+            if reached:
+                delivered += 1
         return delivered
 
 

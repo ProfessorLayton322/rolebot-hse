@@ -5,7 +5,7 @@ import time
 from collections.abc import Sequence
 
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.domain.models import Button, Operation, Platform
+from larp_bot.domain.models import Button, Operation, Platform, UnreachableRecipient
 
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
@@ -41,13 +41,27 @@ class OrderedWorker:
         user = await self.users.get(command.platform, command.platform_user_id)
         if user is not None and user.last_delivery_operation_id == command.operation_id:
             return
-        await self.transport.send(
-            platform=command.platform,
-            user_id=command.platform_user_id,
-            request_id=command.operation_id,
-            text=text,
-            buttons=buttons,
-        )
+        try:
+            await self.transport.send(
+                platform=command.platform,
+                user_id=command.platform_user_id,
+                request_id=command.operation_id,
+                text=text,
+                buttons=buttons,
+            )
+        except UnreachableRecipient as exc:
+            # The author blocked the bot or deleted their account. Their reply can
+            # never arrive, so the completed command must not keep its FIFO
+            # message and stall every later command for the same game.
+            LOGGER.warning(
+                "command_response_recipient_unreachable",
+                extra={
+                    "operation_id": command.operation_id,
+                    "platform": command.platform.value,
+                    "rejection": str(exc),
+                },
+            )
+            return
         # Mark only after the transport accepted the message. If delivery fails, the FIFO
         # message remains retryable and the already-authoritative YDB mutation is not undone.
         await self.users.claim_delivery(

@@ -47,6 +47,7 @@ from larp_bot.domain.models import (
     Registration,
     ReplyContext,
     TelegramUser,
+    UnreachableRecipient,
     VkUser,
 )
 from larp_bot.domain.security import participant_key
@@ -76,6 +77,33 @@ class FailingTransport(MemoryDeferredTransport):
     async def send(self, **kwargs: object) -> None:
         del kwargs
         raise RuntimeError("transport unavailable")
+
+
+class BlockedRecipientTransport(MemoryDeferredTransport):
+    """Refuse one recipient the way Telegram refuses a user who blocked the bot."""
+
+    def __init__(self, blocked: tuple[Platform, int]) -> None:
+        super().__init__()
+        self.blocked = blocked
+
+    async def send(
+        self,
+        *,
+        platform: Platform,
+        user_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None:
+        if (platform, user_id) == self.blocked:
+            raise UnreachableRecipient(f"{platform.value} {user_id}: Forbidden: bot was blocked by the user")
+        await super().send(
+            platform=platform,
+            user_id=user_id,
+            request_id=request_id,
+            text=text,
+            buttons=buttons,
+        )
 
 
 class FailingProfileStatistics:
@@ -712,6 +740,123 @@ async def test_capacity_increase_notifies_every_promoted_player_exactly_once(
     )
     assert await retry_worker.run() == 1
     assert len(transport.sent) == 4
+
+
+@pytest.mark.asyncio
+async def test_capacity_increase_completes_when_a_promoted_player_blocked_the_bot(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    actor_id = 9
+    event.player_amount = 1
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    events = MemoryEventRepository([event])
+    await events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=actor_id),
+    )
+    identities = [(Platform.TELEGRAM, 1), (Platform.TELEGRAM, 2), (Platform.VK, 3)]
+    keys = [participant_key(secret, platform, user_id, event.event_id) for platform, user_id in identities]
+    signed_up_at = datetime(2026, 9, 1, tzinfo=UTC)
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key,
+                display_name=f"Player {index}",
+                wish_play="A",
+                created_at=signed_up_at + timedelta(minutes=index),
+            )
+            for index, key in enumerate(keys, start=1)
+        ]
+    )
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=actor_id))
+    for platform, user_id in identities:
+        if platform is Platform.TELEGRAM:
+            await users.save(TelegramUser(tg_id=user_id))
+        else:
+            await users.save(VkUser(vk_id=user_id))
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.UPDATE_PLAYER_AMOUNT,
+        platform=Platform.TELEGRAM,
+        platform_user_id=actor_id,
+        payload=PlayerAmountPayload(player_amount=3),
+        reply_context=ReplyContext(text_success="Количество игроков изменено: 3"),
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = BlockedRecipientTransport((Platform.TELEGRAM, 2))
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-blocked")])
+    worker = OrderedWorker(consumer, mutations, users, transport, notifications, max_seconds=2)
+
+    assert await worker.run() == 1
+    assert consumer.deleted == ["receipt-blocked"]
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    promotion = (
+        f"Количество мест увеличилось: вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+        f"Посмотрите актуальный состав игроков: {stored_event.public_table_public_url}"
+    )
+    # The reachable player and the master are served although Telegram refuses
+    # the other promoted player permanently.
+    assert [(sent[0], sent[1], sent[3]) for sent in transport.sent] == [
+        (Platform.VK, 3, promotion),
+        (Platform.TELEGRAM, actor_id, "Количество игроков изменено: 3"),
+    ]
+    assert stored_event.participant_removal_keys == keys[1:3]
+    assert stored_event.participant_removal_notified_keys == keys[1:3]
+
+    retry_consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-retry")])
+    retry_worker = OrderedWorker(retry_consumer, mutations, users, transport, notifications, max_seconds=2)
+    assert await retry_worker.run() == 1
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_command_reply_to_an_author_who_blocked_the_bot_completes_the_command(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    actor_id = 9
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    events = MemoryEventRepository([event])
+    await events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=actor_id),
+    )
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=actor_id))
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.UPDATE_PLAYER_AMOUNT,
+        platform=Platform.TELEGRAM,
+        platform_user_id=actor_id,
+        payload=PlayerAmountPayload(player_amount=4),
+        reply_context=ReplyContext(text_success="Количество игроков изменено: 4"),
+    )
+    catalog = RegistrationCatalog(events, MemoryRegistrationRepository([]), showcase)
+    transport = BlockedRecipientTransport((Platform.TELEGRAM, actor_id))
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, "participant-secret")
+    mutations = OrderedMutationService(events, catalog)
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-author")])
+    worker = OrderedWorker(consumer, mutations, users, transport, notifications, max_seconds=2)
+
+    assert await worker.run() == 1
+    assert consumer.deleted == ["receipt-author"]
+    assert transport.sent == []
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.player_amount == 4
 
 
 @pytest.mark.asyncio

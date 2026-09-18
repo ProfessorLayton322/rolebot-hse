@@ -131,6 +131,17 @@ class Platform(StrEnum):
     SYSTEM = "system"
 
 
+class UnreachableRecipient(RuntimeError):
+    """One recipient can never receive bot messages on their platform.
+
+    Telegram and VK reject a send permanently when the person blocked the bot,
+    deleted their account, or never allowed messages from the community. Every
+    retry receives the same rejection, so an ordered command must record that
+    recipient as done instead of failing; otherwise it keeps its FIFO message
+    and blocks every later command for the same game.
+    """
+
+
 class EventStatus(StrEnum):
     CREATED = "CREATED"
     CONFIRMATION_OPEN = "CONFIRMATION_OPEN"
