@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handle, type Env } from "../src/index";
 
+// The production defaults. The hard deadline must stay far above the time the
+// handler itself spends hashing and signing, because it also gates the inline
+// reply: a deadline of a few milliseconds makes every inline assertion depend
+// on how loaded the machine is. Only the hard-timeout test shortens it.
 const env: Env = {
   TG_WEBHOOK_SECRET: "webhook-secret",
   CF_TO_YANDEX_HMAC_SECRET: "transport-secret",
   YANDEX_GATEWAY_URL: "https://gateway.example/webhooks/telegram",
   BACKEND_INLINE_CUTOFF_MS: "1500",
-  INGRESS_HARD_DEADLINE_MS: "25",
+  INGRESS_HARD_DEADLINE_MS: "2500",
 };
 
 function request(
@@ -62,7 +66,8 @@ describe("telegram ingress", () => {
 
   it("returns an empty 200 at the hard timeout", async () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => undefined)));
-    const response = await handle(request(), env, context());
+    // This upstream never answers, so a short deadline only keeps the test fast.
+    const response = await handle(request(), { ...env, INGRESS_HARD_DEADLINE_MS: "25" }, context());
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("");
   });
