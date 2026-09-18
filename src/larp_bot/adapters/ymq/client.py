@@ -67,3 +67,13 @@ class YmqFifoConsumer:
             QueueUrl=self.fifo_url,
             ReceiptHandle=receipt_handle,
         )
+
+    async def release(self, receipt_handle: str) -> None:
+        """Make a failed command immediately available to the kick retry."""
+
+        await asyncio.to_thread(
+            self.sqs.change_message_visibility,
+            QueueUrl=self.fifo_url,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=0,
+        )

@@ -103,6 +103,7 @@ jobs:
             echo "telegram_ingress_url=$(terraform output -raw telegram_ingress_url)"
             echo "telegram_egress_url=$(terraform output -raw telegram_egress_url)"
             echo "vk_callback_url=$(terraform output -raw vk_callback_url)"
+            echo "ymq_kick_url=$(terraform output -raw ymq_kick_url)"
           } >>"${GITHUB_OUTPUT}"
       - name: Inject Cloudflare Worker secrets
         env:
@@ -127,6 +128,10 @@ jobs:
           INGRESS_WORKER_NAME: larp-bot-telegram-ingress
           EGRESS_WORKER_NAME: larp-bot-telegram-egress
         run: bash scripts/update_cloudflare_secrets.sh
+      - name: Wake ordered worker after deployment
+        env:
+          YMQ_KICK_URL: ${{ steps.outputs.outputs.ymq_kick_url }}
+        run: python scripts/wake_ordered_worker.py
       - name: Configure Telegram webhook
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
