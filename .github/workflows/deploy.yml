@@ -55,12 +55,25 @@ jobs:
           bash scripts/check_telegram_isolation.sh
       - name: Build deterministic Function package
         run: bash scripts/build_function.sh
-      - name: Build and test Workers
-        run: |
-          npm ci && npm test && npm run typecheck && npm run build
-          cd ../telegram-egress
-          npm ci && npm test && npm run typecheck && npm run build
+      # One command per line and one step per Worker. A previous `&&` chain
+      # followed by another line hid a failing `npm test`: Bash `-e` ignores a
+      # non-final command of an `&&` list, the step took its status from the
+      # last line, and the skipped `npm run build` surfaced much later as a
+      # Terraform "Error computing SHA-256 hash" on the missing bundle.
+      - name: Build and test the Telegram ingress Worker
         working-directory: cloudflare/telegram-ingress
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+      - name: Build and test the Telegram egress Worker
+        working-directory: cloudflare/telegram-egress
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
       - name: Exchange GitHub OIDC token for Yandex IAM token
         env:
           YC_WIF_AUDIENCE: ${{ vars.YC_WIF_AUDIENCE }}
