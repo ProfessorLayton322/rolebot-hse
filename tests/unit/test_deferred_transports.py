@@ -5,8 +5,8 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from larp_bot.adapters.transports.deferred import VkApiTransport
-from larp_bot.domain.models import Button
+from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress, VkApiTransport
+from larp_bot.domain.models import Button, UnreachableRecipient
 
 
 @pytest.mark.asyncio
@@ -110,3 +110,71 @@ async def test_vk_profile_resolver_resolves_vanity_profile() -> None:
     assert len(requests) == 1
     assert requests[0].url.path.endswith("/users.get")
     assert parse_qs(requests[0].content.decode())["user_ids"] == ["game_master"]
+
+
+@pytest.mark.asyncio
+async def test_vk_transport_reports_a_closed_conversation_as_unreachable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            200,
+            json={
+                "error": {
+                    "error_code": 901,
+                    "error_msg": "Can't send messages for users without permission",
+                }
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        with pytest.raises(UnreachableRecipient, match="vk 42"):
+            await transport.send(user_id=42, request_id="request-4", text="Hello")
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_reports_a_blocked_recipient_as_unreachable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            403,
+            json={
+                "ok": False,
+                "error_code": 403,
+                "description": "Forbidden: bot was blocked by the user",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        with pytest.raises(UnreachableRecipient, match="telegram 42"):
+            await egress.send(user_id=42, request_id="request-5", text="Hello")
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_keeps_egress_worker_rejections_retryable() -> None:
+    # The Worker answers its own signature and payload failures with plain text.
+    # Those must stay retryable instead of dropping a notification silently.
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(403, text="Forbidden")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        with pytest.raises(httpx.HTTPStatusError):
+            await egress.send(user_id=42, request_id="request-6", text="Hello")
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_keeps_malformed_message_rejections_retryable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(
+            400,
+            json={"ok": False, "error_code": 400, "description": "Bad Request: message is too long"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        with pytest.raises(httpx.HTTPStatusError):
+            await egress.send(user_id=42, request_id="request-7", text="Hello")

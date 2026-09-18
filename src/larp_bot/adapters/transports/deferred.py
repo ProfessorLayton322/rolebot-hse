@@ -9,8 +9,37 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from larp_bot.domain.models import Button, Platform, normalize_vk_url
+from larp_bot.domain.models import Button, Platform, UnreachableRecipient, normalize_vk_url
 from larp_bot.domain.security import sign_request
+
+# Telegram reports a permanently undeliverable chat with these texts. Any other
+# rejection stays an error so a real defect, a throttle, or an outage is retried
+# instead of silently dropping a notification.
+TELEGRAM_UNREACHABLE_DESCRIPTIONS = (
+    "bot was blocked by the user",
+    "user is deactivated",
+    "chat not found",
+    "bot can't initiate conversation with a user",
+)
+
+
+def _telegram_error_description(response: httpx.Response) -> str | None:
+    """Return the Telegram API error text that the egress Worker proxied.
+
+    The Worker answers its own authentication and payload failures with plain
+    text, so only a Telegram JSON error body may classify a recipient.
+    """
+
+    if "application/json" not in response.headers.get("Content-Type", ""):
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("ok") is not False:
+        return None
+    description = payload.get("description")
+    return description if isinstance(description, str) else None
 
 
 class CloudflareTelegramEgress:
@@ -60,12 +89,21 @@ class CloudflareTelegramEgress:
                 "X-Signature": signature,
             },
         )
+        if response.status_code in {400, 403}:
+            description = _telegram_error_description(response)
+            if description is not None and any(
+                marker in description.casefold() for marker in TELEGRAM_UNREACHABLE_DESCRIPTIONS
+            ):
+                raise UnreachableRecipient(f"telegram {user_id}: {description}")
         response.raise_for_status()
 
 
 class VkApiTransport:
     API_BASE = "https://api.vk.com/method"
     CHATBOT_FEATURE_DISABLED = 912
+    # 901: the person forbade community messages; 902: their privacy settings
+    # forbid this conversation. Both stay refused until the person changes them.
+    UNREACHABLE_ERROR_CODES = frozenset({901, 902})
 
     def __init__(
         self,
@@ -155,6 +193,8 @@ class VkApiTransport:
             data["message"] = self._text_keyboard(text, buttons)
             payload = await self._post("messages.send", data)
             error = self._api_error(payload)
+        if error is not None and error[0] in self.UNREACHABLE_ERROR_CODES:
+            raise UnreachableRecipient(f"vk {user_id}: {error[1]}")
         if error is not None:
             raise RuntimeError(f"VK API error code {error[0]}: {error[1]}")
 
