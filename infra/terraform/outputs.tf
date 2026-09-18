@@ -33,6 +33,11 @@ output "ymq_secret_access_key" {
   sensitive = true
 }
 
+output "ymq_kick_url" {
+  value       = yandex_message_queue.worker_kicks.id
+  description = "Standard queue used to wake the ordered FIFO worker."
+}
+
 output "ydb_database_path" {
   value = yandex_ydb_database_serverless.application.database_path
 }

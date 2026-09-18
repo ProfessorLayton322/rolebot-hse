@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from larp_bot.adapters.ymq.client import YmqCommandPublisher
+from larp_bot.adapters.ymq.client import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.domain.models import (
     CharacterWishPayload,
     CoPlayerWishPayload,
@@ -19,9 +19,13 @@ from larp_bot.domain.models import (
 class RecordingSqs:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
+        self.visibility_changes: list[dict[str, Any]] = []
 
     def send_message(self, **kwargs: Any) -> None:
         self.messages.append(kwargs)
+
+    def change_message_visibility(self, **kwargs: Any) -> None:
+        self.visibility_changes.append(kwargs)
 
 
 def event_command(event_id: str) -> OrderedRegistrationCommand:
@@ -77,6 +81,22 @@ async def test_confirmations_for_different_games_share_the_players_fifo_group() 
     assert [message["MessageGroupId"] for message in fifo_messages] == [
         "confirmation:telegram:7",
         "confirmation:telegram:7",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_fifo_message_can_be_released_for_the_kick_retry() -> None:
+    sqs = RecordingSqs()
+    consumer = YmqFifoConsumer(sqs, "fifo-url")
+
+    await consumer.release("receipt-1")
+
+    assert sqs.visibility_changes == [
+        {
+            "QueueUrl": "fifo-url",
+            "ReceiptHandle": "receipt-1",
+            "VisibilityTimeout": 0,
+        }
     ]
 
 

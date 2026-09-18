@@ -76,6 +76,7 @@ class OrderedWorker:
         processed = 0
         failed_groups: set[str] = set()
         retryable_error: Exception | None = None
+        retryable_receipts: list[str] = []
         while time.monotonic() - started < self.max_seconds:
             received = await self.consumer.receive(max_messages=5, wait_seconds=1 if processed else 3)
             if not received:
@@ -94,6 +95,7 @@ class OrderedWorker:
                 command = raw.command
                 group_id = command.queue_group_id
                 if group_id in failed_groups:
+                    retryable_receipts.append(raw.receipt_handle)
                     continue
                 command_response_delivered = False
                 # Profile projections are background maintenance. Keep stale
@@ -105,87 +107,93 @@ class OrderedWorker:
                 }
                 buttons: Sequence[Button] = command.reply_context.buttons
                 try:
-                    if command.operation is Operation.SYNC_PROFILE:
-                        if self.statistics is None:
-                            raise RuntimeError("statistics service is not configured")
-                        default_text = await self.statistics.sync_profile(command)
-                    elif command.operation is Operation.STATISTICS:
-                        if self.statistics is None:
-                            raise RuntimeError("statistics service is not configured")
-                        default_text = await self.statistics.apply(command)
-                    else:
-                        result = await self.mutations.apply(command)
-                        default_text = result.text
-                        notifications_enabled = result.notifications_enabled
-                        if result.buttons is not None:
-                            buttons = result.buttons
-                    # ENLIST position and CONFIRM roster membership are decided only
-                    # after their ordered writes; ignore text embedded by gateways
-                    # from an older rollout.
-                    text = (
-                        default_text
-                        if command.operation in {Operation.ENLIST, Operation.CONFIRM}
-                        else command.reply_context.text_success or default_text
-                    )
-                    if (
-                        notifications_enabled
-                        and command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS
-                    ):
-                        if self.notifications is None:
-                            raise RuntimeError("confirmation notification service is not configured")
-                        await self.notifications.notify(command)
-                    elif (
-                        notifications_enabled
-                        and command.operation is Operation.CONFIRM
-                        and self.notifications is not None
-                    ):
-                        await self.notifications.notify_confirming_participant(
-                            command,
-                            text,
-                            command.reply_context.buttons,
+                    try:
+                        if command.operation is Operation.SYNC_PROFILE:
+                            if self.statistics is None:
+                                raise RuntimeError("statistics service is not configured")
+                            default_text = await self.statistics.sync_profile(command)
+                        elif command.operation is Operation.STATISTICS:
+                            if self.statistics is None:
+                                raise RuntimeError("statistics service is not configured")
+                            default_text = await self.statistics.apply(command)
+                        else:
+                            result = await self.mutations.apply(command)
+                            default_text = result.text
+                            notifications_enabled = result.notifications_enabled
+                            if result.buttons is not None:
+                                buttons = result.buttons
+                        # ENLIST position and CONFIRM roster membership are decided only
+                        # after their ordered writes; ignore text embedded by gateways
+                        # from an older rollout.
+                        text = (
+                            default_text
+                            if command.operation in {Operation.ENLIST, Operation.CONFIRM}
+                            else command.reply_context.text_success or default_text
                         )
-                        if result.replaced_event_id is not None:
-                            await self.notifications.notify_reserve_promotion(
+                        if (
+                            notifications_enabled
+                            and command.operation in ConfirmationNotificationService.NOTIFICATION_OPERATIONS
+                        ):
+                            if self.notifications is None:
+                                raise RuntimeError("confirmation notification service is not configured")
+                            await self.notifications.notify(command)
+                        elif (
+                            notifications_enabled
+                            and command.operation is Operation.CONFIRM
+                            and self.notifications is not None
+                        ):
+                            await self.notifications.notify_confirming_participant(
                                 command,
-                                event_id=result.replaced_event_id,
+                                text,
+                                command.reply_context.buttons,
                             )
-                            await self.notifications.notify_confirmed_link_promotion(
-                                command,
-                                event_id=result.replaced_event_id,
-                            )
-                            await self.notifications.notify_masters_of_replaced_participation(
-                                command,
-                                event_id=result.replaced_event_id,
-                            )
-                        command_response_delivered = True
-                    elif notifications_enabled and command.operation in {
-                        Operation.CANCEL,
-                        Operation.REMOVE_PARTICIPANT,
-                        Operation.REMOVE_WAITING_PARTICIPANTS,
-                    }:
-                        if self.notifications is not None:
-                            if command.operation is Operation.REMOVE_PARTICIPANT:
-                                await self.notifications.notify_removed_participants(command)
-                            if command.operation is Operation.REMOVE_WAITING_PARTICIPANTS:
-                                await self.notifications.notify_sifted_participants(command)
-                            if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
-                                await self.notifications.notify_reserve_promotion(command)
-                                await self.notifications.notify_confirmed_link_promotion(command)
-                            if command.operation is Operation.CANCEL:
-                                await self.notifications.notify_masters_of_cancellation(command)
-                    elif (
-                        notifications_enabled
-                        and command.operation is Operation.UPDATE_PLAYER_AMOUNT
-                        and self.notifications is not None
-                    ):
-                        await self.notifications.notify_capacity_promotions(command)
-                except DomainError as exc:
-                    text = command.reply_context.text_failure or f"❌ {exc}"
+                            if result.replaced_event_id is not None:
+                                await self.notifications.notify_reserve_promotion(
+                                    command,
+                                    event_id=result.replaced_event_id,
+                                )
+                                await self.notifications.notify_confirmed_link_promotion(
+                                    command,
+                                    event_id=result.replaced_event_id,
+                                )
+                                await self.notifications.notify_masters_of_replaced_participation(
+                                    command,
+                                    event_id=result.replaced_event_id,
+                                )
+                            command_response_delivered = True
+                        elif notifications_enabled and command.operation in {
+                            Operation.CANCEL,
+                            Operation.REMOVE_PARTICIPANT,
+                            Operation.REMOVE_WAITING_PARTICIPANTS,
+                        }:
+                            if self.notifications is not None:
+                                if command.operation is Operation.REMOVE_PARTICIPANT:
+                                    await self.notifications.notify_removed_participants(command)
+                                if command.operation is Operation.REMOVE_WAITING_PARTICIPANTS:
+                                    await self.notifications.notify_sifted_participants(command)
+                                if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+                                    await self.notifications.notify_reserve_promotion(command)
+                                    await self.notifications.notify_confirmed_link_promotion(command)
+                                if command.operation is Operation.CANCEL:
+                                    await self.notifications.notify_masters_of_cancellation(command)
+                        elif (
+                            notifications_enabled
+                            and command.operation is Operation.UPDATE_PLAYER_AMOUNT
+                            and self.notifications is not None
+                        ):
+                            await self.notifications.notify_capacity_promotions(command)
+                    except DomainError as exc:
+                        text = command.reply_context.text_failure or f"❌ {exc}"
+                    if notifications_enabled and not command_response_delivered:
+                        await self._deliver_once(raw, text, buttons)
+                    await self.consumer.delete(raw.receipt_handle)
                 except Exception as exc:
                     # Keep this command and every later command in the same FIFO
                     # group retryable, but continue draining independent groups.
-                    # Re-raise after the drain so the kick itself is retried too.
+                    # Release their receipts before re-raising so the kick retry
+                    # cannot arrive while the FIFO group is still invisible.
                     failed_groups.add(group_id)
+                    retryable_receipts.append(raw.receipt_handle)
                     if retryable_error is None:
                         retryable_error = exc
                     LOGGER.exception(
@@ -198,9 +206,6 @@ class OrderedWorker:
                         },
                     )
                     continue
-                if notifications_enabled and not command_response_delivered:
-                    await self._deliver_once(raw, text, buttons)
-                await self.consumer.delete(raw.receipt_handle)
                 LOGGER.info(
                     "ordered_command_completed",
                     extra={
@@ -212,5 +217,10 @@ class OrderedWorker:
                 )
                 processed += 1
         if retryable_error is not None:
+            for receipt_handle in dict.fromkeys(retryable_receipts):
+                try:
+                    await self.consumer.release(receipt_handle)
+                except Exception:
+                    LOGGER.exception("ordered_command_release_failed")
             raise retryable_error
         return processed

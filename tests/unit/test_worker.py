@@ -63,6 +63,7 @@ class FakeConsumer:
     def __init__(self, envelopes: Sequence[QueueEnvelope]) -> None:
         self.envelopes = list(envelopes)
         self.deleted: list[str] = []
+        self.released: list[str] = []
 
     async def receive(self, *, max_messages: int, wait_seconds: int) -> Sequence[object]:
         del wait_seconds
@@ -71,6 +72,9 @@ class FakeConsumer:
 
     async def delete(self, receipt_handle: str) -> None:
         self.deleted.append(receipt_handle)
+
+    async def release(self, receipt_handle: str) -> None:
+        self.released.append(receipt_handle)
 
 
 class FailingTransport(MemoryDeferredTransport):
@@ -235,6 +239,7 @@ async def test_delivery_failure_keeps_fifo_message_retryable(disk_store: MemoryD
     with pytest.raises(RuntimeError, match="transport unavailable"):
         await worker.run()
     assert consumer.deleted == []
+    assert consumer.released == ["receipt-1"]
     registration = await tables.get(event.event_id, "a" * 43)
     assert registration is not None
 
@@ -1437,6 +1442,51 @@ async def test_all_player_notifications_go_to_waiting_and_confirmed_players(
     assert stored_event is not None
     assert stored_event.confirmed_notifications == []
     assert consumer.deleted == ["receipt-1"]
+
+
+@pytest.mark.asyncio
+async def test_all_player_notification_releases_fifo_when_completion_reply_temporarily_fails(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    tables = MemoryRegistrationRepository()
+    catalog = RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store))
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    await users.save(TelegramUser(tg_id=2))
+    await tables.enlist(
+        event.event_id,
+        operation_id="enlist-player",
+        participant_key=participant_key(secret, Platform.TELEGRAM, 2, event.event_id),
+        display_name="Player 2",
+        wish_play="A",
+    )
+    message = "Сбор игроков в 18:30."
+    command = queued(event, Operation.SEND_ALL_PLAYERS_NOTIFICATION, NotificationPayload(text=message), 1).command
+    transport = FailingOnceForRecipientTransport(Platform.TELEGRAM, 1)
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+
+    first = FakeConsumer([QueueEnvelope(command, "receipt-first")])
+    with pytest.raises(RuntimeError, match="transport unavailable"):
+        await OrderedWorker(first, mutations, users, transport, notifications, max_seconds=2).run()
+
+    assert first.deleted == []
+    assert first.released == ["receipt-first"]
+    assert [(sent[1], sent[3]) for sent in transport.sent] == [
+        (2, f"Сообщение от мастеров игры «{event.name}»:\n\n{message}"),
+    ]
+
+    retry = FakeConsumer([QueueEnvelope(command, "receipt-retry")])
+    assert await OrderedWorker(retry, mutations, users, transport, notifications, max_seconds=2).run() == 1
+    assert retry.deleted == ["receipt-retry"]
+    assert [(sent[1], sent[3]) for sent in transport.sent] == [
+        (2, f"Сообщение от мастеров игры «{event.name}»:\n\n{message}"),
+        (1, "Уведомление всем игрокам отправлено"),
+    ]
 
 
 @pytest.mark.asyncio
