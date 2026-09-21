@@ -905,8 +905,6 @@ class EventAdministrationService:
             raise ValueError("Название игры не может быть пустым")
         if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
             raise ValueError(f"Количество игроков должно быть от 1 до {MAX_PLAYER_AMOUNT}")
-        if not leaders:
-            raise ValueError("У игры должен быть хотя бы один мастер")
         signup_token: str | None = None
         for _ in range(20):
             candidate = game_signup_token(clean_name, game_date)
