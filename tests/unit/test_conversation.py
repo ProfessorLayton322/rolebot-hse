@@ -2983,12 +2983,14 @@ async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_fir
     )
     assert [button.value for button in first_page.buttons] == [
         *(f"create:master:t:{target_id}" for target_id in range(2, 7)),
+        "create:master-direct",
         "create:master-page:5",
         "create:master-choice",
     ]
     assert [button.label for button in second_page.buttons] == [
         "Мастер 07 · TG",
         "Мастер 20 · TG",
+        "🔗 Ввести профиль Telegram или VK",
         PAGE_BACK,
         "Отмена",
     ]
@@ -3059,6 +3061,106 @@ async def test_admin_created_game_master_notification_retry_does_not_create_a_se
 
 
 @pytest.mark.asyncio
+async def test_admin_can_promote_profile_link_while_selecting_the_first_master(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@ordinary_user",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая игра"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
+    picker = await engine.handle(inbound(5, "create:master-pick", callback=True))
+    platform = await engine.handle(inbound(6, "create:master-direct", callback=True))
+    profile = await engine.handle(inbound(7, "create:master-platform:telegram", callback=True))
+    question = await engine.handle(inbound(8, "https://t.me/ordinary_user"))
+
+    assert any(button.value == "create:master-direct" for button in picker.buttons)
+    assert platform.text == "Выберите бот, которым пользуется будущий мастер:"
+    assert "@username будущего мастера" in profile.text
+    assert question.text == (
+        "«Петрова Анна» пока не является модератором. Назначить этого пользователя модератором "
+        "и добавить мастером игры «Новая игра» (15.11.26)?"
+    )
+    assert [button.value for button in question.buttons] == [
+        "create:master-promote:yes",
+        "create:master-promote:no",
+    ]
+
+    schedule = await engine.handle(inbound(9, "create:master-promote:yes", callback=True))
+    promoted = await users.get(Platform.TELEGRAM, 2)
+
+    assert schedule.text == SCHEDULE_REGISTRATION_QUESTION
+    assert promoted is not None and promoted.is_gamemaster
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == [
+        (
+            Platform.TELEGRAM,
+            2,
+            "gamemaster-grant:telegram:2:9",
+            GAMEMASTER_NOTIFICATION,
+            (Button(label=ADMIN_MENU, value=ADMIN_MENU),),
+        )
+    ]
+
+    response = await engine.handle(inbound(10, "create:schedule:no", callback=True))
+    created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
+
+    assert response.text.startswith("✅ Игра создана.")
+    assert await engine.events.list_leaders(created.event_id) == [
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2)
+    ]
+    assert engine.transport.sent[-1][2] == f"leader-grant:{created.event_id}:telegram:2:10"
+
+
+@pytest.mark.asyncio
+async def test_admin_declines_profile_promotion_and_is_prompted_to_choose_another_first_master(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@ordinary_user",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая игра"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
+    await engine.handle(inbound(5, "create:master-pick", callback=True))
+    await engine.handle(inbound(6, "create:master-direct", callback=True))
+    await engine.handle(inbound(7, "create:master-platform:telegram", callback=True))
+    await engine.handle(inbound(8, "@ordinary_user"))
+    cancelled = await engine.handle(inbound(9, "create:master-promote:no", callback=True))
+    target = await users.get(Platform.TELEGRAM, 2)
+
+    assert cancelled.text.startswith("Добавление мастера отменено. Выберите другого пользователя.")
+    assert any(button.value == "create:master-direct" for button in cancelled.buttons)
+    assert target is not None and not target.is_gamemaster
+    assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == []
+
+
+@pytest.mark.asyncio
 async def test_admin_creation_master_picker_returns_to_question_and_rechecks_admin_role(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
@@ -3071,8 +3173,14 @@ async def test_admin_creation_master_picker_returns_to_question_and_rechecks_adm
     empty = await engine.handle(inbound(5, "create:master-pick", callback=True))
     question = await engine.handle(inbound(6, "create:master-choice", callback=True))
 
-    assert empty.text == "Нет других модераторов или администраторов, которых можно выбрать мастером."
-    assert empty.buttons == [Button(label="Отмена", value="create:master-choice")]
+    assert empty.text == (
+        "Нет других модераторов или администраторов, которых можно выбрать мастером. "
+        "Можно ввести Telegram- или VK-профиль напрямую."
+    )
+    assert empty.buttons == [
+        Button(label="🔗 Ввести профиль Telegram или VK", value="create:master-direct"),
+        Button(label="Отмена", value="create:master-choice"),
+    ]
     assert question.text == CREATION_MASTER_QUESTION
 
     assert isinstance(engine.admins, StaticAdminProvider)
@@ -3355,7 +3463,9 @@ async def test_master_management_adds_lists_and_removes_moderator_with_notificat
 
 
 @pytest.mark.asyncio
-async def test_event_leader_cannot_add_a_non_gamemaster_as_leader(disk_store: MemoryDiskStore, event: Event) -> None:
+async def test_event_leader_can_cancel_promotion_when_profile_link_is_not_a_moderator(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
     engine, users, _, _ = await engine_setup(disk_store, event, gamemaster=True)
     await engine.events.add_leader(
         event.event_id,
@@ -3375,12 +3485,78 @@ async def test_event_leader_cannot_add_a_non_gamemaster_as_leader(disk_store: Me
 
     await engine.handle(inbound(1, f"ag:leader:{event.event_id}", callback=True))
     await engine.handle(inbound(2, "admin:event-leader:telegram", callback=True))
-    denied = await engine.handle(inbound(3, "@ordinary_user"))
+    question = await engine.handle(inbound(3, "@ordinary_user"))
+    cancelled = await engine.handle(inbound(4, "master:promote:no", callback=True))
+    target = await users.get(Platform.TELEGRAM, 2)
 
-    assert denied.text == "Добавить мастером можно только модератора или администратора."
+    assert question.text == (
+        "«Петрова Анна» пока не является модератором. Назначить этого пользователя модератором "
+        f"и добавить мастером игры «{event.name}»?"
+    )
+    assert [button.value for button in question.buttons] == ["master:promote:yes", "master:promote:no"]
+    assert cancelled.text.startswith("Добавление мастера отменено. Выберите другого пользователя.")
+    assert any(button.value == "master:add-direct" for button in cancelled.buttons)
+    assert target is not None and not target.is_gamemaster
     assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) not in await engine.events.list_leaders(
         event.event_id
     )
+
+
+@pytest.mark.asyncio
+async def test_event_leader_promotes_profile_link_and_adds_master_retry_safely(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+    engine.transport = FailOnceTransport()
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@ordinary_user",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+
+    await engine.handle(inbound(1, f"ag:leader:{event.event_id}", callback=True))
+    await engine.handle(inbound(2, "admin:event-leader:telegram", callback=True))
+    await engine.handle(inbound(3, "@ordinary_user"))
+    confirm = inbound(4, "master:promote:yes", callback=True)
+
+    with pytest.raises(RuntimeError, match="temporary transport failure"):
+        await engine.handle(confirm)
+    added = await engine.handle(confirm)
+    target = await users.get(Platform.TELEGRAM, 2)
+
+    assert added.text == f"✅ Модератор добавлен мастером игры «{event.name}»."
+    assert target is not None and target.is_gamemaster
+    assert target.gamemaster_grant_operation_id == "gamemaster-grant:telegram:2:4"
+    assert BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2) in await engine.events.list_leaders(
+        event.event_id
+    )
+    assert isinstance(engine.transport, FailOnceTransport)
+    assert engine.transport.sent == [
+        (
+            Platform.TELEGRAM,
+            2,
+            "gamemaster-grant:telegram:2:4",
+            GAMEMASTER_NOTIFICATION,
+            (Button(label=ADMIN_MENU, value=ADMIN_MENU),),
+        ),
+        (
+            Platform.TELEGRAM,
+            2,
+            f"leader-grant:{event.event_id}:telegram:2:4",
+            f"Вы добавлены мастером игры «{event.name}».",
+            (Button(label="Управление игрой", value=f"ag:manage:{event.event_id}"),),
+        ),
+    ]
 
 
 @pytest.mark.asyncio
