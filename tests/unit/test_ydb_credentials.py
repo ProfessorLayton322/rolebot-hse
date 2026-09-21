@@ -191,6 +191,7 @@ async def test_user_repository_persists_telegram_identity_without_overwriting_ro
     user = TelegramUser(
         tg_id=42,
         telegram_handle="@Game_Master",
+        linked_vk_id=84,
         is_gamemaster=True,
         gamemaster_grant_operation_id="grant-1",
     )
@@ -200,6 +201,7 @@ async def test_user_repository_persists_telegram_identity_without_overwriting_ro
     query, params = executor.query.await_args.args
     assert "telegram_handle" in query
     assert params["$telegram_handle"] == "@game_master"
+    assert params["$linked_vk_id"] == 84
     assert "is_gamemaster" not in query
     assert "$is_gamemaster" not in params
 
@@ -252,6 +254,22 @@ async def test_user_repository_backfills_telegram_handle_without_overwriting_pro
     assert "SET telegram_handle = $handle" in query
     assert params["$user_id"] == 42
     assert params["$handle"] == "@player_name"
+
+
+@pytest.mark.asyncio
+async def test_user_repository_updates_only_resolved_telegram_link_columns() -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=[]))
+
+    await YdbUserRepository(executor).update_telegram_link(42, "@player_name", 84)
+
+    query, params = executor.query.await_args.args
+    assert "UPDATE `tg_users`" in query
+    assert "telegram_handle = $handle" in query
+    assert "linked_vk_id = $linked_vk_id" in query
+    assert "dialog_state" not in query
+    assert params["$user_id"] == 42
+    assert params["$handle"] == "@player_name"
+    assert params["$linked_vk_id"] == 84
 
 
 @pytest.mark.asyncio

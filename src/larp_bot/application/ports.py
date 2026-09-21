@@ -24,9 +24,18 @@ from larp_bot.domain.models import (
 class UserRepository(Protocol):
     async def get(self, platform: Platform, user_id: int) -> User | None: ...
 
+    async def find_linked(self, user: User) -> User | None: ...
+
     async def find_telegram_by_handle(self, handle: str) -> TelegramUser | None: ...
 
     async def update_telegram_handle(self, user_id: int, handle: str) -> None: ...
+
+    async def update_telegram_link(
+        self,
+        user_id: int,
+        handle: str | None,
+        linked_vk_id: int | None,
+    ) -> None: ...
 
     async def save(self, user: User) -> None: ...
 
@@ -214,12 +223,32 @@ class RegistrationRepository(Protocol):
         replaced_participant_key: str | None = None,
     ) -> bool: ...
 
+    async def confirm_linked(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        character_wish: str,
+        replaced_event_id: str | None = None,
+        replaced_participant_keys: Sequence[str] = (),
+    ) -> bool: ...
+
     async def update_character_wish(
         self,
         event_id: str,
         *,
         operation_id: str,
         participant_key: str,
+        character_wish: str,
+    ) -> bool: ...
+
+    async def update_linked_character_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
         character_wish: str,
     ) -> bool: ...
 
@@ -232,7 +261,24 @@ class RegistrationRepository(Protocol):
         wish_play: str,
     ) -> bool: ...
 
+    async def update_linked_co_player_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        wish_play: str,
+    ) -> bool: ...
+
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool: ...
+
+    async def cancel_linked(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> bool: ...
 
     async def sift_waiting_to_end(self, event_id: str) -> None: ...
 

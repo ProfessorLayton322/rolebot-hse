@@ -43,6 +43,7 @@ from larp_bot.domain.models import (
 from larp_bot.domain.security import participant_key
 
 from .deadlines import format_confirmation_deadline
+from .identity import identities_for_local_user
 from .navigation import confirmation_button, main_menu_button
 from .ports import (
     AdminConfigProvider,
@@ -356,6 +357,24 @@ class GameOverview:
     chat_links: list[str]
 
 
+def _effective_registration(registrations: Sequence[Registration | None]) -> Registration | None:
+    """Choose one view without deleting duplicate records from linked profiles."""
+
+    available = [registration for registration in registrations if registration is not None]
+    if not available:
+        return None
+    status_rank = {
+        AttendanceStatus.CANCELLED: 0,
+        AttendanceStatus.WAITING: 1,
+        AttendanceStatus.CONFIRMED: 2,
+    }
+    highest = max(status_rank[registration.attendance_status] for registration in available)
+    return min(
+        (registration for registration in available if status_rank[registration.attendance_status] == highest),
+        key=lambda registration: (registration.created_at, registration.participant_key),
+    )
+
+
 async def player_registrations_on_date(
     events: EventRepository,
     catalog: RegistrationCatalog,
@@ -366,6 +385,7 @@ async def player_registrations_on_date(
     *,
     statuses: Collection[AttendanceStatus],
     exclude_event_id: str | None = None,
+    identities: Sequence[BotIdentity] | None = None,
 ) -> list[tuple[Event, Registration]]:
     """Find a player's active registrations on one game date.
 
@@ -382,18 +402,30 @@ async def player_registrations_on_date(
         if not page:
             return matches
         dated_events = [event for event in page if event.game_date == game_date and event.event_id != exclude_event_id]
-        registrations = await asyncio.gather(
+        local_identities = identities or (BotIdentity(platform=platform, platform_user_id=user_id),)
+        registration_groups = await asyncio.gather(
             *(
-                catalog.get(
-                    event,
-                    participant_key(participant_secret, platform, user_id, event.event_id),
+                asyncio.gather(
+                    *(
+                        catalog.get(
+                            event,
+                            participant_key(
+                                participant_secret,
+                                identity.platform,
+                                identity.platform_user_id,
+                                event.event_id,
+                            ),
+                        )
+                        for identity in local_identities
+                    )
                 )
                 for event in dated_events
             )
         )
         matches.extend(
             (event, registration)
-            for event, registration in zip(dated_events, registrations, strict=True)
+            for event, registrations in zip(dated_events, registration_groups, strict=True)
+            if (registration := _effective_registration(registrations)) is not None
             if registration is not None and registration.attendance_status in accepted
         )
         if len(page) < MAX_EVENT_PAGE_SIZE:
@@ -409,14 +441,35 @@ class RegistrationService:
         catalog: RegistrationCatalog,
         publisher: OrderedCommandPublisher,
         participant_secret: str,
+        users: UserRepository | None = None,
     ) -> None:
         self.events = events
         self.catalog = catalog
         self.publisher = publisher
         self.participant_secret = participant_secret
+        self.users = users
 
     def key(self, platform: Platform, user_id: int, event_id: str) -> str:
         return participant_key(self.participant_secret, platform, user_id, event_id)
+
+    async def _identities(self, platform: Platform, user_id: int) -> tuple[BotIdentity, ...]:
+        return await identities_for_local_user(self.users, platform, user_id)
+
+    async def _registrations(
+        self,
+        event: Event,
+        identities: Sequence[BotIdentity],
+    ) -> list[Registration]:
+        registrations = await asyncio.gather(
+            *(
+                self.catalog.get(
+                    event,
+                    self.key(identity.platform, identity.platform_user_id, event.event_id),
+                )
+                for identity in identities
+            )
+        )
+        return [registration for registration in registrations if registration is not None]
 
     async def enqueue_profile_sync(
         self,
@@ -457,7 +510,8 @@ class RegistrationService:
 
     async def get_registration(self, event_id: str, platform: Platform, user_id: int) -> Registration | None:
         event = await self._event(event_id)
-        return await self.catalog.get(event, self.key(platform, user_id, event_id))
+        identities = await self._identities(platform, user_id)
+        return _effective_registration(await self._registrations(event, identities))
 
     async def registrations_on_date(
         self,
@@ -468,6 +522,7 @@ class RegistrationService:
         statuses: Collection[AttendanceStatus],
         exclude_event_id: str | None = None,
     ) -> list[tuple[Event, Registration]]:
+        identities = await self._identities(platform, user_id)
         return await player_registrations_on_date(
             self.events,
             self.catalog,
@@ -477,6 +532,7 @@ class RegistrationService:
             game_date,
             statuses=statuses,
             exclude_event_id=exclude_event_id,
+            identities=identities,
         )
 
     async def registered_games_page(
@@ -494,9 +550,10 @@ class RegistrationService:
     ) -> RegisteredGamesPage:
         accepted_registration_statuses = None if registration_statuses is None else set(registration_statuses)
         found: dict[str, Registration] = {}
+        identities = await self._identities(platform, user_id)
 
         async def registered(event: Event) -> bool:
-            registration = await self.catalog.get(event, self.key(platform, user_id, event.event_id))
+            registration = _effective_registration(await self._registrations(event, identities))
             if registration is None or (
                 accepted_registration_statuses is not None
                 and registration.attendance_status not in accepted_registration_statuses
@@ -568,13 +625,15 @@ class RegistrationService:
         return GameOverview(participation=participation, in_main_roster=in_main_roster, chat_links=chat_links)
 
     async def _participation(self, event: Event, platform: Platform, user_id: int) -> GameParticipation | None:
-        registration, leaders = await asyncio.gather(
-            self.catalog.get(event, self.key(platform, user_id, event.event_id)),
+        identities = await self._identities(platform, user_id)
+        registrations, leaders = await asyncio.gather(
+            self._registrations(event, identities),
             self.events.list_leaders(event.event_id),
         )
+        registration = _effective_registration(registrations)
         if registration is not None and registration.attendance_status is AttendanceStatus.CANCELLED:
             registration = None
-        is_leader = BotIdentity(platform=platform, platform_user_id=user_id) in leaders
+        is_leader = any(identity in leaders for identity in identities)
         if registration is None and not is_leader:
             return None
         return GameParticipation(registration=registration, is_leader=is_leader)
@@ -749,9 +808,21 @@ class RegistrationService:
         elif target_participant_key is not None:
             raise ValueError("a target participant is only valid for REMOVE_PARTICIPANT")
         elif operation not in administrative_operations:
-            participant = self.key(platform, user_id, event_id)
+            if operation in {Operation.ENLIST, Operation.UPDATE_PROFILE}:
+                participant = self.key(platform, user_id, event_id)
+            else:
+                identities = await self._identities(platform, user_id)
+                existing = _effective_registration(await self._registrations(event, identities))
+                participant = (
+                    existing.participant_key if existing is not None else self.key(platform, user_id, event_id)
+                )
         else:
             participant = None
+        identities = await self._identities(platform, user_id)
+        identity_group = ":".join(
+            f"{identity.platform.value}:{identity.platform_user_id}"
+            for identity in sorted(identities, key=lambda item: (item.platform.value, item.platform_user_id))
+        )
         command = OrderedRegistrationCommand(
             operation_id=(
                 str(uuid5(NAMESPACE_URL, f"larp-bot:{platform}:{user_id}:{idempotency_key}"))
@@ -763,6 +834,7 @@ class RegistrationService:
             platform=platform,
             platform_user_id=user_id,
             participant_key=participant,
+            identity_group=identity_group if operation is Operation.CONFIRM else None,
             payload=payload,
             reply_context=reply_context,
         )
@@ -2048,17 +2120,49 @@ class OrderedMutationService:
         self.admins = admins
 
     async def _require_event_leader(self, command: OrderedRegistrationCommand) -> None:
-        identity = BotIdentity(platform=command.platform, platform_user_id=command.platform_user_id)
-        if identity in await self.events.list_leaders(command.event_id):
+        identities = await identities_for_local_user(self.users, command.platform, command.platform_user_id)
+        leaders = await self.events.list_leaders(command.event_id)
+        if any(identity in leaders for identity in identities):
             return
-        if self.admins is not None and await self.admins.is_admin(command.platform, command.platform_user_id):
+        if self.admins is not None and any(
+            [await self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities]
+        ):
             return
         raise OperationNotAllowed("Только мастера этой игры и администраторы бота могут изменять её данные")
 
     async def _require_admin(self, command: OrderedRegistrationCommand) -> None:
-        if self.admins is not None and await self.admins.is_admin(command.platform, command.platform_user_id):
+        identities = await identities_for_local_user(self.users, command.platform, command.platform_user_id)
+        if self.admins is not None and any(
+            [await self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities]
+        ):
             return
         raise OperationNotAllowed("Только администраторы бота могут разархивировать игры")
+
+    async def _actor_registrations(
+        self,
+        event: Event,
+        command: OrderedRegistrationCommand,
+    ) -> tuple[tuple[BotIdentity, ...], list[Registration]]:
+        if self.participant_secret is None:
+            identity = BotIdentity(platform=command.platform, platform_user_id=command.platform_user_id)
+            registration = await self.catalog.registrations.get(event.event_id, command.participant_key or "")
+            return (identity,), [] if registration is None else [registration]
+        identities = await identities_for_local_user(self.users, command.platform, command.platform_user_id)
+        registrations = await asyncio.gather(
+            *(
+                self.catalog.registrations.get(
+                    event.event_id,
+                    participant_key(
+                        self.participant_secret,
+                        identity.platform,
+                        identity.platform_user_id,
+                        event.event_id,
+                    ),
+                )
+                for identity in identities
+            )
+        )
+        return identities, [registration for registration in registrations if registration is not None]
 
     async def _refresh_pass_table(self, event: Event) -> None:
         if event.pass_table_resource_path is None:
@@ -2348,7 +2452,8 @@ class OrderedMutationService:
             if not event.registration_is_open():
                 raise OperationNotAllowed("Регистрация на эту игру ещё не открыта")
             assert isinstance(command.payload, EnlistPayload)
-            existing = await self.catalog.registrations.get(event.event_id, command.participant_key)
+            identities, existing_registrations = await self._actor_registrations(event, command)
+            existing = _effective_registration(existing_registrations)
             if (
                 existing is not None
                 and existing.attendance_status is not AttendanceStatus.CANCELLED
@@ -2410,6 +2515,7 @@ class OrderedMutationService:
                         event.game_date,
                         statuses={AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED},
                         exclude_event_id=event.event_id,
+                        identities=identities,
                     )
                 )
             buttons = (confirmation_button(event.event_id),) if event.status is EventStatus.CONFIRMATION_OPEN else None
@@ -2428,8 +2534,22 @@ class OrderedMutationService:
                 raise OperationNotAllowed("Подтверждение участия в этой игре ещё не открыто")
             raise OperationNotAllowed("Подтверждение участия в этой игре закрыто")
 
-        registration = await self.catalog.registrations.get(event.event_id, command.participant_key)
+        identities, actor_registrations = await self._actor_registrations(event, command)
+        identity_keys = (
+            {
+                participant_key(
+                    self.participant_secret,
+                    identity.platform,
+                    identity.platform_user_id,
+                    event.event_id,
+                )
+                for identity in identities
+            }
+            if self.participant_secret is not None
+            else {command.participant_key}
+        )
         if command.operation is Operation.REMOVE_PARTICIPANT:
+            registration = await self.catalog.registrations.get(event.event_id, command.participant_key)
             if registration is not None and registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Запись этого игрока уже отменена")
             if event.last_participant_removal_operation_id != command.operation_id:
@@ -2450,8 +2570,13 @@ class OrderedMutationService:
             await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
             return MutationResult("Игрок удалён" if registration is not None else "Игрок уже удалён")
+        if command.participant_key not in identity_keys:
+            raise OperationNotAllowed("Некорректная запись участника")
+        registration = _effective_registration(actor_registrations)
         if registration is None:
             raise RegistrationNotFound("Сначала запишитесь на эту игру")
+        actor_keys = [registration.participant_key for registration in actor_registrations]
+        linked = len(identities) > 1
         if command.operation is Operation.CONFIRM:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
@@ -2459,6 +2584,7 @@ class OrderedMutationService:
             replaced_event: Event | None = None
             replaced_registration: Registration | None = None
             replaced_participant_key: str | None = None
+            replaced_participant_keys: list[str] = []
             if event.game_date is not None:
                 if self.participant_secret is None:
                     raise RuntimeError("same-day confirmation validation requires participant secret")
@@ -2471,6 +2597,7 @@ class OrderedMutationService:
                     event.game_date,
                     statuses={AttendanceStatus.CONFIRMED},
                     exclude_event_id=event.event_id,
+                    identities=identities,
                 )
                 conflict_ids = {conflict.event_id for conflict, _ in conflicts}
                 if conflict_ids and conflict_ids != {command.payload.replaced_event_id}:
@@ -2484,16 +2611,33 @@ class OrderedMutationService:
                         raise OperationNotAllowed("Игра, участие в которой нужно заменить, не найдена")
                     if replaced_event.game_date != event.game_date:
                         raise OperationNotAllowed("Игры проводятся в разные дни")
-                    replaced_participant_key = participant_key(
-                        self.participant_secret,
-                        command.platform,
-                        command.platform_user_id,
-                        replaced_event.event_id,
+                    replaced_registrations = await asyncio.gather(
+                        *(
+                            self.catalog.get(
+                                replaced_event,
+                                participant_key(
+                                    self.participant_secret,
+                                    identity.platform,
+                                    identity.platform_user_id,
+                                    replaced_event.event_id,
+                                ),
+                            )
+                            for identity in identities
+                        )
                     )
-                    replaced_registration = await self.catalog.get(
-                        replaced_event,
-                        replaced_participant_key,
+                    existing_replacements = [item for item in replaced_registrations if item is not None]
+                    replaced_registration = _effective_registration(existing_replacements)
+                    replaced_participant_keys = [item.participant_key for item in existing_replacements]
+                    replaced_participant_key = (
+                        replaced_registration.participant_key if replaced_registration is not None else None
                     )
+                    if not linked:
+                        replaced_participant_key = participant_key(
+                            self.participant_secret,
+                            command.platform,
+                            command.platform_user_id,
+                            replaced_event.event_id,
+                        )
                     already_applied = (
                         registration.last_operation_id == command.operation_id
                         and registration.attendance_status is AttendanceStatus.CONFIRMED
@@ -2504,19 +2648,30 @@ class OrderedMutationService:
                     ) and not already_applied:
                         replaced_event = None
                         replaced_participant_key = None
+                        replaced_participant_keys = []
             elif command.payload.replaced_event_id is not None:
                 raise OperationNotAllowed("Для этой игры не задана дата")
             if replaced_event is not None:
                 await self._record_reserve_promotion(replaced_event, command, replaced_registration)
                 await self._record_confirmed_link_promotion(replaced_event, command, replaced_registration)
-            await self.catalog.registrations.confirm(
-                event.event_id,
-                operation_id=command.operation_id,
-                participant_key=command.participant_key,
-                character_wish=command.payload.character_wish,
-                replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
-                replaced_participant_key=replaced_participant_key,
-            )
+            if linked:
+                await self.catalog.registrations.confirm_linked(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_keys=actor_keys,
+                    character_wish=command.payload.character_wish,
+                    replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
+                    replaced_participant_keys=replaced_participant_keys,
+                )
+            else:
+                await self.catalog.registrations.confirm(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_key=command.participant_key,
+                    character_wish=command.payload.character_wish,
+                    replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
+                    replaced_participant_key=replaced_participant_key,
+                )
             if replaced_event is not None:
                 await self.catalog.refresh(replaced_event)
                 await self._refresh_pass_table(replaced_event)
@@ -2533,7 +2688,7 @@ class OrderedMutationService:
                 confirmation_success_text(
                     event,
                     command.payload.character_wish,
-                    in_main_roster=command.participant_key in main_roster_keys,
+                    in_main_roster=any(key in main_roster_keys for key in actor_keys),
                     masters=await event_master_records(self.events, self.users, event.event_id),
                 ),
                 replaced_event_id=replaced_event.event_id if replaced_event is not None else None,
@@ -2544,24 +2699,40 @@ class OrderedMutationService:
             if registration.attendance_status is AttendanceStatus.WAITING and not registration.character_wish:
                 raise OperationNotAllowed("Впервые укажите пожелания при подтверждении участия")
             assert isinstance(command.payload, CharacterWishPayload)
-            await self.catalog.registrations.update_character_wish(
-                event.event_id,
-                operation_id=command.operation_id,
-                participant_key=command.participant_key,
-                character_wish=command.payload.character_wish,
-            )
+            if linked:
+                await self.catalog.registrations.update_linked_character_wish(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_keys=actor_keys,
+                    character_wish=command.payload.character_wish,
+                )
+            else:
+                await self.catalog.registrations.update_character_wish(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_key=command.participant_key,
+                    character_wish=command.payload.character_wish,
+                )
             await self.catalog.refresh(event)
             return MutationResult("Пожелания по персонажу обновлены")
         if command.operation is Operation.UPDATE_CO_PLAYER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
             assert isinstance(command.payload, CoPlayerWishPayload)
-            await self.catalog.registrations.update_co_player_wish(
-                event.event_id,
-                operation_id=command.operation_id,
-                participant_key=command.participant_key,
-                wish_play=command.payload.wish_play,
-            )
+            if linked:
+                await self.catalog.registrations.update_linked_co_player_wish(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_keys=actor_keys,
+                    wish_play=command.payload.wish_play,
+                )
+            else:
+                await self.catalog.registrations.update_co_player_wish(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_key=command.participant_key,
+                    wish_play=command.payload.wish_play,
+                )
             await self.catalog.refresh(event)
             return MutationResult("Пожелания по соигрокам обновлены")
         if command.operation is Operation.CANCEL:
@@ -2577,11 +2748,18 @@ class OrderedMutationService:
                 )
             await self._record_reserve_promotion(event, command, registration)
             await self._record_confirmed_link_promotion(event, command, registration)
-            await self.catalog.registrations.cancel(
-                event.event_id,
-                operation_id=command.operation_id,
-                participant_key=command.participant_key,
-            )
+            if linked:
+                await self.catalog.registrations.cancel_linked(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_keys=actor_keys,
+                )
+            else:
+                await self.catalog.registrations.cancel(
+                    event.event_id,
+                    operation_id=command.operation_id,
+                    participant_key=command.participant_key,
+                )
             await self.catalog.refresh(event)
             await self._refresh_pass_table(event)
             return MutationResult("Участие отменено")

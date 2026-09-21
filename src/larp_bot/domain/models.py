@@ -390,6 +390,10 @@ class UserBase(StrictModel):
 class TelegramUser(UserBase):
     tg_id: int = Field(gt=0)
     vk_url: str | None = None
+    # Numeric VK identity resolved from ``vk_url``. Keeping it next to the
+    # Telegram-local profile lets reciprocal links work for vanity VK URLs
+    # without changing or merging either local user row.
+    linked_vk_id: int | None = Field(default=None, gt=0)
     telegram_handle: str | None = None
 
     @field_validator("vk_url")
@@ -664,6 +668,9 @@ class OrderedRegistrationCommand(StrictModel):
     platform: Platform
     platform_user_id: int = Field(ge=0)
     participant_key: str | None = None
+    # New confirmation commands use the same FIFO group for both mutually
+    # linked local profiles. Optional keeps commands queued before rollout valid.
+    identity_group: str | None = Field(default=None, min_length=1, max_length=160)
     payload: CommandPayload = Field(default_factory=EmptyPayload)
     reply_context: ReplyContext = Field(default_factory=ReplyContext)
     created_at: datetime = Field(default_factory=utc_now)
@@ -674,7 +681,8 @@ class OrderedRegistrationCommand(StrictModel):
         # instead of independently per event. Other mutations retain their
         # established per-event ordering.
         if self.operation is Operation.CONFIRM:
-            return f"confirmation:{self.platform.value}:{self.platform_user_id}"
+            group = self.identity_group or f"{self.platform.value}:{self.platform_user_id}"
+            return f"confirmation:{group}"
         return self.event_id
 
     @model_validator(mode="after")

@@ -64,6 +64,12 @@ resource "yandex_ydb_table" "tg_users" {
     name = "telegram_handle"
     type = "Utf8"
   }
+  # Resolved from vk_url so reciprocal identity links also support vanity VK
+  # profile URLs. Nullable additions preserve every existing Telegram row.
+  column {
+    name = "linked_vk_id"
+    type = "Uint64"
+  }
   dynamic "column" {
     for_each = local.common_user_columns
     content {

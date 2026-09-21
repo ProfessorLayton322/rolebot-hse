@@ -97,7 +97,13 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     vk = VkApiTransport(secrets["VK_ACCESS_TOKEN"])
     transport = MultiplexedDeferredTransport(telegram, vk)
     catalog = RegistrationCatalog(events, registrations, showcase)
-    registration_service = RegistrationService(events, catalog, publisher, secrets["PARTICIPANT_KEY_HMAC_SECRET"])
+    registration_service = RegistrationService(
+        events,
+        catalog,
+        publisher,
+        secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+        users,
+    )
     administration = EventAdministrationService(
         events,
         showcase,

@@ -46,6 +46,7 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "archived_at"' in ydb
     assert 'primary_key = ["event_id", "platform", "platform_user_id"]' in ydb
     assert ydb.count('name = "telegram_handle"') == 2
+    assert ydb.count('name = "linked_vk_id"') == 1
 
 
 def test_no_fifo_native_trigger() -> None:

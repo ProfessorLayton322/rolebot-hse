@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from datetime import UTC, date, datetime
 from secrets import token_urlsafe
@@ -62,6 +63,7 @@ from .deadlines import (
     next_saturday_game_date,
     parse_confirmation_deadline,
 )
+from .identity import global_identities, global_users, local_identity
 from .navigation import ADMIN_MENU, MAIN_MENU, MAIN_MENU_LABEL, admin_menu_button, main_menu_button
 from .ports import (
     AdminConfigProvider,
@@ -128,6 +130,8 @@ LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
 ARCHIVED_GAMES = "Архив игр"
 MANAGE_MODERATORS = "Управление модераторами"
+
+LOGGER = logging.getLogger("larp_bot.application.conversation")
 MANAGE_STATISTICS = "Управление статистикой"
 STATS_LINKS = "Ссылки на таблицы статистики"
 STATS_ADD_GAME = "Добавить игру в статистику"
@@ -663,6 +667,22 @@ class ConversationEngine:
         user.dialog_state = "IDLE"
         user.dialog_context = {}
 
+    async def _refresh_telegram_link(self, user: TelegramUser, *, force_vk_resolution: bool = False) -> None:
+        linked_vk_id = user.linked_vk_id
+        if force_vk_resolution or linked_vk_id is None:
+            linked_vk_id = None
+            if user.vk_url is not None:
+                numeric = re.fullmatch(r"https://vk\.com/id([1-9][0-9]*)", user.vk_url)
+                if numeric is not None:
+                    linked_vk_id = int(numeric.group(1))
+                elif self.vk_user_ids is not None:
+                    try:
+                        linked_vk_id = await self.vk_user_ids.resolve_user_id(user.vk_url)
+                    except Exception:
+                        LOGGER.exception("vk_profile_link_resolution_failed", extra={"tg_id": user.tg_id})
+        user.linked_vk_id = linked_vk_id
+        await self.users.update_telegram_link(user.tg_id, user.telegram_handle, linked_vk_id)
+
     async def handle(self, message: InboundMessage) -> BotResponse:
         platform = message.identity.platform
         uid = message.identity.platform_user_id
@@ -670,7 +690,10 @@ class ConversationEngine:
         if user.last_update_id == message.update_id:
             return BotResponse(text="", silent=True, deferred=platform is Platform.TELEGRAM)
         if isinstance(user, TelegramUser):
+            previous_handle = user.telegram_handle
             user.telegram_handle = normalize_telegram_handle(message.telegram_username)
+            if previous_handle != user.telegram_handle or (user.vk_url is not None and user.linked_vk_id is None):
+                await self._refresh_telegram_link(user)
         value = (message.callback or message.text).strip()
         is_start, start_parameter = _start_command(value, message)
         admin_branch = (
@@ -1163,6 +1186,8 @@ class ConversationEngine:
         previous_name: str | None = None,
     ) -> BotResponse:
         profile_names = {name for name in (previous_name, user.full_name) if name is not None}
+        if isinstance(user, TelegramUser):
+            await self._refresh_telegram_link(user)
         await self.users.save(user)
         await self.registrations.enqueue_profile_sync(
             message.identity.platform,
@@ -1229,6 +1254,7 @@ class ConversationEngine:
                         text=f"❌ {exc}. Попробуйте ещё раз:",
                         buttons=[profile_dialog_exit_button(user)],
                     )
+                await self._refresh_telegram_link(user, force_vk_resolution=True)
             else:
                 if value == SKIP:
                     user.telegram_handle = None
@@ -1376,6 +1402,7 @@ class ConversationEngine:
             user.needs_pass = False
         if isinstance(user, TelegramUser):
             user.vk_url = str(context["contact"])
+            await self._refresh_telegram_link(user, force_vk_resolution=True)
         else:
             contact = context.get("contact")
             user.telegram_handle = None if contact is None else str(contact)
@@ -2208,8 +2235,7 @@ class ConversationEngine:
 
     @staticmethod
     def _identity(user: User) -> BotIdentity:
-        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        return BotIdentity(platform=platform, platform_user_id=user_id(user))
+        return local_identity(user)
 
     @staticmethod
     def _platform_code(platform: Platform) -> str:
@@ -2308,7 +2334,11 @@ class ConversationEngine:
             actor.last_bot_buttons = buttons.copy()
 
     async def _is_event_leader(self, user: User, event_id: str) -> bool:
-        return self._identity(user) in await self.events.list_leaders(event_id)
+        identities, leaders = await asyncio.gather(
+            global_identities(self.users, user),
+            self.events.list_leaders(event_id),
+        )
+        return any(identity in leaders for identity in identities)
 
     async def _event_leader_required(self, user: User, event_id: str) -> BotResponse | None:
         if await self._is_admin(user) or await self._is_event_leader(user, event_id):
@@ -2317,28 +2347,42 @@ class ConversationEngine:
         return BotResponse(text="Только мастера этой игры могут изменять её данные.")
 
     async def _is_admin(self, user: User) -> bool:
-        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        return await self.admins.is_admin(platform, user_id(user))
+        identities = await global_identities(self.users, user)
+        configured = await asyncio.gather(
+            *(self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities)
+        )
+        return any(configured)
 
     async def _user_role_label(self, user: User) -> str:
-        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        is_admin, is_configured_moderator = await asyncio.gather(
-            self.admins.is_admin(platform, user_id(user)),
-            self.admins.is_gamemaster(platform, user_id(user)),
+        profiles = await global_users(self.users, user)
+        identities = [self._identity(profile) for profile in profiles]
+        configured_admins, configured_moderators = await asyncio.gather(
+            asyncio.gather(
+                *(self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities)
+            ),
+            asyncio.gather(
+                *(self.admins.is_gamemaster(identity.platform, identity.platform_user_id) for identity in identities)
+            ),
         )
-        if is_admin:
+        if any(configured_admins):
             return "Администратор"
-        if user.is_gamemaster or is_configured_moderator:
+        if any(profile.is_gamemaster for profile in profiles) or any(configured_moderators):
             return "Модератор"
         return "Игрок"
 
     async def _has_admin_access(self, user: User) -> bool:
         if await self._is_admin(user):
             return True
-        if user.is_gamemaster:
+        profiles = await global_users(self.users, user)
+        if any(profile.is_gamemaster for profile in profiles):
             return True
-        platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
-        return await self.admins.is_gamemaster(platform, user_id(user))
+        configured = await asyncio.gather(
+            *(
+                self.admins.is_gamemaster(identity.platform, identity.platform_user_id)
+                for identity in (self._identity(profile) for profile in profiles)
+            )
+        )
+        return any(configured)
 
     async def _moderator_management_menu(self, user: User) -> BotResponse:
         if not await self._is_admin(user):
@@ -3454,8 +3498,15 @@ class ConversationEngine:
             )
         target_id = user_id(target)
         request_id = f"gamemaster-grant:{target_platform.value}:{target_id}:{message.update_id}"
-        configured_gamemaster = await self.admins.is_gamemaster(target_platform, target_id)
-        if configured_gamemaster or (target.is_gamemaster and target.gamemaster_grant_operation_id != request_id):
+        target_profiles = await global_users(self.users, target)
+        configured_gamemasters = await asyncio.gather(
+            *(
+                self.admins.is_gamemaster(identity.platform, identity.platform_user_id)
+                for identity in (self._identity(profile) for profile in target_profiles)
+            )
+        )
+        has_persisted_grant = any(profile.is_gamemaster for profile in target_profiles)
+        if any(configured_gamemasters) or (has_persisted_grant and target.gamemaster_grant_operation_id != request_id):
             await self._clear(user)
             return BotResponse(text="Этот пользователь уже является модератором.")
 
@@ -3558,11 +3609,11 @@ class ConversationEngine:
         request_id = (
             f"leader-grant:{event_id}:{identity.platform.value}:{identity.platform_user_id}:{message.update_id}"
         )
-        configured_moderator, configured_admin = await asyncio.gather(
-            self.admins.is_gamemaster(identity.platform, identity.platform_user_id),
-            self.admins.is_admin(identity.platform, identity.platform_user_id),
+        configured_admin, has_admin_access = await asyncio.gather(
+            self._is_admin(target),
+            self._has_admin_access(target),
         )
-        if not target.is_gamemaster and not configured_moderator and not configured_admin:
+        if not has_admin_access:
             return BotResponse(
                 text="Добавить мастером можно только модератора или администратора.",
                 buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
@@ -3570,7 +3621,11 @@ class ConversationEngine:
         role_name = "Администратор" if configured_admin else "Модератор"
         reference = event_reference(event.name, event.game_date)
         notification_button = Button(label="Управление игрой", value=f"ag:manage:{event_id}")
-        if identity in await self.events.list_leaders(event_id):
+        target_identities, leaders = await asyncio.gather(
+            global_identities(self.users, target),
+            self.events.list_leaders(event_id),
+        )
+        if any(target_identity in leaders for target_identity in target_identities):
             if (
                 user.dialog_context.get("pending_leader_grant") == request_id
                 and target.last_delivery_operation_id != request_id
