@@ -150,7 +150,8 @@ CREATE_WITH_OTHER_MASTER = "Нет, выбрать мастера"
 SCHEDULE_REGISTRATION_QUESTION = "Хотите ли вы запланировать отложенное открытие игры?"
 ARCHIVE_GAME = "📦 Архивировать игру"
 UNARCHIVE_GAME = "📤 Разархивировать игру"
-LEGACY_DELETE_GAME = "🗑 Удалить игру"
+DELETE_GAME = "🗑 Удалить игру"
+LEGACY_DELETE_GAME = DELETE_GAME
 STATUS_REGISTRATION = "Регистрация"
 STATUS_CONFIRMATION = "Подтверждение"
 STATUS_CLOSED = "Закрытие регистрации"
@@ -218,7 +219,7 @@ ADMIN_ACTIONS = frozenset(
         LIST_EVENT_LEADERS,
         ARCHIVE_GAME,
         UNARCHIVE_GAME,
-        LEGACY_DELETE_GAME,
+        DELETE_GAME,
         "📋 Список игр",
     }
 )
@@ -3051,7 +3052,16 @@ class ConversationEngine:
         if user.dialog_state in event_bound_states:
             event_id = str(user.dialog_context["event_id"])
             event = await self.events.get(event_id)
-            if event is not None and event.archived_at is not None:
+            deleting_archived = (
+                user.dialog_state == "ADMIN_DELETE_NAME" and event is not None and event.archived_at is not None
+            )
+            if user.dialog_state == "ADMIN_DELETE_NAME" and event is None:
+                await self._clear(user)
+                return BotResponse(
+                    text="Игра уже удалена.",
+                    buttons=[Button(label=BACK, value=ARCHIVED_GAMES)],
+                )
+            if event is not None and event.archived_at is not None and not deleting_archived:
                 await self._clear(user)
                 if not await self._is_admin(user):
                     return BotResponse(text="Игра не найдена.")
@@ -3065,7 +3075,10 @@ class ConversationEngine:
                 and user.dialog_context.get("target_platform") == self._identity(user).platform.value
                 and user.dialog_context.get("target_user_id") == self._identity(user).platform_user_id
             )
-            if not pending_self_removal:
+            if deleting_archived and not await self._is_admin(user):
+                await self._clear(user)
+                return BotResponse(text="Недостаточно прав.")
+            if not deleting_archived and not pending_self_removal:
                 denied = await self._event_leader_required(user, event_id)
                 if denied is not None:
                     return denied
@@ -3438,25 +3451,33 @@ class ConversationEngine:
                     buttons=[game_management_button(str(user.dialog_context["event_id"]))],
                 )
             event_id = str(user.dialog_context["event_id"])
+            delete_archived = (
+                user.dialog_state == "ADMIN_DELETE_NAME" and event is not None and event.archived_at is not None
+            )
+            operation = Operation.DELETE_EVENT if delete_archived else Operation.ARCHIVE_EVENT
             await self._clear(user)
             await self.registrations.enqueue(
-                operation=Operation.ARCHIVE_EVENT,
+                operation=operation,
                 event_id=event_id,
                 platform=message.identity.platform,
                 user_id=message.identity.platform_user_id,
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
                     text_success=(
-                        f"📦 Игра {_context_event_reference(context)} архивирована. "
-                        "Игра, записи и XLSX-таблицы сохранены в постоянном списке."
+                        f"🗑 Игра {_context_event_reference(context)}, все записи и XLSX-таблицы удалены."
+                        if delete_archived
+                        else (
+                            f"📦 Игра {_context_event_reference(context)} архивирована. "
+                            "Игра, записи и XLSX-таблицы сохранены в постоянном списке."
+                        )
                     ),
-                    buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                    buttons=[Button(label=BACK, value=ARCHIVED_GAMES if delete_archived else MANAGE_GAMES)],
                 ),
-                idempotency_key=f"{message.update_id}:ARCHIVE_EVENT",
+                idempotency_key=f"{message.update_id}:{operation.value}",
             )
             return BotResponse(
-                text="⏳ Архивация принята в обработку.",
-                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+                text="⏳ Удаление принято в обработку." if delete_archived else "⏳ Архивация принята в обработку.",
+                buttons=[Button(label=BACK, value=ARCHIVED_GAMES if delete_archived else MANAGE_GAMES)],
                 deferred=True,
                 command_enqueued=True,
             )
@@ -4451,10 +4472,12 @@ class ConversationEngine:
                     f"Управление игрой {event_reference(event.name, event.game_date)}\n\n"
                     f"Количество игроков: {event.player_amount}\n"
                     "Статус: Архивирована\n\n"
-                    "Разархивируйте игру, чтобы вернуть её в список управления."
+                    "Разархивируйте игру, чтобы вернуть её в список управления, "
+                    "или удалите её без возможности восстановления."
                 ),
                 buttons=[
                     Button(label=UNARCHIVE_GAME, value=f"ag:unarchive:{event.event_id}"),
+                    Button(label=DELETE_GAME, value=f"ag:delete:{event.event_id}"),
                     Button(label=BACK, value=ARCHIVED_GAMES),
                 ],
             )
@@ -4539,6 +4562,29 @@ class ConversationEngine:
             return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
         if action == "manage":
             return await self._game_management(user, event)
+        if action == "delete":
+            if not await self._is_admin(user):
+                await self._clear(user)
+                return BotResponse(text="Недостаточно прав.")
+            if event.archived_at is None:
+                return BotResponse(
+                    text="Удалить можно только архивированную игру.",
+                    buttons=[game_management_button(event.event_id)],
+                )
+            user.dialog_state = "ADMIN_DELETE_NAME"
+            user.dialog_context = {
+                "event_id": event.event_id,
+                "event_name": event.name,
+                "game_date": event.game_date.isoformat() if event.game_date is not None else None,
+            }
+            return BotResponse(
+                text=(
+                    "⚠️ Это действие необратимо. Будут удалены игра, все записи, "
+                    "таблицы регистрации и пропусков.\n\n"
+                    f"Для подтверждения введите точное название:\n\n{event.name}"
+                ),
+                buttons=[game_management_button(event.event_id)],
+            )
         if action == "unarchive":
             if not await self._is_admin(user):
                 await self._clear(user)
@@ -4788,7 +4834,7 @@ class ConversationEngine:
             LEGACY_REMOVE_WAITING_PLAYERS,
             ADD_EVENT_LEADER,
             ARCHIVE_GAME,
-            LEGACY_DELETE_GAME,
+            DELETE_GAME,
             "📋 Список игр",
             *LEGACY_STATUS_ACTIONS,
         }:

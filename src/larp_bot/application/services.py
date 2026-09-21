@@ -292,8 +292,16 @@ class RegistrationCatalog:
         await self.events.archive(event.event_id, datetime.now(UTC))
 
     async def delete(self, event: Event) -> None:
-        """Archive legacy delete requests without removing permanent game data."""
-        await self.archive(event)
+        paths = [event.master_table_resource_path]
+        if event.public_table_resource_path is not None:
+            paths.append(event.public_table_resource_path)
+        pass_table_path = event.pass_table_resource_path or f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+        await asyncio.gather(
+            *(self.showcase.delete_event_workbook(path) for path in dict.fromkeys(paths)),
+            self.showcase.delete_pass_table(pass_table_path),
+        )
+        await self.registrations.delete_for_event(event.event_id)
+        await self.events.delete(event.event_id)
 
 
 async def _event_pass_profiles(
@@ -2136,7 +2144,7 @@ class OrderedMutationService:
             [await self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities]
         ):
             return
-        raise OperationNotAllowed("Только администраторы бота могут разархивировать игры")
+        raise OperationNotAllowed("Только администраторы бота могут изменять архив игр")
 
     async def _actor_registrations(
         self,
@@ -2246,8 +2254,15 @@ class OrderedMutationService:
             await self.events.unarchive(event.event_id, datetime.now(UTC))
             return MutationResult("Игра разархивирована; регистрация остаётся закрытой")
 
+        if command.operation is Operation.DELETE_EVENT:
+            await self._require_admin(command)
+            if event.archived_at is None:
+                raise OperationNotAllowed("Удалить можно только архивированную игру")
+            await self.catalog.delete(event)
+            return MutationResult("Игра, записи и XLSX-таблицы удалены")
+
         if event.archived_at is not None:
-            if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
+            if command.operation is Operation.ARCHIVE_EVENT:
                 return MutationResult("Игра уже архивирована")
             if command.operation in {
                 Operation.ENLIST,
@@ -2270,7 +2285,6 @@ class OrderedMutationService:
             Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
-            Operation.DELETE_EVENT,
         }
         if command.operation in administrative_operations:
             await self._require_event_leader(command)
@@ -2336,11 +2350,7 @@ class OrderedMutationService:
             status, message = status_operations[command.operation]
             status_changed = await self.events.set_status(event.event_id, status)
             return MutationResult(message, notifications_enabled=status_changed)
-        if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
-            # DELETE_EVENT can still be present in FIFO or in a stale admin
-            # keyboard from an older deployment. Treat it as archival so a
-            # published workbook, its registrations, and its permanent game
-            # entry can never be removed by an old command.
+        if command.operation is Operation.ARCHIVE_EVENT:
             await self.catalog.archive(event)
             return MutationResult("Игра архивирована; таблицы и записи сохранены")
 
