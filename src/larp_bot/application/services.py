@@ -23,6 +23,7 @@ from larp_bot.domain.models import (
     EmptyPayload,
     EnlistPayload,
     Event,
+    EventDetailsPayload,
     EventStatus,
     NotificationPayload,
     Operation,
@@ -783,6 +784,7 @@ class RegistrationService:
         | CharacterWishPayload
         | ConfirmationDeadlinePayload
         | NotificationPayload
+        | EventDetailsPayload
         | PlayerAmountPayload
         | EmptyPayload,
         reply_context: ReplyContext,
@@ -801,6 +803,7 @@ class RegistrationService:
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.SEND_ALL_PLAYERS_NOTIFICATION,
+            Operation.UPDATE_EVENT_DETAILS,
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
@@ -2280,6 +2283,7 @@ class OrderedMutationService:
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.SEND_ALL_PLAYERS_NOTIFICATION,
+            Operation.UPDATE_EVENT_DETAILS,
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
@@ -2318,6 +2322,16 @@ class OrderedMutationService:
         if command.operation is Operation.SEND_ALL_PLAYERS_NOTIFICATION:
             assert isinstance(command.payload, NotificationPayload)
             return MutationResult("Уведомление всем игрокам отправлено")
+        if command.operation is Operation.UPDATE_EVENT_DETAILS:
+            assert isinstance(command.payload, EventDetailsPayload)
+            await self.events.set_details(
+                event.event_id,
+                command.payload.name,
+                command.payload.game_date,
+            )
+            return MutationResult(
+                f"Название и дата игры изменены: {event_reference(command.payload.name, command.payload.game_date)}"
+            )
         if command.operation is Operation.UPDATE_PLAYER_AMOUNT:
             assert isinstance(command.payload, PlayerAmountPayload)
             event = await self.catalog.ensure_migrated(event)

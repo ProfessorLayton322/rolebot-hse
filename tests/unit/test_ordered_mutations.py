@@ -28,6 +28,7 @@ from larp_bot.domain.models import (
     EmptyPayload,
     EnlistPayload,
     Event,
+    EventDetailsPayload,
     EventStatus,
     NotificationPayload,
     Operation,
@@ -50,6 +51,7 @@ def command(
     | CharacterWishPayload
     | ConfirmationDeadlinePayload
     | NotificationPayload
+    | EventDetailsPayload
     | PlayerAmountPayload
     | EmptyPayload,
     *,
@@ -70,6 +72,7 @@ def command(
                 Operation.SEND_CONFIRMATION_REMINDER,
                 Operation.SEND_CONFIRMED_NOTIFICATION,
                 Operation.SEND_ALL_PLAYERS_NOTIFICATION,
+                Operation.UPDATE_EVENT_DETAILS,
                 Operation.UPDATE_PLAYER_AMOUNT,
                 Operation.REMOVE_WAITING_PARTICIPANTS,
                 Operation.CLOSE_EVENT,
@@ -240,6 +243,42 @@ async def test_player_amount_change_is_retryable_and_moves_reserve_row_in_both_t
         finally:
             workbook.close()
         assert disk_store.replace_count[path] == 2
+
+
+@pytest.mark.asyncio
+async def test_event_master_can_update_name_and_date_without_changing_stable_resources(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.game_date = date(2026, 11, 14)
+    event.signup_token = "Old_Game_14_11_2026_abc"
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, MemoryRegistrationRepository(), YandexDiskShowcaseRepository(disk_store)),
+    )
+    update = command(
+        event,
+        Operation.UPDATE_EVENT_DETAILS,
+        EventDetailsPayload(name="Новый предел", game_date=date(2026, 11, 21)),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="Только мастера"):
+        await mutations.apply(update)
+
+    await add_command_author_as_leader(events, event)
+    result = await mutations.apply(update)
+    repeated = await mutations.apply(update)
+
+    stored = await events.get(event.event_id)
+    assert result.text == "Название и дата игры изменены: «Новый предел» (21.11.26)"
+    assert repeated.text == result.text
+    assert stored is not None
+    assert stored.name == "Новый предел"
+    assert stored.game_date == date(2026, 11, 21)
+    assert stored.signup_token == "Old_Game_14_11_2026_abc"
+    assert stored.master_table_resource_path == event.master_table_resource_path
+    assert stored.master_table_public_url == event.master_table_public_url
 
 
 @pytest.mark.asyncio

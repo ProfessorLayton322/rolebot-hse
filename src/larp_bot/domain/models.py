@@ -168,6 +168,7 @@ class Operation(StrEnum):
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
     SEND_ALL_PLAYERS_NOTIFICATION = "SEND_ALL_PLAYERS_NOTIFICATION"
+    UPDATE_EVENT_DETAILS = "UPDATE_EVENT_DETAILS"
     UPDATE_PLAYER_AMOUNT = "UPDATE_PLAYER_AMOUNT"
     REMOVE_PARTICIPANT = "REMOVE_PARTICIPANT"
     REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
@@ -616,6 +617,19 @@ class PlayerAmountPayload(StrictModel):
     player_amount: int = Field(ge=1, le=MAX_PLAYER_AMOUNT)
 
 
+class EventDetailsPayload(StrictModel):
+    name: str = Field(min_length=1, max_length=200)
+    game_date: date
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Название игры не может быть пустым")
+        return normalized
+
+
 class ProfileSyncPayload(StrictModel):
     names: list[str] = Field(min_length=1, max_length=2)
 
@@ -645,6 +659,7 @@ CommandPayload = (
     | CharacterWishPayload
     | ConfirmationDeadlinePayload
     | NotificationPayload
+    | EventDetailsPayload
     | PlayerAmountPayload
     | ProfileSyncPayload
     | StatisticsPayload
@@ -723,6 +738,8 @@ class OrderedRegistrationCommand(StrictModel):
             raise ValueError(f"{self.operation} requires NotificationPayload")
         if self.operation is Operation.UPDATE_PLAYER_AMOUNT and not isinstance(self.payload, PlayerAmountPayload):
             raise ValueError("UPDATE_PLAYER_AMOUNT requires PlayerAmountPayload")
+        if self.operation is Operation.UPDATE_EVENT_DETAILS and not isinstance(self.payload, EventDetailsPayload):
+            raise ValueError("UPDATE_EVENT_DETAILS requires EventDetailsPayload")
         empty_payload_operations = {
             Operation.UPDATE_PROFILE,
             Operation.CANCEL,

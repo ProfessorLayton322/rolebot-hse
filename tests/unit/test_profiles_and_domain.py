@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from larp_bot.domain.models import (
     EnlistPayload,
     Event,
+    EventDetailsPayload,
     EventStatus,
     PassDetails,
     PlayerAmountPayload,
@@ -212,6 +213,16 @@ def test_game_announcement_fields_reject_non_post_links(field: str, value: str) 
 def test_player_amount_payload_enforces_game_capacity_bounds(value: int) -> None:
     with pytest.raises(ValidationError):
         PlayerAmountPayload(player_amount=value)
+
+
+def test_event_details_payload_normalizes_and_validates_name() -> None:
+    payload = EventDetailsPayload(name="  Новое название  ", game_date=date(2026, 11, 21))
+
+    assert payload.name == "Новое название"
+    with pytest.raises(ValidationError):
+        EventDetailsPayload(name="   ", game_date=date(2026, 11, 21))
+    with pytest.raises(ValidationError):
+        EventDetailsPayload(name="x" * 201, game_date=date(2026, 11, 21))
 
 
 def test_russian_pass_profile_keeps_latin_fields_blank_and_uses_dash_for_no_patronym() -> None:
