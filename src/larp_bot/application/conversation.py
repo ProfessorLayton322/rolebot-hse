@@ -146,9 +146,10 @@ ADD_EVENT_LEADER = "➕ Добавить мастера"
 ADD_SELF_EVENT_LEADER = "➕ Добавить себя мастером"
 REMOVE_EVENT_LEADER = "➖ Удалить мастера"
 LIST_EVENT_LEADERS = "📋 Список мастеров"
-CREATION_MASTER_QUESTION = "Собираетесь ли вы сами мастерить эту игру, или добавите на эту роль кого-то ещё?"
-CREATE_AS_MASTER = "Да, буду мастерить самостоятельно"
-CREATE_WITH_OTHER_MASTER = "Нет, выбрать мастера"
+CREATION_MASTER_QUESTION = "Хотите назначить первого мастера игры сейчас или позже?"
+CREATE_AS_MASTER = "Назначить себя"
+CREATE_WITH_OTHER_MASTER = "Выбрать другого мастера"
+CREATE_WITHOUT_MASTER = "Назначить позже"
 SCHEDULE_REGISTRATION_QUESTION = "Хотите ли вы запланировать отложенное открытие игры?"
 ARCHIVE_GAME = "📦 Архивировать игру"
 UNARCHIVE_GAME = "📤 Разархивировать игру"
@@ -2556,14 +2557,26 @@ class ConversationEngine:
             buttons=[
                 Button(label=CREATE_AS_MASTER, value="create:master-self"),
                 Button(label=CREATE_WITH_OTHER_MASTER, value="create:master-pick"),
+                Button(label=CREATE_WITHOUT_MASTER, value="create:master-later"),
             ],
         )
 
-    def _creation_schedule_question(self, user: User, master: User | None = None) -> BotResponse:
+    def _creation_schedule_question(
+        self,
+        user: User,
+        master: User | None = None,
+        *,
+        assign_master_later: bool = False,
+    ) -> BotResponse:
         if master is not None:
             identity = self._identity(master)
             user.dialog_context["master_platform"] = identity.platform.value
             user.dialog_context["master_user_id"] = identity.platform_user_id
+            user.dialog_context.pop("assign_master_later", None)
+        elif assign_master_later:
+            user.dialog_context.pop("master_platform", None)
+            user.dialog_context.pop("master_user_id", None)
+            user.dialog_context["assign_master_later"] = True
         user.dialog_state = "ADMIN_CREATE_SCHEDULE_CHOICE"
         return BotResponse(
             text=SCHEDULE_REGISTRATION_QUESTION,
@@ -2737,6 +2750,8 @@ class ConversationEngine:
             return self._creation_schedule_question(user, user)
         if value == "create:master-pick":
             return await self._show_creation_master_candidates(user)
+        if value == "create:master-later":
+            return self._creation_schedule_question(user, assign_master_later=True)
         if user.dialog_state == "ADMIN_CREATE_MASTER_PLATFORM":
             platforms = {
                 "create:master-platform:telegram": Platform.TELEGRAM,
@@ -2814,8 +2829,10 @@ class ConversationEngine:
                 return _registration_schedule_response(past=True)
         return await self._create_game(user, message, registration_open_at=registration_open_at)
 
-    async def _creation_master(self, user: User) -> User:
+    async def _creation_master(self, user: User) -> User | None:
         context = user.dialog_context
+        if context.get("assign_master_later") is True:
+            return None
         master = await self.users.get(
             Platform(str(context["master_platform"])),
             int(context["master_user_id"]),
@@ -2838,14 +2855,17 @@ class ConversationEngine:
         except ValueError:
             await self._clear(user)
             return BotResponse(text="Выбранный мастер больше не является модератором или администратором.")
-        master_identity = self._identity(master)
+        master_identity = None if master is None else self._identity(master)
         event = await self.administration.create_event(
             str(context["event_name"]),
             game_date,
             int(context["player_amount"]),
-            [master_identity],
+            [] if master_identity is None else [master_identity],
             registration_open_at,
         )
+        if master_identity is None:
+            await self._clear(user)
+            return await self._game_created_response(event, game_date, masters_pending=True)
         if master_identity == self._identity(user):
             await self._clear(user)
             return await self._game_created_response(event, game_date)
@@ -2890,6 +2910,7 @@ class ConversationEngine:
         game_date: date,
         *,
         master_label: str | None = None,
+        masters_pending: bool = False,
     ) -> BotResponse:
         if event.signup_token is None:
             raise RuntimeError("new game has no signup token")
@@ -2905,7 +2926,10 @@ class ConversationEngine:
         # VK deep links use ``ref`` rather than Telegram's ``start`` query key.
         # VK delivers that value as ``message.ref`` in message_new callbacks.
         vk_start = f"https://vk.me/club{vk_group_id}?ref={event.signup_token}"
-        master_line = "" if master_label is None else f"Мастер: {master_label}\n\n"
+        if masters_pending:
+            master_line = "Мастера: пока не назначены\n\n"
+        else:
+            master_line = "" if master_label is None else f"Мастер: {master_label}\n\n"
         if event.registration_open_at is None:
             registration_line = (
                 f"Статус: {STATUS_REGISTRATION}. Игроки уже могут записываться, но пока не могут подтверждать участие."

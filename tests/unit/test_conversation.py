@@ -34,6 +34,9 @@ from larp_bot.application.conversation import (
     CO_PLAYER_WISH_SKIP,
     CO_PLAYER_WISHES,
     CONFIRM,
+    CREATE_AS_MASTER,
+    CREATE_WITH_OTHER_MASTER,
+    CREATE_WITHOUT_MASTER,
     CREATION_MASTER_QUESTION,
     CYRILLIC_FULL_NAME_PROMPT,
     DELETE_GAME,
@@ -2752,10 +2755,11 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     invalid = await engine.handle(inbound(5, "много"))
     assert invalid.text == "Введите целое количество игроков от 1 до 10000:"
     question = await engine.handle(inbound(6, "24"))
-    assert question.text == "Собираетесь ли вы сами мастерить эту игру, или добавите на эту роль кого-то ещё?"
+    assert question.text == CREATION_MASTER_QUESTION
     assert question.buttons == [
-        Button(label="Да, буду мастерить самостоятельно", value="create:master-self"),
-        Button(label="Нет, выбрать мастера", value="create:master-pick"),
+        Button(label=CREATE_AS_MASTER, value="create:master-self"),
+        Button(label=CREATE_WITH_OTHER_MASTER, value="create:master-pick"),
+        Button(label=CREATE_WITHOUT_MASTER, value="create:master-later"),
     ]
     assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]
     schedule_question = await engine.handle(inbound(7, "create:master-self", callback=True))
@@ -2950,6 +2954,50 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
         (Platform.TELEGRAM, 1),
     }
+
+
+@pytest.mark.asyncio
+async def test_admin_creates_game_without_masters_and_assigns_one_later(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@moderator_2",
+            full_name="Модератор 02",
+            vk_url="https://vk.com/id2",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+            is_gamemaster=True,
+        )
+    )
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Игра без мастеров"))
+    await engine.handle(inbound(3, "15.11.26"))
+    master_question = await engine.handle(inbound(4, "20"))
+    schedule_question = await engine.handle(inbound(5, "create:master-later", callback=True))
+    response = await engine.handle(inbound(6, "create:schedule:no", callback=True))
+
+    assert Button(label=CREATE_WITHOUT_MASTER, value="create:master-later") in master_question.buttons
+    assert schedule_question.text == SCHEDULE_REGISTRATION_QUESTION
+    created = next(
+        candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Игра без мастеров"
+    )
+    assert await engine.events.list_leaders(created.event_id) == []
+    assert "Мастера: пока не назначены" in response.text
+
+    masters = await engine.handle(inbound(7, f"ag:masters:{created.event_id}", callback=True))
+    assert ADD_EVENT_LEADER in {button.label for button in masters.buttons}
+    await engine.handle(inbound(8, f"master:add:{created.event_id}", callback=True))
+    added = await engine.handle(inbound(9, "master:add-pick:t:2", callback=True))
+
+    assert added.text == "✅ Модератор добавлен мастером игры «Игра без мастеров» (15.11.26)."
+    assert await engine.events.list_leaders(created.event_id) == [
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2)
+    ]
 
 
 @pytest.mark.asyncio
