@@ -802,7 +802,7 @@ async def test_admin_status_commands_allow_any_transition(disk_store: MemoryDisk
 
 
 @pytest.mark.asyncio
-async def test_legacy_delete_command_archives_without_deleting_game_data(
+async def test_delete_command_rejects_an_active_game_without_deleting_data(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     tables = MemoryRegistrationRepository()
@@ -810,18 +810,87 @@ async def test_legacy_delete_command_archives_without_deleting_game_data(
     await showcase.create_event_workbook(event.disk_resource_path)
     events = MemoryEventRepository([event])
     await add_command_author_as_leader(events, event)
-    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        admins=StaticAdminProvider(tg_ids={1}),
+    )
     await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
     await mutations.apply(command(event, Operation.CONFIRM, CharacterWishPayload(character_wish="Doctor")))
-    result = await mutations.apply(command(event, Operation.DELETE_EVENT, EmptyPayload()))
+
+    with pytest.raises(OperationNotAllowed, match="только архивированную"):
+        await mutations.apply(command(event, Operation.DELETE_EVENT, EmptyPayload()))
 
     stored_event = await events.get(event.event_id)
     stored_registration = await tables.get(event.event_id, "a" * 43)
-    assert result.text == "Игра архивирована; таблицы и записи сохранены"
-    assert stored_event is not None and stored_event.status is EventStatus.CLOSED
-    assert stored_event.archived_at is not None
+    assert stored_event is not None and stored_event.archived_at is None
     assert stored_registration is not None and stored_registration.character_wish == "Doctor"
     assert event.disk_resource_path in disk_store.files
+
+
+@pytest.mark.asyncio
+async def test_admin_delete_removes_an_archived_game_with_all_records_and_workbooks(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    public_path = f"disk:/larp-bot/events/{event.event_id}/public_table_{event.name}.xlsx"
+    pass_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+    event = event.model_copy(
+        update={
+            "public_table_resource_path": public_path,
+            "public_table_public_url": "https://disk.example/public-table",
+            "pass_table_resource_path": pass_path,
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    tables = MemoryRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.master_table_resource_path)
+    await showcase.create_public_event_workbook(public_path)
+    await showcase.create_pass_table(pass_path, [])
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        admins=StaticAdminProvider(tg_ids={1}),
+    )
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
+    archived_at = datetime(2026, 9, 1, tzinfo=UTC)
+    await events.archive(event.event_id, archived_at)
+    archived = await events.get(event.event_id)
+    assert archived is not None
+
+    result = await mutations.apply(command(archived, Operation.DELETE_EVENT, EmptyPayload()))
+    repeated = await mutations.apply(command(archived, Operation.DELETE_EVENT, EmptyPayload()))
+
+    assert result.text == "Игра, записи и XLSX-таблицы удалены"
+    assert repeated.text == "Игра уже отсутствует в постоянном списке"
+    assert await events.get(event.event_id) is None
+    assert await events.list_leaders(event.event_id) == []
+    assert await tables.list_for_event(event.event_id) == []
+    assert not ({event.master_table_resource_path, public_path, pass_path} & disk_store.files.keys())
+
+
+@pytest.mark.asyncio
+async def test_event_master_cannot_delete_an_archived_game(disk_store: MemoryDiskStore, event: Event) -> None:
+    archived = event.model_copy(
+        update={
+            "status": EventStatus.CLOSED,
+            "archived_at": datetime(2026, 9, 1, tzinfo=UTC),
+        }
+    )
+    events = MemoryEventRepository([archived])
+    await add_command_author_as_leader(events, archived)
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, MemoryRegistrationRepository(), YandexDiskShowcaseRepository(disk_store)),
+        admins=StaticAdminProvider(tg_gamemaster_ids={1}),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="Только администраторы"):
+        await mutations.apply(command(archived, Operation.DELETE_EVENT, EmptyPayload()))
+
+    assert await events.get(event.event_id) is not None
 
 
 @pytest.mark.asyncio

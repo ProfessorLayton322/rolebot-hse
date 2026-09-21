@@ -35,6 +35,7 @@ from larp_bot.application.conversation import (
     CONFIRM,
     CREATION_MASTER_QUESTION,
     CYRILLIC_FULL_NAME_PROMPT,
+    DELETE_GAME,
     EDIT_PROFILE,
     EMAIL_PROMPT,
     ENLIST,
@@ -3514,6 +3515,7 @@ async def test_admin_can_unarchive_game_from_archive_menu(disk_store: MemoryDisk
     assert "Статус: Архивирована" in archived_management.text
     assert archived_management.buttons == [
         Button(label=UNARCHIVE_GAME, value="ag:unarchive:event-archived-0"),
+        Button(label=DELETE_GAME, value="ag:delete:event-archived-0"),
         Button(label="⬅️ Назад", value=ARCHIVED_GAMES),
     ]
 
@@ -3532,6 +3534,43 @@ async def test_admin_can_unarchive_game_from_archive_menu(disk_store: MemoryDisk
 
 
 @pytest.mark.asyncio
+async def test_admin_deletes_archived_game_only_after_entering_its_exact_name(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    archived = event.model_copy(
+        update={
+            "status": EventStatus.CLOSED,
+            "archived_at": datetime(2026, 9, 1, tzinfo=UTC),
+        }
+    )
+    engine, users, publisher, _ = await engine_setup(disk_store, archived, admin=True)
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    delete_button = next(button for button in management.buttons if button.label == DELETE_GAME)
+    prompt = await engine.handle(inbound(2, delete_button.value, callback=True))
+
+    assert "Это действие необратимо" in prompt.text
+    assert f"точное название:\n\n{event.name}" in prompt.text
+    user = await users.get(Platform.TELEGRAM, 1)
+    assert user is not None and user.dialog_state == "ADMIN_DELETE_NAME"
+
+    wrong = await engine.handle(inbound(3, event.name.casefold()))
+    assert "Название не совпало" in wrong.text
+    accepted = await engine.handle(inbound(4, f"  {event.name}  "))
+
+    assert accepted.text == "⏳ Удаление принято в обработку."
+    assert accepted.deferred
+    assert accepted.command_enqueued
+    assert accepted.buttons == [Button(label=BACK, value=ARCHIVED_GAMES)]
+    assert publisher.commands[-1].operation is Operation.DELETE_EVENT
+    assert publisher.commands[-1].participant_key is None
+    assert publisher.commands[-1].reply_context.text_success == (
+        f"🗑 Игра «{event.name}», все записи и XLSX-таблицы удалены."
+    )
+    assert publisher.commands[-1].reply_context.buttons == [Button(label=BACK, value=ARCHIVED_GAMES)]
+
+
+@pytest.mark.asyncio
 async def test_gamemaster_cannot_list_or_open_archived_games(disk_store: MemoryDiskStore, event: Event) -> None:
     archived = Event.model_validate(
         event.model_dump()
@@ -3546,6 +3585,7 @@ async def test_gamemaster_cannot_list_or_open_archived_games(disk_store: MemoryD
     forged = await engine.handle(inbound(2, f"ag:manage:{event.event_id}", callback=True))
     forged_action = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
     forged_unarchive = await engine.handle(inbound(4, f"ag:unarchive:{event.event_id}", callback=True))
+    forged_delete = await engine.handle(inbound(5, f"ag:delete:{event.event_id}", callback=True))
 
     assert not any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
     assert forged.text == "Игра не найдена."
@@ -3554,6 +3594,8 @@ async def test_gamemaster_cannot_list_or_open_archived_games(disk_store: MemoryD
     assert event.name not in forged_action.text
     assert forged_unarchive.text == "Игра не найдена."
     assert event.name not in forged_unarchive.text
+    assert forged_delete.text == "Игра не найдена."
+    assert event.name not in forged_delete.text
 
 
 @pytest.mark.asyncio

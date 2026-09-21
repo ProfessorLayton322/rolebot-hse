@@ -531,6 +531,18 @@ async def test_unarchive_clears_timestamp_without_changing_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_removes_event_and_its_leaders() -> None:
+    executor = RecordingExecutor([event_row("CLOSED") | {"archived_at": datetime(2026, 9, 5, tzinfo=UTC)}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.delete("event-a1")
+
+    assert "DELETE FROM `event_leaders` WHERE event_id = $event_id" in executor.query_text
+    assert "DELETE FROM `events` WHERE event_id = $event_id" in executor.query_text
+    assert executor.params == {"$event_id": "event-a1"}
+
+
+@pytest.mark.asyncio
 async def test_open_confirmation_persists_deadline_with_status() -> None:
     executor = RecordingExecutor([event_row("CREATED")])
     repository = YdbEventRepository(executor)  # type: ignore[arg-type]
