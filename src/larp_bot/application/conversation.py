@@ -243,6 +243,9 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_CREATE_MASTER_CHOICE",
         "ADMIN_CREATE_MASTER_PICK",
+        "ADMIN_CREATE_MASTER_PLATFORM",
+        "ADMIN_CREATE_MASTER_PROFILE",
+        "ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
         "ADMIN_CREATE_SCHEDULE_CHOICE",
         "ADMIN_CREATE_SCHEDULE_TIME",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
@@ -261,6 +264,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_MODERATOR_REMOVE",
         "ADMIN_MODERATOR_REMOVE_CONFIRM",
         "ADMIN_EVENT_LEADER_ADD_PICK",
+        "ADMIN_EVENT_LEADER_PROMOTE_CONFIRM",
         "ADMIN_EVENT_LEADER_REMOVE",
         "ADMIN_EVENT_LEADER_REMOVE_CONFIRM",
         "ADMIN_EVENT_LEADER_LIST",
@@ -2500,6 +2504,7 @@ class ConversationEngine:
         event: Event,
         *,
         offset: int = 0,
+        notice: str = "",
     ) -> BotResponse:
         if offset < 0:
             return BotResponse(text="Некорректная страница.")
@@ -2541,7 +2546,7 @@ class ConversationEngine:
                 "Можно ввести Telegram- или VK-профиль напрямую."
             )
         )
-        return BotResponse(text=text, buttons=buttons)
+        return BotResponse(text=f"{notice}{text}", buttons=buttons)
 
     @staticmethod
     def _creation_master_question(user: User) -> BotResponse:
@@ -2583,6 +2588,7 @@ class ConversationEngine:
             )
             for profile in page
         ]
+        buttons.append(Button(label="🔗 Ввести профиль Telegram или VK", value="create:master-direct"))
         buttons.extend(
             _pagination_buttons(
                 previous=f"create:master-page:{max(0, offset - PAGE_SIZE)}" if offset else None,
@@ -2597,9 +2603,131 @@ class ConversationEngine:
         text = (
             f"Выберите модератора или администратора, который станет первым мастером игры {reference}:"
             if page
-            else "Нет других модераторов или администраторов, которых можно выбрать мастером."
+            else (
+                "Нет других модераторов или администраторов, которых можно выбрать мастером. "
+                "Можно ввести Telegram- или VK-профиль напрямую."
+            )
         )
         return BotResponse(text=f"{notice}{text}", buttons=buttons)
+
+    @staticmethod
+    def _creation_master_platform_prompt() -> BotResponse:
+        return BotResponse(
+            text="Выберите бот, которым пользуется будущий мастер:",
+            buttons=[
+                Button(label="Telegram", value="create:master-platform:telegram"),
+                Button(label="VK", value="create:master-platform:vk"),
+                Button(label=BACK, value="create:master-pick"),
+            ],
+        )
+
+    def _master_promotion_question(
+        self,
+        user: User,
+        target: User,
+        *,
+        state: str,
+        reference: str,
+        confirm_value: str,
+        decline_value: str,
+    ) -> BotResponse:
+        identity = self._identity(target)
+        user.dialog_state = state
+        user.dialog_context["promotion_target_platform"] = identity.platform.value
+        user.dialog_context["promotion_target_user_id"] = identity.platform_user_id
+        name = target.full_name or f"ID {identity.platform_user_id}"
+        return BotResponse(
+            text=(
+                f"«{name}» пока не является модератором. Назначить этого пользователя "
+                f"модератором и добавить мастером игры {reference}?"
+            ),
+            buttons=[
+                Button(label="Да, назначить", value=confirm_value),
+                Button(label="Нет, выбрать другого", value=decline_value),
+            ],
+        )
+
+    async def _find_master_profile(self, platform: Platform, value: str) -> User | None:
+        if platform is Platform.TELEGRAM:
+            return await self._find_telegram_target(value)
+        normalized = normalize_vk_url(value)
+        if self.vk_user_ids is None:
+            raise RuntimeError("VK user ID resolver is not configured")
+        target_id = await self.vk_user_ids.resolve_user_id(normalized)
+        return None if target_id is None else await self.users.get(Platform.VK, target_id)
+
+    async def _select_creation_master_profile(self, user: User, value: str) -> BotResponse:
+        target_platform = Platform(str(user.dialog_context["master_profile_platform"]))
+        try:
+            target = await self._find_master_profile(target_platform, value)
+        except ValueError as exc:
+            return BotResponse(
+                text=f"❌ {exc}. Попробуйте ещё раз:",
+                buttons=[Button(label=BACK, value="create:master-pick")],
+            )
+        if target is None:
+            platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
+            return BotResponse(
+                text=(
+                    f"Пользователь {platform_name} не найден. Убедитесь, что он уже написал этому боту "
+                    "и полностью заполнил профиль, затем попробуйте ещё раз."
+                ),
+                buttons=[Button(label=BACK, value="create:master-pick")],
+            )
+        if not target.profile_complete:
+            return BotResponse(
+                text=("Профиль этого пользователя заполнен не полностью. Попросите его завершить профиль и повторите."),
+                buttons=[Button(label=BACK, value="create:master-pick")],
+            )
+        if await self._has_admin_access(target):
+            return self._creation_schedule_question(user, target)
+        reference = event_reference(
+            str(user.dialog_context["event_name"]),
+            date.fromisoformat(str(user.dialog_context["game_date"])),
+        )
+        return self._master_promotion_question(
+            user,
+            target,
+            state="ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
+            reference=reference,
+            confirm_value="create:master-promote:yes",
+            decline_value="create:master-promote:no",
+        )
+
+    async def _creation_master_promotion_step(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        if value == "create:master-promote:no":
+            return await self._show_creation_master_candidates(
+                user,
+                offset=int(user.dialog_context.get("master_offset", 0)),
+                notice="Добавление мастера отменено. Выберите другого пользователя.\n\n",
+            )
+        platform = Platform(str(user.dialog_context["promotion_target_platform"]))
+        target = await self.users.get(platform, int(user.dialog_context["promotion_target_user_id"]))
+        if target is None:
+            return await self._show_creation_master_candidates(
+                user,
+                notice="Пользователь больше не найден. Выберите другого.\n\n",
+            )
+        reference = event_reference(
+            str(user.dialog_context["event_name"]),
+            date.fromisoformat(str(user.dialog_context["game_date"])),
+        )
+        if value != "create:master-promote:yes":
+            return self._master_promotion_question(
+                user,
+                target,
+                state="ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
+                reference=reference,
+                confirm_value="create:master-promote:yes",
+                decline_value="create:master-promote:no",
+            )
+        target = await self._promote_master_target(user, message, target)
+        return self._creation_schedule_question(user, target)
 
     async def _creation_master_step(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if not await self._is_admin(user):
@@ -2609,16 +2737,52 @@ class ConversationEngine:
             return self._creation_schedule_question(user, user)
         if value == "create:master-pick":
             return await self._show_creation_master_candidates(user)
+        if user.dialog_state == "ADMIN_CREATE_MASTER_PLATFORM":
+            platforms = {
+                "create:master-platform:telegram": Platform.TELEGRAM,
+                "create:master-platform:vk": Platform.VK,
+            }
+            target_platform = platforms.get(value)
+            if target_platform is None:
+                return self._creation_master_platform_prompt()
+            user.dialog_state = "ADMIN_CREATE_MASTER_PROFILE"
+            user.dialog_context["master_profile_platform"] = target_platform.value
+            prompt = (
+                "Отправьте ссылку на профиль Telegram или @username будущего мастера:"
+                if target_platform is Platform.TELEGRAM
+                else "Отправьте ссылку на профиль VK будущего мастера:"
+            )
+            return BotResponse(text=prompt, buttons=[Button(label=BACK, value="create:master-pick")])
+        if user.dialog_state == "ADMIN_CREATE_MASTER_PROFILE":
+            return await self._select_creation_master_profile(user, value)
+        if user.dialog_state == "ADMIN_CREATE_MASTER_PROMOTE_CONFIRM":
+            return await self._creation_master_promotion_step(user, message, value)
         if user.dialog_state != "ADMIN_CREATE_MASTER_PICK" or value == "create:master-choice":
             return self._creation_master_question(user)
         offset = int(user.dialog_context.get("master_offset", 0))
         parts = value.split(":")
         if value.startswith("create:master-page:") and len(parts) == 3 and parts[2].isdecimal():
             return await self._show_creation_master_candidates(user, offset=int(parts[2]))
+        if value == "create:master-direct":
+            user.dialog_state = "ADMIN_CREATE_MASTER_PLATFORM"
+            return self._creation_master_platform_prompt()
         if value.startswith("create:master:") and len(parts) == 4 and parts[2] in {"t", "v"} and parts[3].isdecimal():
             target = await self.users.get(self._platform_from_code(parts[2]), int(parts[3]))
             if target is not None and await self._has_admin_access(target):
                 return self._creation_schedule_question(user, target)
+            if target is not None:
+                reference = event_reference(
+                    str(user.dialog_context["event_name"]),
+                    date.fromisoformat(str(user.dialog_context["game_date"])),
+                )
+                return self._master_promotion_question(
+                    user,
+                    target,
+                    state="ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
+                    reference=reference,
+                    confirm_value="create:master-promote:yes",
+                    decline_value="create:master-promote:no",
+                )
             return await self._show_creation_master_candidates(
                 user,
                 offset=offset,
@@ -2942,6 +3106,30 @@ class ConversationEngine:
                 if event is None or target is None:
                     return BotResponse(text="Пользователь или игра не найдены.")
                 return await self._assign_event_leader(user, message, event, target)
+            if value in {"master:promote:yes", "master:promote:no"}:
+                if user.dialog_state != "ADMIN_EVENT_LEADER_PROMOTE_CONFIRM":
+                    return BotResponse(text="Некорректное действие.")
+                event = await self.events.get(str(user.dialog_context["event_id"]))
+                if event is None:
+                    await self._clear(user)
+                    return BotResponse(text="Игра не найдена.")
+                if value == "master:promote:no":
+                    return await self._show_event_master_candidates(
+                        user,
+                        event,
+                        offset=int(user.dialog_context.get("master_offset", 0)),
+                        notice=("Добавление мастера отменено. Выберите другого пользователя.\n\n"),
+                    )
+                platform = Platform(str(user.dialog_context["promotion_target_platform"]))
+                target = await self.users.get(platform, int(user.dialog_context["promotion_target_user_id"]))
+                if target is None:
+                    return await self._show_event_master_candidates(
+                        user,
+                        event,
+                        notice="Пользователь больше не найден. Выберите другого.\n\n",
+                    )
+                target = await self._promote_master_target(user, message, target)
+                return await self._assign_event_leader(user, message, event, target)
             if value == "master:add-direct":
                 if user.dialog_state != "ADMIN_EVENT_LEADER_ADD_PICK":
                     return BotResponse(text="Некорректное действие.")
@@ -3062,6 +3250,7 @@ class ConversationEngine:
             "ADMIN_EVENT_LEADER_PLATFORM",
             "ADMIN_EVENT_LEADER_PROFILE",
             "ADMIN_EVENT_LEADER_ADD_PICK",
+            "ADMIN_EVENT_LEADER_PROMOTE_CONFIRM",
             "ADMIN_EVENT_LEADER_REMOVE",
             "ADMIN_EVENT_LEADER_REMOVE_CONFIRM",
             "ADMIN_EVENT_LEADER_LIST",
@@ -3146,15 +3335,30 @@ class ConversationEngine:
             user.dialog_state = "ADMIN_EVENT_LEADER_PROFILE"
             user.dialog_context["gamemaster_platform"] = target_platform.value
             if target_platform is Platform.TELEGRAM:
-                prompt = "Отправьте ссылку на профиль Telegram или @username модератора:"
+                prompt = "Отправьте ссылку на профиль Telegram или @username будущего мастера:"
             else:
-                prompt = "Отправьте ссылку на профиль VK модератора:"
+                prompt = "Отправьте ссылку на профиль VK будущего мастера:"
             return BotResponse(
                 text=prompt,
                 buttons=[Button(label=BACK, value=f"ag:masters:{user.dialog_context['event_id']}")],
             )
         if user.dialog_state == "ADMIN_EVENT_LEADER_PROFILE":
             return await self._add_event_leader(user, message, value)
+        if user.dialog_state == "ADMIN_EVENT_LEADER_PROMOTE_CONFIRM":
+            platform = Platform(str(user.dialog_context["promotion_target_platform"]))
+            target = await self.users.get(platform, int(user.dialog_context["promotion_target_user_id"]))
+            event = await self.events.get(str(user.dialog_context["event_id"]))
+            if target is None or event is None:
+                await self._clear(user)
+                return BotResponse(text="Пользователь или игра не найдены.")
+            return self._master_promotion_question(
+                user,
+                target,
+                state="ADMIN_EVENT_LEADER_PROMOTE_CONFIRM",
+                reference=event_reference(event.name, event.game_date),
+                confirm_value="master:promote:yes",
+                decline_value="master:promote:no",
+            )
         if user.dialog_state == "ADMIN_REMOVE_PICK":
             return await self._admin_remove_pick(user, message, value)
         if user.dialog_state == "ADMIN_REMOVE_CONFIRM":
@@ -3165,7 +3369,13 @@ class ConversationEngine:
             return await self._admin_waiting_pick(user, value)
         if user.dialog_state == "ADMIN_PROFILES_PICK":
             return await self._admin_profiles_pick(user, value)
-        if user.dialog_state in {"ADMIN_CREATE_MASTER_CHOICE", "ADMIN_CREATE_MASTER_PICK"}:
+        if user.dialog_state in {
+            "ADMIN_CREATE_MASTER_CHOICE",
+            "ADMIN_CREATE_MASTER_PICK",
+            "ADMIN_CREATE_MASTER_PLATFORM",
+            "ADMIN_CREATE_MASTER_PROFILE",
+            "ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
+        }:
             return await self._creation_master_step(user, message, value)
         if user.dialog_state in {"ADMIN_CREATE_SCHEDULE_CHOICE", "ADMIN_CREATE_SCHEDULE_TIME"}:
             return await self._creation_schedule_step(user, message, value)
@@ -3644,10 +3854,50 @@ class ConversationEngine:
             target.telegram_handle = handle
         return target
 
+    async def _promote_master_target(
+        self,
+        user: User,
+        message: InboundMessage,
+        target: User,
+    ) -> User:
+        identity = self._identity(target)
+        request_id = f"gamemaster-grant:{identity.platform.value}:{identity.platform_user_id}:{message.update_id}"
+        if user.dialog_context.get("completed_master_promotion") == request_id:
+            refreshed = await self.users.get(identity.platform, identity.platform_user_id)
+            return refreshed or target
+
+        same_operation = target.is_gamemaster and target.gamemaster_grant_operation_id == request_id
+        if not same_operation and await self._has_admin_access(target):
+            user.dialog_context["completed_master_promotion"] = request_id
+            await self.users.save(user)
+            return target
+
+        if not target.is_gamemaster:
+            await self.users.grant_gamemaster(identity.platform, identity.platform_user_id, request_id)
+        refreshed = await self.users.get(identity.platform, identity.platform_user_id)
+        if refreshed is None or not refreshed.is_gamemaster:
+            raise RuntimeError("gamemaster grant was not persisted")
+        target = refreshed
+        if target.gamemaster_grant_operation_id == request_id:
+            if target.last_delivery_operation_id != request_id:
+                await self._notify_status_change(
+                    user,
+                    target,
+                    request_id=request_id,
+                    text=GAMEMASTER_NOTIFICATION,
+                    buttons=[admin_menu_button()],
+                )
+        elif not await self._has_admin_access(target):
+            raise RuntimeError("gamemaster grant was not persisted")
+
+        user.dialog_context["completed_master_promotion"] = request_id
+        await self.users.save(user)
+        return target
+
     @staticmethod
     def _event_leader_platform_prompt(event_id: str) -> BotResponse:
         return BotResponse(
-            text="Выберите бот, которым пользуется модератор, которого нужно добавить мастером:",
+            text="Выберите бот, которым пользуется будущий мастер:",
             buttons=[
                 Button(label="Telegram", value="admin:event-leader:telegram"),
                 Button(label="VK", value="admin:event-leader:vk"),
@@ -3657,16 +3907,8 @@ class ConversationEngine:
 
     async def _add_event_leader(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         target_platform = Platform(str(user.dialog_context["gamemaster_platform"]))
-        target: User | None
         try:
-            if target_platform is Platform.TELEGRAM:
-                target = await self._find_telegram_target(value)
-            else:
-                normalized = normalize_vk_url(value)
-                if self.vk_user_ids is None:
-                    raise RuntimeError("VK user ID resolver is not configured")
-                target_id = await self.vk_user_ids.resolve_user_id(normalized)
-                target = None if target_id is None else await self.users.get(Platform.VK, target_id)
+            target = await self._find_master_profile(target_platform, value)
         except ValueError as exc:
             return BotResponse(
                 text=f"❌ {exc}. Попробуйте ещё раз:",
@@ -3711,9 +3953,13 @@ class ConversationEngine:
             self._has_admin_access(target),
         )
         if not has_admin_access:
-            return BotResponse(
-                text="Добавить мастером можно только модератора или администратора.",
-                buttons=[Button(label=BACK, value=f"ag:masters:{event_id}")],
+            return self._master_promotion_question(
+                user,
+                target,
+                state="ADMIN_EVENT_LEADER_PROMOTE_CONFIRM",
+                reference=event_reference(event.name, event.game_date),
+                confirm_value="master:promote:yes",
+                decline_value="master:promote:no",
             )
         role_name = "Администратор" if configured_admin else "Модератор"
         reference = event_reference(event.name, event.game_date)
