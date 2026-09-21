@@ -392,6 +392,33 @@ async def test_ydb_confirmation_deletes_replaced_game_row_in_the_same_transactio
 
 
 @pytest.mark.asyncio
+async def test_ydb_linked_confirmation_updates_both_games_atomically_without_deleting_history() -> None:
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+    current_keys = ["a" * 43, "b" * 43]
+    replaced_keys = ["c" * 43, "d" * 43]
+
+    await repository.confirm_linked(
+        "event-a1",
+        operation_id="confirm-linked",
+        participant_keys=current_keys,
+        character_wish="Doctor",
+        replaced_event_id="event-b1",
+        replaced_participant_keys=replaced_keys,
+    )
+
+    query, params = executor.queries[0]
+    assert "DELETE FROM `registrations`" not in query
+    assert query.count("UPDATE `registrations`") == 2
+    assert "participant_key IN $participant_keys" in query
+    assert "participant_key IN $replaced_participant_keys" in query
+    assert params["$participant_keys"] == current_keys
+    assert params["$replaced_participant_keys"] == replaced_keys
+    assert params["$confirmed_status"] == AttendanceStatus.CONFIRMED.value
+    assert params["$cancelled_status"] == AttendanceStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
 async def test_ydb_co_player_wish_update_changes_only_wish_projection() -> None:
     executor = RecordingExecutor([[]])
     repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]

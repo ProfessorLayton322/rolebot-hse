@@ -231,7 +231,9 @@ class YdbUserRepository:
 
     async def get(self, platform: Platform, user_id: int) -> User | None:
         table, id_column, contact_column = self._location(platform)
-        platform_columns = f"{contact_column}, telegram_handle" if platform is Platform.TELEGRAM else contact_column
+        platform_columns = (
+            f"{contact_column}, linked_vk_id, telegram_handle" if platform is Platform.TELEGRAM else contact_column
+        )
         query = f"""
             DECLARE $user_id AS Uint64;
             SELECT {id_column}, {platform_columns}, {self.COMMON_COLUMNS}
@@ -267,17 +269,55 @@ class YdbUserRepository:
                 {
                     "tg_id": user_id,
                     "vk_url": row.get("vk_url"),
+                    "linked_vk_id": row.get("linked_vk_id"),
                     "telegram_handle": row.get("telegram_handle"),
                     **common,
                 }
             )
         return VkUser.model_validate({"vk_id": user_id, "telegram_handle": row.get("telegram_handle"), **common})
 
+    async def find_linked(self, user: User) -> User | None:
+        if isinstance(user, TelegramUser):
+            if user.linked_vk_id is None or user.telegram_handle is None:
+                return None
+            owners = await self.db.query(
+                """
+                DECLARE $vk_id AS Uint64;
+                DECLARE $handle AS Utf8;
+                SELECT tg_id FROM `tg_users`
+                WHERE linked_vk_id = $vk_id AND telegram_handle = $handle
+                LIMIT 2;
+                """,
+                {"$vk_id": user.linked_vk_id, "$handle": user.telegram_handle},
+                read_only=True,
+            )
+            if len(owners) != 1 or int(owners[0]["tg_id"]) != user.tg_id:
+                return None
+            linked = await self.get(Platform.VK, user.linked_vk_id)
+            return linked if linked is not None and linked.telegram_handle == user.telegram_handle else None
+        if user.telegram_handle is None:
+            return None
+        rows = await self.db.query(
+            f"""
+            DECLARE $vk_id AS Uint64;
+            DECLARE $handle AS Utf8;
+            SELECT tg_id, vk_url, linked_vk_id, telegram_handle, {self.COMMON_COLUMNS}
+            FROM `tg_users`
+            WHERE linked_vk_id = $vk_id AND telegram_handle = $handle
+            LIMIT 2;
+            """,
+            {"$vk_id": user.vk_id, "$handle": user.telegram_handle},
+            read_only=True,
+        )
+        if len(rows) != 1:
+            return None
+        return self._from_row(Platform.TELEGRAM, int(rows[0]["tg_id"]), rows[0])
+
     async def find_telegram_by_handle(self, handle: str) -> TelegramUser | None:
         rows = await self.db.query(
             f"""
             DECLARE $handle AS Utf8;
-            SELECT tg_id, vk_url, telegram_handle, {self.COMMON_COLUMNS}
+            SELECT tg_id, vk_url, linked_vk_id, telegram_handle, {self.COMMON_COLUMNS}
             FROM `tg_users` WHERE telegram_handle = $handle
             LIMIT 2;
             """,
@@ -303,10 +343,36 @@ class YdbUserRepository:
             {"$user_id": user_id, "$handle": handle, "$updated_at": datetime.now(UTC)},
         )
 
+    async def update_telegram_link(
+        self,
+        user_id: int,
+        handle: str | None,
+        linked_vk_id: int | None,
+    ) -> None:
+        await self.db.query(
+            """
+            DECLARE $user_id AS Uint64;
+            DECLARE $handle AS Optional<Utf8>;
+            DECLARE $linked_vk_id AS Optional<Uint64>;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `tg_users`
+            SET telegram_handle = $handle,
+                linked_vk_id = $linked_vk_id,
+                updated_at = $updated_at
+            WHERE tg_id = $user_id;
+            """,
+            {
+                "$user_id": user_id,
+                "$handle": handle,
+                "$linked_vk_id": linked_vk_id,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+
     async def list_all(self) -> Sequence[User]:
         telegram_rows, vk_rows = await asyncio.gather(
             self.db.query(
-                f"SELECT tg_id, vk_url, telegram_handle, {self.COMMON_COLUMNS} FROM `tg_users`;",
+                f"SELECT tg_id, vk_url, linked_vk_id, telegram_handle, {self.COMMON_COLUMNS} FROM `tg_users`;",
                 read_only=True,
             ),
             self.db.query(
@@ -323,10 +389,17 @@ class YdbUserRepository:
         if isinstance(user, TelegramUser):
             table, id_column = "tg_users", "tg_id"
             user_id = user.tg_id
-            contact_declarations = "DECLARE $vk_url AS Optional<Utf8>; DECLARE $telegram_handle AS Optional<Utf8>;"
-            contact_columns = "vk_url, telegram_handle,"
-            contact_values = "$vk_url, $telegram_handle,"
-            contact_params = {"$vk_url": user.vk_url, "$telegram_handle": user.telegram_handle}
+            contact_declarations = (
+                "DECLARE $vk_url AS Optional<Utf8>; DECLARE $linked_vk_id AS Optional<Uint64>; "
+                "DECLARE $telegram_handle AS Optional<Utf8>;"
+            )
+            contact_columns = "vk_url, linked_vk_id, telegram_handle,"
+            contact_values = "$vk_url, $linked_vk_id, $telegram_handle,"
+            contact_params = {
+                "$vk_url": user.vk_url,
+                "$linked_vk_id": user.linked_vk_id,
+                "$telegram_handle": user.telegram_handle,
+            }
         else:
             table, id_column = "vk_users", "vk_id"
             user_id = user.vk_id
@@ -1715,6 +1788,72 @@ class YdbRegistrationRepository:
         )
         return True
 
+    async def confirm_linked(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        character_wish: str,
+        replaced_event_id: str | None = None,
+        replaced_participant_keys: Sequence[str] = (),
+    ) -> bool:
+        if (replaced_event_id is None) != (not replaced_participant_keys):
+            raise ValueError("replacement event and participant keys must be supplied together")
+        if replaced_event_id == event_id:
+            raise ValueError("replacement event must differ from the confirmed event")
+        replacement_declarations = ""
+        replacement_update = ""
+        now = datetime.now(UTC)
+        params: dict[str, Any] = {
+            "$event_id": event_id,
+            "$participant_keys": list(participant_keys),
+            "$operation_id": operation_id,
+            "$character_wish": character_wish,
+            "$confirmed_status": AttendanceStatus.CONFIRMED.value,
+            "$updated_at": now,
+        }
+        if replaced_event_id is not None:
+            replacement_declarations = (
+                "DECLARE $replaced_event_id AS Utf8; "
+                "DECLARE $replaced_participant_keys AS List<Utf8>; "
+                "DECLARE $cancelled_status AS Utf8;"
+            )
+            replacement_update = """
+                UPDATE `registrations`
+                SET attendance_status = $cancelled_status,
+                    last_operation_id = $operation_id,
+                    updated_at = $updated_at
+                WHERE event_id = $replaced_event_id
+                  AND participant_key IN $replaced_participant_keys
+                  AND last_operation_id != $operation_id;
+            """
+            params.update(
+                {
+                    "$replaced_event_id": replaced_event_id,
+                    "$replaced_participant_keys": list(replaced_participant_keys),
+                    "$cancelled_status": AttendanceStatus.CANCELLED.value,
+                }
+            )
+        await self.db.query(
+            f"""
+            DECLARE $event_id AS Utf8; DECLARE $participant_keys AS List<Utf8>;
+            DECLARE $operation_id AS Utf8; DECLARE $character_wish AS Utf8;
+            DECLARE $confirmed_status AS Utf8; DECLARE $updated_at AS Timestamp;
+            {replacement_declarations}
+            {replacement_update}
+            UPDATE `registrations`
+            SET character_wish = $character_wish,
+                attendance_status = $confirmed_status,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key IN $participant_keys
+              AND last_operation_id != $operation_id;
+            """,
+            params,
+        )
+        return True
+
     async def update_character_wish(
         self,
         event_id: str,
@@ -1738,6 +1877,36 @@ class YdbRegistrationRepository:
             {
                 "$event_id": event_id,
                 "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$character_wish": character_wish,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def update_linked_character_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        character_wish: str,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_keys AS List<Utf8>;
+            DECLARE $operation_id AS Utf8; DECLARE $character_wish AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET character_wish = $character_wish,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key IN $participant_keys
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_keys": list(participant_keys),
                 "$operation_id": operation_id,
                 "$character_wish": character_wish,
                 "$updated_at": datetime.now(UTC),
@@ -1775,6 +1944,36 @@ class YdbRegistrationRepository:
         )
         return True
 
+    async def update_linked_co_player_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        wish_play: str,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_keys AS List<Utf8>;
+            DECLARE $operation_id AS Utf8; DECLARE $wish_play AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET wish_play = $wish_play,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key IN $participant_keys
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_keys": list(participant_keys),
+                "$operation_id": operation_id,
+                "$wish_play": wish_play,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool:
         await self.db.query(
             """
@@ -1791,6 +1990,35 @@ class YdbRegistrationRepository:
             {
                 "$event_id": event_id,
                 "$participant_key": participant_key,
+                "$operation_id": operation_id,
+                "$attendance_status": AttendanceStatus.CANCELLED.value,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def cancel_linked(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $participant_keys AS List<Utf8>;
+            DECLARE $operation_id AS Utf8; DECLARE $attendance_status AS Utf8;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET attendance_status = $attendance_status,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key IN $participant_keys
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$participant_keys": list(participant_keys),
                 "$operation_id": operation_id,
                 "$attendance_status": AttendanceStatus.CANCELLED.value,
                 "$updated_at": datetime.now(UTC),

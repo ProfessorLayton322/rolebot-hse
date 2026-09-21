@@ -27,6 +27,7 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 
+from .identity import identities_for_local_user
 from .ports import AdminConfigProvider
 from .services import DomainError, EventAdministrationService, RegistrationService
 
@@ -105,7 +106,15 @@ class StatisticsService:
         return "Профиль синхронизирован"
 
     async def apply(self, command: OrderedRegistrationCommand) -> str:
-        if not await self.admins.is_admin(command.platform, command.platform_user_id):
+        identities = await identities_for_local_user(
+            self.administration.users,
+            command.platform,
+            command.platform_user_id,
+        )
+        configured = await asyncio.gather(
+            *(self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities)
+        )
+        if not any(configured):
             raise DomainError("Недостаточно прав.")
         payload = command.payload
         assert isinstance(payload, StatisticsPayload)

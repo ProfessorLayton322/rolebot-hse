@@ -27,6 +27,36 @@ class MemoryUserRepository:
         value = self.rows.get((platform, user_id))
         return None if value is None else deepcopy(value)
 
+    async def find_linked(self, user: User) -> User | None:
+        if isinstance(user, TelegramUser):
+            if user.linked_vk_id is None or user.telegram_handle is None:
+                return None
+            owners = [
+                profile
+                for (platform, _), profile in self.rows.items()
+                if platform is Platform.TELEGRAM
+                and isinstance(profile, TelegramUser)
+                and profile.linked_vk_id == user.linked_vk_id
+                and profile.telegram_handle == user.telegram_handle
+            ]
+            if len(owners) != 1 or owners[0].tg_id != user.tg_id:
+                return None
+            linked = self.rows.get((Platform.VK, user.linked_vk_id))
+            if linked is None or linked.telegram_handle != user.telegram_handle:
+                return None
+            return deepcopy(linked)
+        if user.telegram_handle is None:
+            return None
+        matches = [
+            profile
+            for (platform, _), profile in self.rows.items()
+            if platform is Platform.TELEGRAM
+            and isinstance(profile, TelegramUser)
+            and profile.linked_vk_id == user.vk_id
+            and profile.telegram_handle == user.telegram_handle
+        ]
+        return deepcopy(matches[0]) if len(matches) == 1 else None
+
     async def find_telegram_by_handle(self, handle: str) -> TelegramUser | None:
         matches = [
             user
@@ -43,6 +73,18 @@ class MemoryUserRepository:
         user = self.rows.get((Platform.TELEGRAM, user_id))
         if isinstance(user, TelegramUser):
             user.telegram_handle = handle
+            user.updated_at = datetime.now(UTC)
+
+    async def update_telegram_link(
+        self,
+        user_id: int,
+        handle: str | None,
+        linked_vk_id: int | None,
+    ) -> None:
+        user = self.rows.get((Platform.TELEGRAM, user_id))
+        if isinstance(user, TelegramUser):
+            user.telegram_handle = handle
+            user.linked_vk_id = linked_vk_id
             user.updated_at = datetime.now(UTC)
 
     async def save(self, user: User) -> None:
@@ -553,6 +595,40 @@ class MemoryRegistrationRepository:
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
 
+    async def confirm_linked(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        character_wish: str,
+        replaced_event_id: str | None = None,
+        replaced_participant_keys: Sequence[str] = (),
+    ) -> bool:
+        if (replaced_event_id is None) != (not replaced_participant_keys):
+            raise ValueError("replacement event and participant keys must be supplied together")
+        if replaced_event_id == event_id:
+            raise ValueError("replacement event must differ from the confirmed event")
+        changed = False
+        now = datetime.now(UTC)
+        if replaced_event_id is not None:
+            for participant_key in replaced_participant_keys:
+                replaced = self.rows.get((replaced_event_id, participant_key))
+                if replaced is not None and replaced.last_operation_id != operation_id:
+                    replaced.attendance_status = AttendanceStatus.CANCELLED
+                    replaced.last_operation_id = operation_id
+                    replaced.updated_at = now
+                    changed = True
+        for participant_key in participant_keys:
+            registration = self.rows.get((event_id, participant_key))
+            if registration is not None and registration.last_operation_id != operation_id:
+                registration.character_wish = character_wish
+                registration.attendance_status = AttendanceStatus.CONFIRMED
+                registration.last_operation_id = operation_id
+                registration.updated_at = now
+                changed = True
+        return changed
+
     async def update_character_wish(
         self,
         event_id: str,
@@ -568,6 +644,24 @@ class MemoryRegistrationRepository:
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
+
+    async def update_linked_character_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        character_wish: str,
+    ) -> bool:
+        changed = False
+        for participant_key in participant_keys:
+            registration = self.rows.get((event_id, participant_key))
+            if registration is not None and registration.last_operation_id != operation_id:
+                registration.character_wish = character_wish
+                registration.last_operation_id = operation_id
+                registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+                changed = True
+        return changed
 
     async def update_co_player_wish(
         self,
@@ -585,6 +679,24 @@ class MemoryRegistrationRepository:
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
 
+    async def update_linked_co_player_wish(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        wish_play: str,
+    ) -> bool:
+        changed = False
+        for participant_key in participant_keys:
+            registration = self.rows.get((event_id, participant_key))
+            if registration is not None and registration.last_operation_id != operation_id:
+                registration.wish_play = wish_play
+                registration.last_operation_id = operation_id
+                registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+                changed = True
+        return changed
+
     async def cancel(self, event_id: str, *, operation_id: str, participant_key: str) -> bool:
         registration = self.rows[(event_id, participant_key)]
         if registration.last_operation_id == operation_id:
@@ -593,6 +705,23 @@ class MemoryRegistrationRepository:
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(registration.updated_at.tzinfo)
         return True
+
+    async def cancel_linked(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+    ) -> bool:
+        changed = False
+        for participant_key in participant_keys:
+            registration = self.rows.get((event_id, participant_key))
+            if registration is not None and registration.last_operation_id != operation_id:
+                registration.attendance_status = AttendanceStatus.CANCELLED
+                registration.last_operation_id = operation_id
+                registration.updated_at = datetime.now(registration.updated_at.tzinfo)
+                changed = True
+        return changed
 
     async def sift_waiting_to_end(self, event_id: str) -> None:
         active = [
