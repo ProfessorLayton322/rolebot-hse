@@ -978,6 +978,29 @@ class YdbEventRepository:
         )
         return True
 
+    async def set_details(self, event_id: str, name: str, game_date: date) -> bool:
+        event = await self.get(event_id)
+        if event is None:
+            return False
+        if event.name == name and event.game_date == game_date:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $name AS Utf8;
+            DECLARE $game_date AS Date; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET name = $name, game_date = $game_date, updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$name": name,
+                "$game_date": game_date,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def set_post_links(self, event_id: str, telegram_post_url: str, vk_post_url: str) -> bool:
         event = await self.get(event_id)
         if event is None:

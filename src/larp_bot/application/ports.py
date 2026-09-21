@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 from larp_bot.domain.models import (
@@ -93,6 +93,8 @@ class EventRepository(Protocol):
     ) -> None: ...
 
     async def set_player_amount(self, event_id: str, player_amount: int) -> bool: ...
+
+    async def set_details(self, event_id: str, name: str, game_date: date) -> bool: ...
 
     async def set_post_links(self, event_id: str, telegram_post_url: str, vk_post_url: str) -> bool: ...
 

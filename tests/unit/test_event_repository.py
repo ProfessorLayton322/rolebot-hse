@@ -210,6 +210,19 @@ async def test_event_creation_persists_optional_game_date() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_name_and_date_are_updated_together() -> None:
+    executor = RecordingExecutor([event_row("CREATED") | {"game_date": date(2026, 11, 14)}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.set_details("event-a1", "Renamed Game", date(2026, 11, 21))
+
+    assert "SET name = $name, game_date = $game_date" in executor.query_text
+    assert executor.params["$event_id"] == "event-a1"
+    assert executor.params["$name"] == "Renamed Game"
+    assert executor.params["$game_date"] == date(2026, 11, 21)
+
+
+@pytest.mark.asyncio
 async def test_event_creation_persists_signup_token() -> None:
     executor = RecordingExecutor([])
     repository = YdbEventRepository(executor)  # type: ignore[arg-type]

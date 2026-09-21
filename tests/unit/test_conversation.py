@@ -27,6 +27,7 @@ from larp_bot.application.conversation import (
     ARCHIVED_GAMES,
     BACK,
     CANCEL,
+    CHANGE_GAME_DETAILS,
     CHANGE_PLAYER_AMOUNT,
     CHANGE_STATUS,
     CHARACTER_WISHES,
@@ -107,6 +108,7 @@ from larp_bot.domain.models import (
     CoPlayerWishPayload,
     EnlistPayload,
     Event,
+    EventDetailsPayload,
     EventStatus,
     InboundMessage,
     NotificationPayload,
@@ -3101,6 +3103,7 @@ async def test_admin_controls_existing_game_without_becoming_its_master(
     assert f"Управление игрой «{event.name}»" in selected.text
     assert f"Количество игроков: {event.player_amount}" in selected.text
     assert CHANGE_STATUS in {button.label for button in selected.buttons}
+    assert CHANGE_GAME_DETAILS in {button.label for button in selected.buttons}
     assert await engine.events.list_leaders(event.event_id) == []
 
 
@@ -3129,6 +3132,39 @@ async def test_game_master_can_change_player_amount(disk_store: MemoryDiskStore,
     assert queued.participant_key is None
     assert queued.payload == PlayerAmountPayload(player_amount=24)
     assert queued.reply_context.text_success == f"Количество игроков игры «{event.name}» изменено: 24."
+
+
+@pytest.mark.asyncio
+async def test_game_master_can_change_game_name_and_date(disk_store: MemoryDiskStore, event: Event) -> None:
+    event.game_date = date(2026, 11, 14)
+    engine, _, publisher, _ = await engine_setup(disk_store, event, gamemaster=True)
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    details_button = next(button for button in management.buttons if button.label == CHANGE_GAME_DETAILS)
+    name_prompt = await engine.handle(inbound(2, details_button.value, callback=True))
+    empty_name = await engine.handle(inbound(3, " "))
+    date_prompt = await engine.handle(inbound(4, "  Новый предел  "))
+    invalid_date = await engine.handle(inbound(5, "21/11/26"))
+    accepted = await engine.handle(inbound(6, "21.11.26"))
+
+    assert name_prompt.text == f"Текущее название: {event.name}.\n\nВведите новое название игры:"
+    assert empty_name.text == "Название игры не может быть пустым. Введите новое название:"
+    assert date_prompt.text == (
+        "Текущая дата игры: 14.11.26.\n\nВведите новую дату строго в формате DD.MM.YY или нажмите «Следующая суббота»."
+    )
+    assert invalid_date.text.startswith("Некорректная дата. Попробуйте ещё раз.")
+    assert accepted.text == "⏳ Изменение названия и даты принято в обработку."
+    assert accepted.deferred and accepted.command_enqueued
+    queued = publisher.commands[-1]
+    assert queued.operation is Operation.UPDATE_EVENT_DETAILS
+    assert queued.participant_key is None
+    assert queued.payload == EventDetailsPayload(name="Новый предел", game_date=date(2026, 11, 21))
+    assert queued.reply_context.text_success == "Название и дата игры изменены: «Новый предел» (21.11.26)."
+    assert queued.reply_context.buttons == [Button(label=BACK, value=f"ag:manage:{event.event_id}")]
 
 
 @pytest.mark.asyncio

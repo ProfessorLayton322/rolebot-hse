@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from larp_bot.domain.models import (
     MAX_EVENT_PAGE_SIZE,
@@ -230,6 +230,18 @@ class MemoryEventRepository:
         event.player_amount = player_amount
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
+
+    async def set_details(self, event_id: str, name: str, game_date: date) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        changed = event.name != name or event.game_date != game_date
+        if not changed:
+            return False
+        event.name = name
+        event.game_date = game_date
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
 
     async def set_post_links(self, event_id: str, telegram_post_url: str, vk_post_url: str) -> bool:
         event = self.rows.get(event_id)

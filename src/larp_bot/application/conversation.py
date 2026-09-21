@@ -21,6 +21,7 @@ from larp_bot.domain.models import (
     EmptyPayload,
     EnlistPayload,
     Event,
+    EventDetailsPayload,
     EventStatus,
     InboundMessage,
     NotificationPayload,
@@ -136,6 +137,7 @@ MANAGE_STATISTICS = "Управление статистикой"
 STATS_LINKS = "Ссылки на таблицы статистики"
 STATS_ADD_GAME = "Добавить игру в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
+CHANGE_GAME_DETAILS = "Изменить название и дату"
 GRANT_GAMEMASTER = "➕ Назначить модератора"
 REVOKE_GAMEMASTER = "➖ Снять модератора"
 LIST_GAMEMASTERS = "📋 Список модераторов"
@@ -193,6 +195,7 @@ ADMIN_ACTIONS = frozenset(
         MANAGE_GAMES,
         ARCHIVED_GAMES,
         EVENT_TABLES,
+        CHANGE_GAME_DETAILS,
         CHANGE_STATUS,
         CHANGE_PLAYER_AMOUNT,
         MANAGE_NOTIFICATIONS,
@@ -243,6 +246,8 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_SCHEDULE_CHOICE",
         "ADMIN_CREATE_SCHEDULE_TIME",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
+        "ADMIN_UPDATE_GAME_NAME",
+        "ADMIN_UPDATE_GAME_DATE",
         "ADMIN_POST_LINK_TELEGRAM",
         "ADMIN_POST_LINK_VK",
         "ADMIN_CONFIRMATION_DEADLINE",
@@ -537,6 +542,21 @@ def _game_date_response(*, invalid: bool = False) -> BotResponse:
     return BotResponse(
         text=f"{prefix}Введите дату игры строго в формате DD.MM.YY или нажмите «{NEXT_SATURDAY}».",
         buttons=[Button(label=NEXT_SATURDAY, value="admin:date:next-saturday")],
+    )
+
+
+def _game_details_date_response(event_id: str, current_date: date | None, *, invalid: bool = False) -> BotResponse:
+    prefix = "Некорректная дата. Попробуйте ещё раз.\n\n" if invalid else ""
+    formatted = format_game_date(current_date) if current_date is not None else "не указана"
+    return BotResponse(
+        text=(
+            f"{prefix}Текущая дата игры: {formatted}.\n\n"
+            f"Введите новую дату строго в формате DD.MM.YY или нажмите «{NEXT_SATURDAY}»."
+        ),
+        buttons=[
+            Button(label=NEXT_SATURDAY, value="admin:details:next-saturday"),
+            game_management_button(event_id),
+        ],
     )
 
 
@@ -3027,6 +3047,8 @@ class ConversationEngine:
             return BotResponse(text="Недостаточно прав.")
         event_bound_states = {
             "ADMIN_STATUS_SELECT",
+            "ADMIN_UPDATE_GAME_NAME",
+            "ADMIN_UPDATE_GAME_DATE",
             "ADMIN_UPDATE_PLAYER_AMOUNT",
             "ADMIN_POST_LINK_TELEGRAM",
             "ADMIN_POST_LINK_VK",
@@ -3178,6 +3200,60 @@ class ConversationEngine:
             if await self._is_admin(user):
                 return self._creation_master_question(user)
             return self._creation_schedule_question(user, user)
+        if user.dialog_state == "ADMIN_UPDATE_GAME_NAME":
+            clean_name = value.strip()
+            event_id = str(user.dialog_context["event_id"])
+            if not clean_name:
+                return BotResponse(
+                    text="Название игры не может быть пустым. Введите новое название:",
+                    buttons=[game_management_button(event_id)],
+                )
+            if len(clean_name) > 200:
+                return BotResponse(
+                    text="Название игры не должно превышать 200 символов. Введите новое название:",
+                    buttons=[game_management_button(event_id)],
+                )
+            user.dialog_state = "ADMIN_UPDATE_GAME_DATE"
+            user.dialog_context["new_event_name"] = clean_name
+            raw_date = user.dialog_context.get("game_date")
+            current_date = date.fromisoformat(str(raw_date)) if raw_date is not None else None
+            return _game_details_date_response(event_id, current_date)
+        if user.dialog_state == "ADMIN_UPDATE_GAME_DATE":
+            if value == "admin:details:next-saturday":
+                game_date = next_saturday_game_date()
+            else:
+                try:
+                    game_date = parse_game_date(value)
+                except ValueError:
+                    raw_date = user.dialog_context.get("game_date")
+                    current_date = date.fromisoformat(str(raw_date)) if raw_date is not None else None
+                    return _game_details_date_response(
+                        str(user.dialog_context["event_id"]),
+                        current_date,
+                        invalid=True,
+                    )
+            context = user.dialog_context.copy()
+            event_id = str(context["event_id"])
+            new_name = str(context["new_event_name"])
+            await self._clear(user)
+            await self.registrations.enqueue(
+                operation=Operation.UPDATE_EVENT_DETAILS,
+                event_id=event_id,
+                platform=message.identity.platform,
+                user_id=message.identity.platform_user_id,
+                payload=EventDetailsPayload(name=new_name, game_date=game_date),
+                reply_context=ReplyContext(
+                    text_success=(f"Название и дата игры изменены: {event_reference(new_name, game_date)}."),
+                    buttons=[game_management_button(event_id)],
+                ),
+                idempotency_key=f"{message.update_id}:{Operation.UPDATE_EVENT_DETAILS.value}",
+            )
+            return BotResponse(
+                text="⏳ Изменение названия и даты принято в обработку.",
+                buttons=[game_management_button(event_id)],
+                deferred=True,
+                command_enqueued=True,
+            )
         if user.dialog_state == "ADMIN_UPDATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
             if not raw_amount.isdecimal():
@@ -4504,6 +4580,7 @@ class ConversationEngine:
             )
         actions = [
             (CHANGE_STATUS, "status"),
+            (CHANGE_GAME_DETAILS, "details"),
             (CHANGE_PLAYER_AMOUNT, "player-amount"),
             (ADD_POST_LINKS, "post-links"),
             (MANAGE_NOTIFICATIONS, "notifications"),
@@ -4635,6 +4712,12 @@ class ConversationEngine:
         if action == "status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
             return _admin_status_response(event.name, event.status, event.event_id, event.game_date)
+        if action == "details":
+            user.dialog_state = "ADMIN_UPDATE_GAME_NAME"
+            return BotResponse(
+                text=f"Текущее название: {event.name}.\n\nВведите новое название игры:",
+                buttons=[game_management_button(event.event_id)],
+            )
         if action == "player-amount":
             user.dialog_state = "ADMIN_UPDATE_PLAYER_AMOUNT"
             return BotResponse(
@@ -4833,6 +4916,7 @@ class ConversationEngine:
             REMOVE_WAITING_PLAYERS,
             LEGACY_REMOVE_WAITING_PLAYERS,
             ADD_EVENT_LEADER,
+            CHANGE_GAME_DETAILS,
             ARCHIVE_GAME,
             DELETE_GAME,
             "📋 Список игр",
