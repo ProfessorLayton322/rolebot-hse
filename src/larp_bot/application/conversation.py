@@ -4856,6 +4856,8 @@ class ConversationEngine:
             (ARCHIVE_GAME, "archive"),
         ]
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
+        if is_admin:
+            buttons.append(Button(label=STATS_ADD_GAME, value=f"stats:game:{event.event_id}"))
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))
         return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
 

@@ -25,6 +25,7 @@ from larp_bot.adapters.memory import MemoryDeferredTransport
 from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.application.conversation import (
     ADMIN,
+    BACK,
     MANAGE_STATISTICS,
     PAGE_BACK,
     PAGE_FORWARD,
@@ -519,7 +520,13 @@ async def test_statistics_admin_menu_picker_and_global_fifo_only_show_active_gam
     )
 
     game_menu = await engine.handle(inbound(6, f"ag:manage:{event.event_id}"))
-    assert STATS_ADD_GAME not in {button.label for button in game_menu.buttons}
+    add_from_game = next(button for button in game_menu.buttons if button.label == STATS_ADD_GAME)
+    assert add_from_game.value == f"stats:game:{event.event_id}"
+    response = await engine.handle(inbound(7, add_from_game.value, callback=True))
+    assert response.deferred is True
+    assert response.buttons == [Button(label=BACK, value=MANAGE_STATISTICS)]
+    assert [command.payload.action for command in publisher.commands] == ["game", "link", "game"]
+    assert publisher.commands[-1].payload.game_id == event.event_id
 
 
 async def test_statistics_game_picker_uses_shared_bidirectional_pagination(event: Event) -> None:
@@ -563,6 +570,12 @@ async def test_statistics_actions_are_denied_to_moderators_even_with_forged_call
     ):
         response = await engine.handle(inbound(index, action))
         assert "прав" in response.text
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+    )
+    game_menu = await engine.handle(inbound(6, f"ag:manage:{event.event_id}"))
+    assert STATS_ADD_GAME not in {button.label for button in game_menu.buttons}
     assert not publisher.commands
 
 
