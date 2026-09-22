@@ -18,6 +18,7 @@ from larp_bot.adapters.yandex_disk.repository import (
 )
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
+from larp_bot.application.chat_management import TelegramChatManagementService
 from larp_bot.application.conversation import ConversationEngine
 from larp_bot.application.registration_openings import RegistrationOpeningNotificationService
 from larp_bot.application.services import (
@@ -43,6 +44,7 @@ class AppContainer:
     showcase: YandexDiskShowcaseRepository
     publisher: YmqCommandPublisher
     transport: MultiplexedDeferredTransport
+    telegram_chat_management: TelegramChatManagementService
     conversation: ConversationEngine
     worker: OrderedWorker
     registration_opening_notifications: RegistrationOpeningNotificationService
@@ -133,7 +135,9 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         users,
         transport,
         secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+        telegram_chat=telegram,
     )
+    telegram_chat_management = TelegramChatManagementService(events, registration_service, telegram)
     registration_opening_notifications = RegistrationOpeningNotificationService(
         events,
         config,
@@ -163,6 +167,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         showcase=showcase,
         publisher=publisher,
         transport=transport,
+        telegram_chat_management=telegram_chat_management,
         conversation=conversation,
         worker=worker,
         registration_opening_notifications=registration_opening_notifications,

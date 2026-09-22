@@ -143,6 +143,48 @@ class YdbExecutor:
 
         return cast(bool, await asyncio.to_thread(self.pool.retry_operation_sync, operation))
 
+    async def bind_event_chat(self, event_id: str, chat_id: int) -> bool:
+        """Create a one-to-one event/chat binding in one serializable transaction."""
+
+        def operation(session: Any) -> bool:
+            transaction = session.transaction(ydb.SerializableReadWrite()).begin()
+            target_query = """
+                DECLARE $event_id AS Utf8;
+                SELECT event_id, archived_at, telegram_chat_id FROM `events`
+                WHERE event_id = $event_id;
+            """
+            target_rows = _rows(transaction.execute(session.prepare(target_query), {"$event_id": event_id}))
+            if not target_rows or target_rows[0].get("archived_at") is not None:
+                transaction.commit()
+                return False
+            existing_chat_id = target_rows[0].get("telegram_chat_id")
+            if existing_chat_id is not None:
+                transaction.commit()
+                return int(existing_chat_id) == chat_id
+            conflict_query = """
+                DECLARE $chat_id AS Int64;
+                SELECT event_id FROM `events` WHERE telegram_chat_id = $chat_id LIMIT 1;
+            """
+            conflicts = _rows(transaction.execute(session.prepare(conflict_query), {"$chat_id": chat_id}))
+            if conflicts:
+                transaction.commit()
+                return False
+            update_query = """
+                DECLARE $event_id AS Utf8; DECLARE $chat_id AS Int64;
+                DECLARE $updated_at AS Timestamp;
+                UPDATE `events`
+                SET telegram_chat_id = $chat_id, updated_at = $updated_at
+                WHERE event_id = $event_id AND telegram_chat_id IS NULL;
+            """
+            transaction.execute(
+                session.prepare(update_query),
+                {"$event_id": event_id, "$chat_id": chat_id, "$updated_at": datetime.now(UTC)},
+                commit_tx=True,
+            )
+            return True
+
+        return cast(bool, await asyncio.to_thread(self.pool.retry_operation_sync, operation))
+
 
 def _optional_pass(raw: object) -> PassDetails | None:
     if not raw:
@@ -560,7 +602,7 @@ class YdbUserRepository:
 class YdbEventRepository:
     COLUMNS = """
         event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
-        telegram_post_url, vk_post_url,
+        telegram_post_url, vk_post_url, telegram_chat_id, telegram_chat_invite_link,
         public_table_resource_path, public_table_public_url,
         status, registration_open_at, registration_open_notified_recipients_json,
         registration_open_notification_completed_at,
@@ -595,6 +637,8 @@ class YdbEventRepository:
             signup_token=row.get("signup_token"),
             telegram_post_url=row.get("telegram_post_url"),
             vk_post_url=row.get("vk_post_url"),
+            telegram_chat_id=row.get("telegram_chat_id"),
+            telegram_chat_invite_link=row.get("telegram_chat_invite_link"),
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
             public_table_resource_path=row.get("public_table_resource_path"),
@@ -673,6 +717,21 @@ class YdbEventRepository:
             raise RuntimeError("duplicate game signup token")
         return None if not rows else self._from_row(rows[0])
 
+    async def get_by_telegram_chat_id(self, chat_id: int) -> Event | None:
+        rows = await self.db.query(
+            f"""
+            DECLARE $chat_id AS Int64;
+            SELECT {self.COLUMNS}
+            FROM `events` WHERE telegram_chat_id = $chat_id
+            LIMIT 2;
+            """,
+            {"$chat_id": chat_id},
+            read_only=True,
+        )
+        if len(rows) > 1:
+            raise RuntimeError("duplicate Telegram chat binding")
+        return None if not rows else self._from_row(rows[0])
+
     async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None:
         unique_leaders = sorted(
             {(leader.platform, leader.platform_user_id) for leader in leaders},
@@ -705,6 +764,8 @@ class YdbEventRepository:
             DECLARE $event_id AS Utf8; DECLARE $name AS Utf8; DECLARE $game_date AS Optional<Date>;
             DECLARE $player_amount AS Uint64; DECLARE $signup_token AS Optional<Utf8>;
             DECLARE $telegram_post_url AS Optional<Utf8>; DECLARE $vk_post_url AS Optional<Utf8>;
+            DECLARE $telegram_chat_id AS Optional<Int64>;
+            DECLARE $telegram_chat_invite_link AS Optional<Utf8>;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
@@ -734,7 +795,7 @@ class YdbEventRepository:
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
                 event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
-                telegram_post_url, vk_post_url,
+                telegram_post_url, vk_post_url, telegram_chat_id, telegram_chat_invite_link,
                 public_table_resource_path, public_table_public_url,
                 status, registration_open_at, registration_open_notified_recipients_json,
                 registration_open_notification_completed_at,
@@ -752,7 +813,7 @@ class YdbEventRepository:
                 created_at, updated_at
             ) VALUES (
                 $event_id, $name, $game_date, $player_amount, $signup_token, $disk_resource_path, $public_url,
-                $telegram_post_url, $vk_post_url,
+                $telegram_post_url, $vk_post_url, $telegram_chat_id, $telegram_chat_invite_link,
                 $public_table_resource_path, $public_table_public_url,
                 $status, $registration_open_at, $registration_open_notified_recipients_json,
                 $registration_open_notification_completed_at,
@@ -779,6 +840,8 @@ class YdbEventRepository:
                 "$signup_token": event.signup_token,
                 "$telegram_post_url": event.telegram_post_url,
                 "$vk_post_url": event.vk_post_url,
+                "$telegram_chat_id": event.telegram_chat_id,
+                "$telegram_chat_invite_link": event.telegram_chat_invite_link,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
                 "$public_table_resource_path": event.public_table_resource_path,
@@ -1050,6 +1113,32 @@ class YdbEventRepository:
                 "$event_id": event_id,
                 "$telegram_post_url": telegram_post_url,
                 "$vk_post_url": vk_post_url,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def bind_telegram_chat(self, event_id: str, chat_id: int) -> bool:
+        return await self.db.bind_event_chat(event_id, chat_id)
+
+    async def set_telegram_chat_invite_link(self, event_id: str, chat_id: int, invite_link: str) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.telegram_chat_id != chat_id or event.telegram_chat_invite_link is not None:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $chat_id AS Int64;
+            DECLARE $invite_link AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET telegram_chat_invite_link = $invite_link, updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND telegram_chat_id = $chat_id
+              AND telegram_chat_invite_link IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$chat_id": chat_id,
+                "$invite_link": invite_link,
                 "$updated_at": datetime.now(UTC),
             },
         )

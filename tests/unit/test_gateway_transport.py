@@ -49,6 +49,14 @@ class FakeConversation:
         return self.response
 
 
+class FakeChatManagement:
+    def __init__(self) -> None:
+        self.updates: list[Any] = []
+
+    async def handle(self, update: Any) -> None:
+        self.updates.append(update)
+
+
 def telegram_body() -> bytes:
     return json.dumps(
         {
@@ -180,6 +188,7 @@ def signed_event(body: bytes, *, deadline_ms: int, timestamp: int | None = None)
 def fake_app(response: BotResponse) -> Any:
     return SimpleNamespace(
         config=FakeConfig(),
+        telegram_chat_management=FakeChatManagement(),
         conversation=FakeConversation(response),
         transport=MemoryDeferredTransport(),
         settings=SimpleNamespace(inline_safety_margin_ms=100),
@@ -217,6 +226,29 @@ async def test_fast_response_is_inline_only() -> None:
     contract = json.loads(result["body"])
     assert contract["delivery"] == "inline"
     assert app.transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_group_admin_update_is_dispatched_to_chat_management() -> None:
+    body = json.dumps(
+        {
+            "update_id": 11,
+            "my_chat_member": {
+                "chat": {"id": -1001, "type": "supergroup"},
+                "old_chat_member": {"status": "member"},
+                "new_chat_member": {"status": "administrator", "can_manage_chat": True},
+            },
+        }
+    ).encode()
+    app = fake_app(BotResponse(text="unused"))
+    event = signed_event(body, deadline_ms=int(time.time() * 1000) + 10_000)
+
+    result = await _telegram(event, body, app)
+
+    assert json.loads(result["body"])["delivery"] == "deferred"
+    assert len(app.telegram_chat_management.updates) == 1
+    assert app.telegram_chat_management.updates[0].action == "bot_admin_granted"
+    assert app.conversation.calls == 0
 
 
 @pytest.mark.asyncio

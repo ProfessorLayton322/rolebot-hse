@@ -125,6 +125,19 @@ def test_persisted_announcement_post_links_are_loaded() -> None:
     assert event.vk_post_url == "https://vk.com/wall-123_456"
 
 
+def test_persisted_telegram_chat_binding_is_loaded() -> None:
+    event = YdbEventRepository._from_row(
+        event_row("CREATED")
+        | {
+            "telegram_chat_id": -100123,
+            "telegram_chat_invite_link": "https://t.me/+GameChat_123",
+        }
+    )
+
+    assert event.telegram_chat_id == -100123
+    assert event.telegram_chat_invite_link == "https://t.me/+GameChat_123"
+
+
 def test_confirmed_notification_history_is_loaded_from_event_json() -> None:
     row = event_row("CONFIRMATION_OPEN") | {
         "confirmed_notifications_json": json.dumps(
@@ -598,6 +611,22 @@ async def test_achievement_link_is_persisted_once_on_the_event() -> None:
     assert "achievement_public_url IS NULL" in executor.query_text
     assert executor.params["$resource_path"] == "disk:/larp-bot/achievements/event-a1.pptx"
     assert executor.params["$public_url"] == "https://disk.example/achievements"
+
+
+@pytest.mark.asyncio
+async def test_telegram_chat_invite_link_is_persisted_once_for_its_binding() -> None:
+    executor = RecordingExecutor([event_row("CREATED") | {"telegram_chat_id": -100123}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.set_telegram_chat_invite_link(
+        "event-a1",
+        -100123,
+        "https://t.me/+GameChat_123",
+    )
+
+    assert "telegram_chat_invite_link IS NULL" in executor.query_text
+    assert executor.params["$chat_id"] == -100123
+    assert executor.params["$invite_link"] == "https://t.me/+GameChat_123"
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
-from larp_bot.adapters.telegram import parse_telegram_update, telegram_inline_payload
+from larp_bot.adapters.telegram import parse_telegram_group_update, parse_telegram_update, telegram_inline_payload
 from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.domain.models import Platform
 from larp_bot.domain.security import constant_time_valid_signature, sign_request
@@ -84,6 +84,10 @@ async def _telegram(event: dict[str, Any], body: bytes, app: AppContainer) -> di
         return _response(400, {"error": "invalid JSON"})
     if not isinstance(update, dict):
         return _response(400, {"error": "invalid update"})
+    group_update = parse_telegram_group_update(update)
+    if group_update is not None:
+        await app.telegram_chat_management.handle(group_update)
+        return _response(200, {"delivery": "deferred", "request_id": request_id})
     inbound = parse_telegram_update(update)
     result = await app.conversation.handle(inbound)
     LOGGER.info(

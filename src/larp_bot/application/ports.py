@@ -70,6 +70,8 @@ class EventRepository(Protocol):
 
     async def get_by_signup_token(self, signup_token: str) -> Event | None: ...
 
+    async def get_by_telegram_chat_id(self, chat_id: int) -> Event | None: ...
+
     async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None: ...
 
     async def add_leader(self, event_id: str, leader: BotIdentity) -> bool: ...
@@ -104,6 +106,10 @@ class EventRepository(Protocol):
     async def set_details(self, event_id: str, name: str, game_date: date) -> bool: ...
 
     async def set_post_links(self, event_id: str, telegram_post_url: str, vk_post_url: str) -> bool: ...
+
+    async def bind_telegram_chat(self, event_id: str, chat_id: int) -> bool: ...
+
+    async def set_telegram_chat_invite_link(self, event_id: str, chat_id: int, invite_link: str) -> bool: ...
 
     async def archive(self, event_id: str, archived_at: datetime) -> bool: ...
 
@@ -368,6 +374,48 @@ class DeferredTransport(Protocol):
         text: str,
         buttons: Sequence[Button] = (),
     ) -> None: ...
+
+
+class TelegramChatGateway(Protocol):
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> int: ...
+
+    async def edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None: ...
+
+    async def delete_message(self, *, chat_id: int, message_id: int, request_id: str) -> None: ...
+
+    async def answer_callback(self, *, callback_query_id: str, request_id: str, text: str = "") -> None: ...
+
+    async def get_chat_member(self, *, chat_id: int, user_id: int, request_id: str) -> dict[str, object] | None: ...
+
+    async def ensure_primary_invite_link(self, *, chat_id: int, request_id: str) -> str: ...
+
+    async def promote_title_only_admin(self, *, chat_id: int, user_id: int, request_id: str) -> None: ...
+
+    async def set_administrator_title(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        title: str,
+        request_id: str,
+    ) -> None: ...
+
+    async def kick_member(self, *, chat_id: int, user_id: int, request_id: str) -> bool: ...
 
 
 class VkUserIdResolver(Protocol):
