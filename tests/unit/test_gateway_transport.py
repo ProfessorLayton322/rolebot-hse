@@ -143,7 +143,7 @@ def test_vk_media_is_marked_as_unsupported(content: dict[str, Any]) -> None:
     assert inbound.has_unsupported_content
 
 
-def test_vk_ref_is_exposed_as_a_game_start_parameter() -> None:
+def test_vk_ref_does_not_turn_an_empty_message_into_a_game_start() -> None:
     inbound = parse_vk_event(
         {
             "event_id": "event-1",
@@ -158,8 +158,7 @@ def test_vk_ref_is_exposed_as_a_game_start_parameter() -> None:
         }
     )
 
-    assert inbound.start_parameter == "Lesnoi_predel_14_11_2026_A7z"
-    assert not inbound.has_unsupported_content
+    assert inbound.has_unsupported_content
 
 
 def signed_event(body: bytes, *, deadline_ms: int, timestamp: int | None = None) -> dict[str, Any]:

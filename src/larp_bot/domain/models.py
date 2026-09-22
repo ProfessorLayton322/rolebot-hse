@@ -774,7 +774,6 @@ class InboundMessage(StrictModel):
     chat_id: int | None = None
     peer_id: int | None = None
     telegram_username: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_]{5,32}$")
-    start_parameter: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 EnlistPayloadT = Annotated[EnlistPayload, Field()]
