@@ -251,13 +251,15 @@ async def test_game_deep_link_starts_signup_for_complete_profile(
     event: Event,
 ) -> None:
     signup_token = "Lesnoi_predel_14_11_2026_A7z"
-    linked_event = event.model_copy(update={"signup_token": signup_token})
+    linked_event = event.model_copy(update={"signup_token": signup_token, "game_date": date(2026, 11, 14)})
     engine, users, _, _ = await engine_setup(disk_store, linked_event)
 
     response = await engine.handle(inbound(1, start_message.format(token=signup_token)))
     saved = await users.get(Platform.TELEGRAM, 1)
 
+    assert response.text.startswith("Это меню записи на игру «Лесной предел» (14.11.26).")
     assert "Есть ли игроки" in response.text
+    assert "символ" not in response.text.casefold()
     assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
     assert saved.dialog_context["event_id"] == event.event_id
 
@@ -268,7 +270,7 @@ async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
     event: Event,
 ) -> None:
     signup_token = "Lesnoi_predel_14_11_2026_A7z"
-    linked_event = event.model_copy(update={"signup_token": signup_token})
+    linked_event = event.model_copy(update={"signup_token": signup_token, "game_date": date(2026, 11, 14)})
     engine, users, _, _ = await engine_setup(disk_store, linked_event)
     await users.save(TelegramUser(tg_id=2))
 
@@ -285,7 +287,9 @@ async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
     assert started.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
     assert pending is not None and pending.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert pending.dialog_context["signup_event_id"] == event.event_id
-    assert completed.text.startswith("✅ Профиль успешно заполнен.\n\nИгра: «Лесной предел»")
+    assert completed.text.startswith(
+        "✅ Профиль успешно заполнен.\n\nЭто меню записи на игру «Лесной предел» (14.11.26)."
+    )
     assert "\n\nЕсть ли игроки" in completed.text
     assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
     assert saved.dialog_context["event_id"] == event.event_id
@@ -499,13 +503,14 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     await engine.handle(inbound(1, ENLIST))
     prompt = await engine.handle(inbound(2, f"select:enlist:{event.event_id}", callback=True))
     assert prompt.text == (
+        f"Это меню записи на игру «{event.name}» (не указана).\n\n"
         f"Игра: «{event.name}»\n"
         "Дата: не указана\n"
         "Пост об игре: ссылка пока не добавлена\n\n"
         "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
         "Укажите каждого как «Фамилия Имя», через запятую. "
         "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
-        "Ответ должен быть не длиннее 2000 символов. Если пожеланий нет, нажмите «Пропустить»."
+        "Если пожеланий нет, нажмите «Пропустить»."
     )
     assert "нажмите «пропустить»" in prompt.text.casefold()
     assert any(button.value == "enlist:wish-play:skip" for button in prompt.buttons)
@@ -543,7 +548,9 @@ async def test_signup_prompt_uses_the_current_bots_announcement_link_and_dated_g
 
     assert telegram_button.label == "Лесной предел (14.11.26)"
     assert telegram_prompt.text.startswith(
-        "Игра: «Лесной предел»\nДата: 14.11.26\nПост об игре: https://t.me/rolebot_news/42\n\nЕсть ли игроки"
+        "Это меню записи на игру «Лесной предел» (14.11.26).\n\n"
+        "Игра: «Лесной предел»\nДата: 14.11.26\n"
+        "Пост об игре: https://t.me/rolebot_news/42\n\nЕсть ли игроки"
     )
     assert "https://vk.com/wall-123_456" not in telegram_prompt.text
 
@@ -566,7 +573,9 @@ async def test_signup_prompt_uses_the_current_bots_announcement_link_and_dated_g
     )
 
     assert vk_prompt.text.startswith(
-        "Игра: «Лесной предел»\nДата: 14.11.26\nПост об игре: https://vk.com/wall-123_456\n\nЕсть ли игроки"
+        "Это меню записи на игру «Лесной предел» (14.11.26).\n\n"
+        "Игра: «Лесной предел»\nДата: 14.11.26\n"
+        "Пост об игре: https://vk.com/wall-123_456\n\nЕсть ли игроки"
     )
     assert "https://t.me/rolebot_news/42" not in vk_prompt.text
 
@@ -624,7 +633,7 @@ async def test_single_registered_game_opens_wishes_menu_and_edits_co_player_wish
         "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
         "Укажите каждого как «Фамилия Имя», через запятую. "
         "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
-        "Ответ должен быть не длиннее 2000 символов. Если пожеланий нет, нажмите «Пропустить»."
+        "Если пожеланий нет, нажмите «Пропустить»."
     )
     assert prompt.buttons[0] == Button(label="Пропустить", value=CO_PLAYER_WISH_SKIP)
     assert accepted.deferred and accepted.command_enqueued
@@ -757,6 +766,7 @@ async def test_signup_wish_prompt_warns_about_another_registration_on_the_same_d
     prompt = await engine.handle(inbound(1, f"select:enlist:{event.event_id}", callback=True))
 
     assert prompt.text.startswith(
+        f"Это меню записи на игру «{event.name}» (14.11.26).\n\n"
         f"Игра: «{event.name}»\n"
         "Дата: 14.11.26\n"
         "Пост об игре: ссылка пока не добавлена\n\n"
@@ -1316,6 +1326,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     await engine.handle(vk(14, CONFIRM))
     prompt = await engine.handle(vk(15, f"select:confirm:{event.event_id}", callback=True))
     assert "пожелания" in prompt.text.casefold()
+    assert "символ" not in prompt.text.casefold()
     stale = await engine.handle(vk(16, f"select:confirm:{event.event_id}", callback=True))
     assert "кнопка устарела" in stale.text.casefold()
     assert stale.buttons == prompt.buttons
@@ -1335,6 +1346,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     await engine.handle(vk(18, GAME_WISHES))
     edit_prompt = await engine.handle(vk(19, f"wishes:character:{event.event_id}", callback=True))
     assert "Отправьте новый вариант" in edit_prompt.text
+    assert "символ" not in edit_prompt.text.casefold()
     await engine.handle(vk(20, "Medic"))
     assert publisher.commands[-1].operation is Operation.UPDATE_CHARACTER_WISH
 
