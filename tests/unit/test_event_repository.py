@@ -585,6 +585,22 @@ async def test_pass_table_link_is_persisted_once_on_the_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_achievement_link_is_persisted_once_on_the_event() -> None:
+    executor = RecordingExecutor([event_row("CLOSED")])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.set_achievement(
+        "event-a1",
+        "disk:/larp-bot/achievements/event-a1.pptx",
+        "https://disk.example/achievements",
+    )
+
+    assert "achievement_public_url IS NULL" in executor.query_text
+    assert executor.params["$resource_path"] == "disk:/larp-bot/achievements/event-a1.pptx"
+    assert executor.params["$public_url"] == "https://disk.example/achievements"
+
+
+@pytest.mark.asyncio
 async def test_confirmed_notification_is_appended_as_plain_text_once() -> None:
     row = event_row("CONFIRMATION_OPEN") | {
         "confirmed_notifications_json": json.dumps(["Сбор в 18:30"], ensure_ascii=False),

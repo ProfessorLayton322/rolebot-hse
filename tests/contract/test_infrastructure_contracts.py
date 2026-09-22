@@ -27,6 +27,8 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "public_table_public_url"' in ydb
     assert 'name = "pass_table_resource_path"' in ydb
     assert 'name = "pass_table_public_url"' in ydb
+    assert 'name = "achievement_resource_path"' in ydb
+    assert 'name = "achievement_public_url"' in ydb
     assert 'name = "last_bot_buttons_json"' in ydb
     assert 'name = "is_gamemaster"' in ydb
     assert 'name = "privileged_role"' in ydb
@@ -65,6 +67,17 @@ def test_scheduled_registration_notifications_use_an_isolated_timer_function() -
     assert 'cron_expression = "* * * * ? *"' in triggers
     assert "yandex_function.registration_notifier.id" in triggers
     assert "registration_notifier.py" in build
+
+
+def test_deployment_packages_the_read_only_achievement_template() -> None:
+    deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
+    fetcher = (ROOT / "scripts/fetch_achievement_template.py").read_text()
+
+    assert "python scripts/fetch_achievement_template.py" in deploy
+    assert "larp-bot/roleclub_achievement_basic.pptx" in deploy
+    assert deploy.index("python scripts/fetch_achievement_template.py") < deploy.index("bash scripts/build_function.sh")
+    assert "get_object" in fetcher
+    assert "put_object" not in fetcher
 
 
 def test_no_direct_telegram_connection_from_yandex_python() -> None:

@@ -205,6 +205,16 @@ resource "yandex_ydb_table" "events" {
     name = "pass_table_public_url"
     type = "Utf8"
   }
+  # The generated presentation is published once and its stable Disk link is
+  # reused on every later export request.
+  column {
+    name = "achievement_resource_path"
+    type = "Utf8"
+  }
+  column {
+    name = "achievement_public_url"
+    type = "Utf8"
+  }
   column {
     name = "confirmed_notifications_json"
     type = "Utf8"

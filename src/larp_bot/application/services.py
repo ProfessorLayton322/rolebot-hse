@@ -297,9 +297,11 @@ class RegistrationCatalog:
         if event.public_table_resource_path is not None:
             paths.append(event.public_table_resource_path)
         pass_table_path = event.pass_table_resource_path or f"disk:/larp-bot/passes/{event.event_id}.xlsx"
+        achievement_path = event.achievement_resource_path or f"disk:/larp-bot/achievements/{event.event_id}.pptx"
         await asyncio.gather(
             *(self.showcase.delete_event_workbook(path) for path in dict.fromkeys(paths)),
             self.showcase.delete_pass_table(pass_table_path),
+            self.showcase.delete_achievement_presentation(achievement_path),
         )
         await self.registrations.delete_for_event(event.event_id)
         await self.events.delete(event.event_id)
@@ -871,6 +873,12 @@ class PassTableExport:
 
 
 @dataclass(frozen=True)
+class AchievementExport:
+    public_url: str
+    created: bool
+
+
+@dataclass(frozen=True)
 class RegistrationPage:
     rows: list[Registration]
     has_previous: bool
@@ -1152,6 +1160,26 @@ class EventAdministrationService:
             self.participant_secret,
         )
         await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+
+    async def export_achievements(self, event_id: str) -> AchievementExport:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if event.achievement_public_url is not None:
+            return AchievementExport(event.achievement_public_url, created=False)
+
+        disk_path = f"disk:/larp-bot/achievements/{event.event_id}.pptx"
+        public_url = await self.showcase.create_achievement_presentation(disk_path, event.name)
+        try:
+            if not await self.events.set_achievement(event.event_id, disk_path, public_url):
+                current = await self.events.get(event.event_id)
+                if current is not None and current.achievement_public_url is not None:
+                    return AchievementExport(current.achievement_public_url, created=False)
+                raise EventNotFound("Игра была удалена во время выгрузки ачивок")
+        except Exception:
+            await self.showcase.delete_achievement_presentation(disk_path)
+            raise
+        return AchievementExport(public_url, created=True)
 
 
 @dataclass(frozen=True)

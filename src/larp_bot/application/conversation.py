@@ -139,6 +139,7 @@ MANAGE_STATISTICS = "Управление статистикой"
 STATS_LINKS = "Ссылки на таблицы статистики"
 STATS_ADD_GAME = "Добавить игру в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
+EXPORT_ACHIEVEMENTS = "Выгрузить ачивки"
 CHANGE_GAME_DETAILS = "Изменить название и дату"
 GRANT_GAMEMASTER = "➕ Назначить модератора"
 GRANT_GAMEMASTER_VIEWER = "➕ Модератор-наблюдатель"
@@ -4995,6 +4996,7 @@ class ConversationEngine:
             (MANAGE_NOTIFICATIONS, "notifications"),
             (LIST_WAITING_PLAYERS, "waiting"),
             (EVENT_TABLES, "tables"),
+            (EXPORT_ACHIEVEMENTS, "achievements"),
             (MANAGE_PLAYERS, "players"),
             (MANAGE_MASTERS, "masters"),
             (ARCHIVE_GAME, "archive"),
@@ -5070,7 +5072,7 @@ class ConversationEngine:
             return BotResponse(
                 text=(
                     "⚠️ Это действие необратимо. Будут удалены игра, все записи, "
-                    "таблицы регистрации и пропусков.\n\n"
+                    "таблицы регистрации и пропусков, а также файл ачивок.\n\n"
                     f"Для подтверждения введите точное название:\n\n{event.name}"
                 ),
                 buttons=[game_management_button(event.event_id)],
@@ -5234,6 +5236,13 @@ class ConversationEngine:
                 text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(refreshed)}"),
                 buttons=[game_management_button(event.event_id)],
             )
+        if action == "achievements":
+            await self._clear(user)
+            export = await self.administration.export_achievements(event.event_id)
+            return BotResponse(
+                text=(f"Ачивки игры {event_reference(event.name, event.game_date)}\n\n{export.public_url}"),
+                buttons=[game_management_button(event.event_id)],
+            )
         if action == "remove":
             return await self._show_removable_players(user, event)
         if action == "remove-waiting":
@@ -5250,7 +5259,7 @@ class ConversationEngine:
             return BotResponse(
                 text=(
                     "Игра будет закрыта для новых регистраций и скрыта из управления. "
-                    "Таблицы регистрации и пропусков и все записи будут сохранены.\n\n"
+                    "Таблицы, файл ачивок и все записи будут сохранены.\n\n"
                     f"Для подтверждения введите точное название:\n\n{event.name}"
                 ),
                 buttons=[game_management_button(event.event_id)],

@@ -496,6 +496,8 @@ class Event(StrictModel):
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
     pass_table_public_url: str | None = None
+    achievement_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/achievements/.+\.pptx$")
+    achievement_public_url: str | None = None
     confirmed_notifications: list[
         Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
     ] = Field(default_factory=list)
@@ -543,6 +545,8 @@ class Event(StrictModel):
             raise ValueError("public table resource path and public URL must be set together")
         if (self.pass_table_resource_path is None) != (self.pass_table_public_url is None):
             raise ValueError("pass table resource path and public URL must be set together")
+        if (self.achievement_resource_path is None) != (self.achievement_public_url is None):
+            raise ValueError("achievement resource path and public URL must be set together")
         return self
 
     @property
