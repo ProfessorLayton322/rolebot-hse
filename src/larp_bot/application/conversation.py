@@ -358,12 +358,9 @@ def is_profile_complete(user: User) -> bool:
 
 
 def _start_command(value: str, message: InboundMessage) -> tuple[bool, str | None]:
-    if message.start_parameter is not None:
-        return True, message.start_parameter
     if message.identity.platform is Platform.VK:
-        match = re.fullmatch(r"(?:Начать|/start)(?:[ =](\S+))?", value)
-    else:
-        match = re.fullmatch(r"/start(?:@[A-Za-z0-9_]{5,32})?(?:[ =](\S+))?", value)
+        return re.fullmatch(r"(?:Начать|/start)", value) is not None, None
+    match = re.fullmatch(r"/start(?:@[A-Za-z0-9_]{5,32})?(?:[ =](\S+))?", value)
     if match is None:
         return False, None
     parameter = match.group(1)
@@ -2923,9 +2920,7 @@ class ConversationEngine:
         if not vk_group_id.isdecimal() or int(vk_group_id) <= 0:
             raise RuntimeError("VK_GROUP_ID is invalid")
         telegram_start = f"https://t.me/{telegram_username}?start={event.signup_token}"
-        # VK deep links use ``ref`` rather than Telegram's ``start`` query key.
-        # VK delivers that value as ``message.ref`` in message_new callbacks.
-        vk_start = f"https://vk.me/club{vk_group_id}?ref={event.signup_token}"
+        vk_start = f"https://vk.me/club{vk_group_id}"
         if masters_pending:
             master_line = "Мастера: пока не назначены\n\n"
         else:
@@ -2948,7 +2943,7 @@ class ConversationEngine:
                 f"{master_line}"
                 f"{registration_line}\n\n"
                 f"Telegram — начать запись:\n{telegram_start}\n\n"
-                f"VK — начать запись:\n{vk_start}\n\n"
+                f"VK — открыть чат с ботом:\n{vk_start}\n\n"
                 f"{event_table_links(event)}"
             ),
             buttons=[game_management_button(event.event_id)],

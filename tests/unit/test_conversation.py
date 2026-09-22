@@ -257,39 +257,6 @@ async def test_game_deep_link_starts_signup_for_complete_profile(
 
 
 @pytest.mark.asyncio
-async def test_vk_game_deep_link_starts_the_same_signup_dialogue(
-    disk_store: MemoryDiskStore,
-    event: Event,
-) -> None:
-    signup_token = "Lesnoi_predel_14_11_2026_A7z"
-    linked_event = event.model_copy(update={"signup_token": signup_token})
-    engine, users, _, _ = await engine_setup(disk_store, linked_event)
-    await users.save(
-        VkUser(
-            vk_id=7,
-            full_name="Иван Иванов",
-            crossplay=True,
-            larp_experience=True,
-            needs_pass=False,
-        )
-    )
-
-    response = await engine.handle(
-        InboundMessage(
-            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
-            update_id="vk-start-1",
-            peer_id=7,
-            start_parameter=signup_token,
-        )
-    )
-    saved = await users.get(Platform.VK, 7)
-
-    assert "Есть ли игроки" in response.text
-    assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
-    assert saved.dialog_context["event_id"] == event.event_id
-
-
-@pytest.mark.asyncio
 async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
     disk_store: MemoryDiskStore,
     event: Event,
@@ -940,6 +907,41 @@ async def test_vk_start_messages_greet_new_users_and_begin_profiles(disk_store: 
     assert slash_start.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
     assert slash_user is not None and slash_user.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert vk_user is not None and vk_user.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
+    assert not publisher.commands
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start_message", ["/start {token}", "Начать {token}"])
+async def test_vk_start_messages_do_not_accept_game_parameters(
+    start_message: str,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    signup_token = "Lesnoi_predel_14_11_2026_A7z"
+    linked_event = event.model_copy(update={"signup_token": signup_token})
+    engine, users, publisher, _ = await engine_setup(disk_store, linked_event)
+    await users.save(
+        VkUser(
+            vk_id=7,
+            full_name="Иван Иванов",
+            crossplay=True,
+            larp_experience=True,
+            needs_pass=False,
+        )
+    )
+
+    response = await engine.handle(
+        InboundMessage(
+            identity=BotIdentity(platform=Platform.VK, platform_user_id=7),
+            update_id="vk-start-with-parameter",
+            text=start_message.format(token=signup_token),
+            peer_id=7,
+        )
+    )
+    saved = await users.get(Platform.VK, 7)
+
+    assert response.text.startswith("Не удалось распознать команду.")
+    assert saved is not None and saved.dialog_state == "IDLE"
     assert not publisher.commands
 
 
@@ -2802,7 +2804,9 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert "Административная таблица" in response.text
     assert "Таблица пропусков" in response.text
     assert f"https://t.me/rolebot_test_bot?start={created.signup_token}" in response.text
-    assert f"https://vk.me/club42?ref={created.signup_token}" in response.text
+    assert "VK — открыть чат с ботом:" in response.text
+    assert "https://vk.me/club42" in response.text
+    assert "vk.me/club42?" not in response.text
     assert "https://vk.com/write-" not in response.text
     assert response.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{created.event_id}")]
     assert await engine.events.list_leaders(created.event_id) == [

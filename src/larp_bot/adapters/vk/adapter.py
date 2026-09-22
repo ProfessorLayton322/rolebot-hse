@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from larp_bot.domain.models import BotIdentity, InboundMessage, Platform
@@ -23,12 +22,6 @@ def parse_vk_event(event: dict[str, Any]) -> InboundMessage:
     if type(from_id) is not int or type(peer_id) is not int or not isinstance(message_text, str):
         raise InvalidVkEvent("invalid message_new event")
     callback: str | None = None
-    raw_start_parameter = message.get("ref")
-    start_parameter = (
-        raw_start_parameter
-        if isinstance(raw_start_parameter, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", raw_start_parameter)
-        else None
-    )
     raw_payload = message.get("payload")
     if isinstance(raw_payload, str):
         try:
@@ -42,7 +35,7 @@ def parse_vk_event(event: dict[str, Any]) -> InboundMessage:
         or message.get("geo") is not None
         or bool(message.get("fwd_messages"))
         or message.get("action") is not None
-        or (callback is None and start_parameter is None and not message_text.strip())
+        or (callback is None and not message_text.strip())
     )
     return InboundMessage(
         identity=BotIdentity(platform=Platform.VK, platform_user_id=from_id),
@@ -51,7 +44,6 @@ def parse_vk_event(event: dict[str, Any]) -> InboundMessage:
         callback=callback,
         has_unsupported_content=has_unsupported_content,
         peer_id=peer_id,
-        start_parameter=start_parameter,
     )
 
 
