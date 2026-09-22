@@ -148,6 +148,11 @@ class OrderedWorker:
                                 command.reply_context.buttons,
                             )
                             if result.replaced_event_id is not None:
+                                await self.notifications.kick_cancelled_participant(
+                                    command,
+                                    event_id=result.replaced_event_id,
+                                    confirmed=True,
+                                )
                                 await self.notifications.notify_reserve_promotion(
                                     command,
                                     event_id=result.replaced_event_id,
@@ -175,6 +180,7 @@ class OrderedWorker:
                                     await self.notifications.notify_reserve_promotion(command)
                                     await self.notifications.notify_confirmed_link_promotion(command)
                                 if command.operation is Operation.CANCEL:
+                                    await self.notifications.kick_cancelled_participant(command)
                                     await self.notifications.notify_masters_of_cancellation(command)
                         elif (
                             notifications_enabled

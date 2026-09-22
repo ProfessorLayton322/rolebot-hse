@@ -24,11 +24,23 @@ export interface Env {
 
 interface SendRequest {
   request_id: string;
-  method: "sendMessage";
+  method: string;
   payload: Record<string, unknown>;
 }
 
-const ALLOWED_METHODS = new Set(["sendMessage"]);
+const ALLOWED_METHODS = new Set([
+  "sendMessage",
+  "editMessageText",
+  "deleteMessage",
+  "answerCallbackQuery",
+  "getChatMember",
+  "getChat",
+  "exportChatInviteLink",
+  "promoteChatMember",
+  "setChatAdministratorCustomTitle",
+  "banChatMember",
+  "unbanChatMember",
+]);
 const OIDC_ISSUER = "https://auth.yandex.cloud";
 const JWKS_URL = "https://auth.yandex.cloud/oauth/jwks/keys";
 const RUNTIME_CONFIG_PATH = "/runtime/config";

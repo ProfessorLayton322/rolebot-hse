@@ -4380,11 +4380,13 @@ async def test_admin_can_queue_message_for_all_active_players(
 
 
 @pytest.mark.asyncio
-async def test_admin_link_notification_requires_a_chat_link_and_previews_main_roster_count(
+async def test_admin_link_notification_reuses_stored_chat_link_and_previews_main_roster_count(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
     event.player_amount = 1
+    event.telegram_chat_id = -100123
+    event.telegram_chat_invite_link = "https://t.me/+GameChat_123"
     engine, _, publisher, tables = await engine_setup(disk_store, event, admin=True)
     for index in range(2):
         key = f"{index}" * 43
@@ -4403,22 +4405,26 @@ async def test_admin_link_notification_requires_a_chat_link_and_previews_main_ro
         )
 
     await engine.handle(inbound(1, f"ag:notifications:{event.event_id}", callback=True))
-    prompt = await engine.handle(inbound(2, f"ag:notify-link:{event.event_id}", callback=True))
-    assert "только из корректной ссылки на чат Telegram или VK" in prompt.text
-
-    invalid = await engine.handle(inbound(3, "Чат игры: https://vk.me/join/AJQ1d4V/FAtt9xoXEwCAfx1q"))
-    assert "Пришлите только корректную ссылку-приглашение" in invalid.text
-    assert not publisher.commands
-
-    link = "https://vk.me/join/AJQ1d4V/FAtt9xoXEwCAfx1q"
-    preview = await engine.handle(inbound(4, link))
+    preview = await engine.handle(inbound(2, f"ag:notify-link:{event.event_id}", callback=True))
+    link = event.telegram_chat_invite_link
     assert "Получателей: 1" in preview.text
     assert f"Вы в основном составе игры «{event.name}». Вступите в чат: {link}" in preview.text
+    assert not publisher.commands
 
-    queued = await engine.handle(inbound(5, "admin:notification:confirm", callback=True))
+    queued = await engine.handle(inbound(3, "admin:notification:confirm", callback=True))
     assert queued.deferred
     assert isinstance(publisher.commands[-1].payload, NotificationPayload)
     assert publisher.commands[-1].payload.text == link
+
+
+@pytest.mark.asyncio
+async def test_admin_chat_link_action_requires_a_tied_chat(disk_store: MemoryDiskStore, event: Event) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
+
+    response = await engine.handle(inbound(1, f"ag:notify-link:{event.event_id}", callback=True))
+
+    assert "/tie" in response.text
+    assert not publisher.commands
 
 
 @pytest.mark.asyncio

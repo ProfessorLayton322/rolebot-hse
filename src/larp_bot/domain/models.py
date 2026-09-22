@@ -492,6 +492,10 @@ class Event(StrictModel):
     # legacy games and newly created games whose announcements are not ready.
     telegram_post_url: str | None = Field(default=None, max_length=2048)
     vk_post_url: str | None = Field(default=None, max_length=2048)
+    # A Telegram group can be bound only once. The bot-owned primary invite
+    # link is generated during that binding and then reused permanently.
+    telegram_chat_id: int | None = None
+    telegram_chat_invite_link: str | None = Field(default=None, min_length=1, max_length=2048)
     confirmation_deadline: datetime | None = None
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
@@ -547,6 +551,8 @@ class Event(StrictModel):
             raise ValueError("pass table resource path and public URL must be set together")
         if (self.achievement_resource_path is None) != (self.achievement_public_url is None):
             raise ValueError("achievement resource path and public URL must be set together")
+        if self.telegram_chat_invite_link is not None and self.telegram_chat_id is None:
+            raise ValueError("Telegram chat invite link requires a chat binding")
         return self
 
     @property

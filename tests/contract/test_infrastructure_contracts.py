@@ -18,6 +18,8 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "registration_open_notification_completed_at"' in ydb
     assert 'name = "signup_token"' in ydb
     assert 'name = "telegram_post_url"' in ydb
+    assert 'name = "telegram_chat_id"' in ydb
+    assert 'name = "telegram_chat_invite_link"' in ydb
     assert 'name = "vk_post_url"' in ydb
     assert 'name = "vk_profile"' in ydb
     assert 'name = "telegram_profile"' in ydb

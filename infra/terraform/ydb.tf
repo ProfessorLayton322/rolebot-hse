@@ -153,6 +153,14 @@ resource "yandex_ydb_table" "events" {
     type = "Utf8"
   }
   column {
+    name = "telegram_chat_id"
+    type = "Int64"
+  }
+  column {
+    name = "telegram_chat_invite_link"
+    type = "Utf8"
+  }
+  column {
     name     = "disk_resource_path"
     type     = "Utf8"
     not_null = true

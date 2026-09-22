@@ -160,6 +160,12 @@ class MemoryEventRepository:
             raise RuntimeError("duplicate game signup token")
         return None if not matches else deepcopy(matches[0])
 
+    async def get_by_telegram_chat_id(self, chat_id: int) -> Event | None:
+        matches = [event for event in self.rows.values() if event.telegram_chat_id == chat_id]
+        if len(matches) > 1:
+            raise RuntimeError("duplicate Telegram chat binding")
+        return None if not matches else deepcopy(matches[0])
+
     async def create(self, event: Event, leaders: Sequence[BotIdentity] = ()) -> None:
         if event.event_id in self.rows:
             raise ValueError("event exists")
@@ -261,6 +267,26 @@ class MemoryEventRepository:
         event.vk_post_url = vk_post_url
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
+
+    async def bind_telegram_chat(self, event_id: str, chat_id: int) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.archived_at is not None:
+            return False
+        if event.telegram_chat_id is not None:
+            return event.telegram_chat_id == chat_id
+        if any(other.telegram_chat_id == chat_id for other in self.rows.values()):
+            return False
+        event.telegram_chat_id = chat_id
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
+
+    async def set_telegram_chat_invite_link(self, event_id: str, chat_id: int, invite_link: str) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.telegram_chat_id != chat_id or event.telegram_chat_invite_link is not None:
+            return False
+        event.telegram_chat_invite_link = invite_link
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
 
     async def open_confirmation(self, event_id: str, deadline: datetime) -> bool:
         event = self.rows.get(event_id)
@@ -851,6 +877,96 @@ class MemoryDeferredTransport:
         buttons: Sequence[Button] = (),
     ) -> None:
         self.sent.append((platform, user_id, request_id, text, tuple(buttons)))
+
+
+class MemoryTelegramChatGateway:
+    def __init__(self) -> None:
+        self.members: dict[tuple[int, int], dict[str, object]] = {}
+        self.primary_invite_links: dict[int, str] = {}
+        self.sent: list[tuple[int, str, str, tuple[Button, ...], int]] = []
+        self.edited: list[tuple[int, int, str, str, tuple[Button, ...]]] = []
+        self.deleted: list[tuple[int, int, str]] = []
+        self.answered: list[tuple[str, str, str]] = []
+        self.promoted: list[tuple[int, int, str]] = []
+        self.titles: list[tuple[int, int, str, str]] = []
+        self.kicked: list[tuple[int, int, str]] = []
+        self.export_count = 0
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> int:
+        message_id = len(self.sent) + 1
+        self.sent.append((chat_id, request_id, text, tuple(buttons), message_id))
+        return message_id
+
+    async def edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None:
+        self.edited.append((chat_id, message_id, request_id, text, tuple(buttons)))
+
+    async def delete_message(self, *, chat_id: int, message_id: int, request_id: str) -> None:
+        self.deleted.append((chat_id, message_id, request_id))
+
+    async def answer_callback(self, *, callback_query_id: str, request_id: str, text: str = "") -> None:
+        self.answered.append((callback_query_id, request_id, text))
+
+    async def get_chat_member(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        request_id: str,
+    ) -> dict[str, object] | None:
+        del request_id
+        member = self.members.get((chat_id, user_id))
+        return None if member is None else deepcopy(member)
+
+    async def ensure_primary_invite_link(self, *, chat_id: int, request_id: str) -> str:
+        del request_id
+        link = self.primary_invite_links.get(chat_id)
+        if link is None:
+            self.export_count += 1
+            link = f"https://t.me/+chat{abs(chat_id)}"
+            self.primary_invite_links[chat_id] = link
+        return link
+
+    async def promote_title_only_admin(self, *, chat_id: int, user_id: int, request_id: str) -> None:
+        self.promoted.append((chat_id, user_id, request_id))
+        self.members[(chat_id, user_id)] = {
+            "status": "administrator",
+            "can_manage_chat": True,
+            "can_be_edited": True,
+        }
+
+    async def set_administrator_title(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        title: str,
+        request_id: str,
+    ) -> None:
+        self.titles.append((chat_id, user_id, title, request_id))
+        self.members.setdefault((chat_id, user_id), {})["custom_title"] = title
+
+    async def kick_member(self, *, chat_id: int, user_id: int, request_id: str) -> bool:
+        member = self.members.get((chat_id, user_id))
+        if member is None or member.get("status") in {"left", "creator"}:
+            return False
+        self.kicked.append((chat_id, user_id, request_id))
+        self.members[(chat_id, user_id)] = {"status": "left"}
+        return True
 
 
 class MemoryVkUserIdResolver:

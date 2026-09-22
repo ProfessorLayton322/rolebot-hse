@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from urllib.parse import parse_qs
 
 import httpx
@@ -178,3 +179,75 @@ async def test_telegram_egress_keeps_malformed_message_rejections_retryable() ->
         egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
         with pytest.raises(httpx.HTTPStatusError):
             await egress.send(user_id=42, request_id="request-7", text="Hello")
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_reuses_existing_primary_invite_without_exporting() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        methods.append(body["method"])
+        return httpx.Response(200, json={"ok": True, "result": {"invite_link": "https://t.me/+stable"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        link = await egress.ensure_primary_invite_link(chat_id=-1001, request_id="invite-1")
+
+    assert link == "https://t.me/+stable"
+    assert methods == ["getChat"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_exports_primary_invite_only_when_missing() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        method = json.loads(request.content)["method"]
+        methods.append(method)
+        result: object = {} if method == "getChat" else "https://t.me/+created"
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        link = await egress.ensure_primary_invite_link(chat_id=-1001, request_id="invite-2")
+
+    assert link == "https://t.me/+created"
+    assert methods == ["getChat", "exportChatInviteLink"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_promotes_title_only_admin_with_no_explicit_rights() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        await egress.promote_title_only_admin(chat_id=-1001, user_id=77, request_id="promote-1")
+
+    payload = requests[0]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["can_manage_chat"] is True
+    assert payload["can_delete_messages"] is False
+    assert payload["can_promote_members"] is False
+    assert payload["can_restrict_members"] is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_kick_demotes_bans_and_unbans_bot_promoted_admin() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        method = json.loads(request.content)["method"]
+        methods.append(method)
+        result: object = {"status": "administrator", "can_be_edited": True} if method == "getChatMember" else True
+        return httpx.Response(200, json={"ok": True, "result": result})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        assert await egress.kick_member(chat_id=-1001, user_id=77, request_id="kick-1")
+
+    assert methods == ["getChatMember", "promoteChatMember", "banChatMember", "unbanChatMember"]

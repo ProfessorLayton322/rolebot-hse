@@ -21,6 +21,25 @@ TELEGRAM_UNREACHABLE_DESCRIPTIONS = (
     "chat not found",
     "bot can't initiate conversation with a user",
 )
+TELEGRAM_ADMINISTRATOR_PERMISSION_FIELDS = (
+    "can_manage_chat",
+    "can_delete_messages",
+    "can_manage_video_chats",
+    "can_restrict_members",
+    "can_promote_members",
+    "can_change_info",
+    "can_invite_users",
+    "can_post_stories",
+    "can_edit_stories",
+    "can_delete_stories",
+    "can_post_messages",
+    "can_edit_messages",
+    "can_pin_messages",
+    "can_manage_topics",
+    "can_manage_direct_messages",
+    "can_manage_tags",
+    "can_send_welcome_messages",
+)
 
 
 def _telegram_error_description(response: httpx.Response) -> str | None:
@@ -55,23 +74,17 @@ class CloudflareTelegramEgress:
         self.hmac_secret = hmac_secret
         self.client = client or httpx.AsyncClient(timeout=10.0)
 
-    async def send(
+    async def _call(
         self,
         *,
-        user_id: int,
+        method: str,
+        payload: dict[str, object],
         request_id: str,
-        text: str,
-        buttons: Sequence[Button] = (),
-    ) -> None:
-        payload: dict[str, object] = {"chat_id": user_id, "text": text}
-        if buttons:
-            payload["reply_markup"] = {
-                "inline_keyboard": [[{"text": button.label, "callback_data": button.value}] for button in buttons]
-            }
+    ) -> object:
         body = json.dumps(
             {
                 "request_id": request_id,
-                "method": "sendMessage",
+                "method": method,
                 "payload": payload,
             },
             ensure_ascii=False,
@@ -91,11 +104,193 @@ class CloudflareTelegramEgress:
         )
         if response.status_code in {400, 403}:
             description = _telegram_error_description(response)
-            if description is not None and any(
-                marker in description.casefold() for marker in TELEGRAM_UNREACHABLE_DESCRIPTIONS
+            if (
+                method == "sendMessage"
+                and description is not None
+                and any(marker in description.casefold() for marker in TELEGRAM_UNREACHABLE_DESCRIPTIONS)
             ):
-                raise UnreachableRecipient(f"telegram {user_id}: {description}")
+                raise UnreachableRecipient(f"telegram {payload.get('chat_id')}: {description}")
         response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeError("Telegram API returned an invalid success response")
+        return result.get("result")
+
+    @staticmethod
+    def _message_payload(chat_id: int, text: str, buttons: Sequence[Button]) -> dict[str, object]:
+        payload: dict[str, object] = {"chat_id": chat_id, "text": text}
+        if buttons:
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{"text": button.label, "callback_data": button.value}] for button in buttons]
+            }
+        return payload
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> int:
+        result = await self._call(
+            method="sendMessage",
+            payload=self._message_payload(chat_id, text, buttons),
+            request_id=request_id,
+        )
+        if not isinstance(result, dict) or type(result.get("message_id")) is not int:
+            raise RuntimeError("Telegram sendMessage response has no message_id")
+        return cast(int, result["message_id"])
+
+    async def send(
+        self,
+        *,
+        user_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None:
+        await self.send_message(
+            chat_id=user_id,
+            request_id=request_id,
+            text=text,
+            buttons=buttons,
+        )
+
+    async def edit_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        request_id: str,
+        text: str,
+        buttons: Sequence[Button] = (),
+    ) -> None:
+        payload = self._message_payload(chat_id, text, buttons)
+        payload["message_id"] = message_id
+        await self._call(method="editMessageText", payload=payload, request_id=request_id)
+
+    async def delete_message(self, *, chat_id: int, message_id: int, request_id: str) -> None:
+        await self._call(
+            method="deleteMessage",
+            payload={"chat_id": chat_id, "message_id": message_id},
+            request_id=request_id,
+        )
+
+    async def answer_callback(self, *, callback_query_id: str, request_id: str, text: str = "") -> None:
+        payload: dict[str, object] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        await self._call(method="answerCallbackQuery", payload=payload, request_id=request_id)
+
+    async def get_chat_member(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        request_id: str,
+    ) -> dict[str, object] | None:
+        try:
+            result = await self._call(
+                method="getChatMember",
+                payload={"chat_id": chat_id, "user_id": user_id},
+                request_id=request_id,
+            )
+        except httpx.HTTPStatusError as exc:
+            description = _telegram_error_description(exc.response)
+            missing_user = description is not None and "user not found" in description.casefold()
+            if exc.response.status_code == 400 and missing_user:
+                return None
+            raise
+        if not isinstance(result, dict):
+            raise RuntimeError("Telegram getChatMember response is not an object")
+        return cast(dict[str, object], result)
+
+    async def ensure_primary_invite_link(self, *, chat_id: int, request_id: str) -> str:
+        chat = await self._call(
+            method="getChat",
+            payload={"chat_id": chat_id},
+            request_id=f"{request_id}:get",
+        )
+        if not isinstance(chat, dict):
+            raise RuntimeError("Telegram getChat response is not an object")
+        existing = chat.get("invite_link")
+        if isinstance(existing, str) and existing:
+            return existing
+        created = await self._call(
+            method="exportChatInviteLink",
+            payload={"chat_id": chat_id},
+            request_id=f"{request_id}:export",
+        )
+        if not isinstance(created, str) or not created:
+            raise RuntimeError("Telegram exportChatInviteLink response is not a link")
+        return created
+
+    async def promote_title_only_admin(self, *, chat_id: int, user_id: int, request_id: str) -> None:
+        permissions = {field: False for field in TELEGRAM_ADMINISTRATOR_PERMISSION_FIELDS}
+        permissions["can_manage_chat"] = True
+        await self._call(
+            method="promoteChatMember",
+            payload={
+                "chat_id": chat_id,
+                "user_id": user_id,
+                **permissions,
+            },
+            request_id=request_id,
+        )
+
+    async def set_administrator_title(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        title: str,
+        request_id: str,
+    ) -> None:
+        await self._call(
+            method="setChatAdministratorCustomTitle",
+            payload={"chat_id": chat_id, "user_id": user_id, "custom_title": title},
+            request_id=request_id,
+        )
+
+    async def kick_member(self, *, chat_id: int, user_id: int, request_id: str) -> bool:
+        member = await self.get_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            request_id=f"{request_id}:member",
+        )
+        if member is None:
+            return False
+        status = member.get("status")
+        if status == "kicked":
+            await self._call(
+                method="unbanChatMember",
+                payload={"chat_id": chat_id, "user_id": user_id, "only_if_banned": True},
+                request_id=f"{request_id}:unban",
+            )
+            return True
+        if status == "left" or (status == "restricted" and member.get("is_member") is False):
+            return False
+        if status == "creator" or (status == "administrator" and member.get("can_be_edited") is not True):
+            return False
+        if status == "administrator":
+            permissions = {field: False for field in TELEGRAM_ADMINISTRATOR_PERMISSION_FIELDS}
+            await self._call(
+                method="promoteChatMember",
+                payload={"chat_id": chat_id, "user_id": user_id, **permissions},
+                request_id=f"{request_id}:demote",
+            )
+        await self._call(
+            method="banChatMember",
+            payload={"chat_id": chat_id, "user_id": user_id, "revoke_messages": False},
+            request_id=f"{request_id}:ban",
+        )
+        await self._call(
+            method="unbanChatMember",
+            payload={"chat_id": chat_id, "user_id": user_id, "only_if_banned": True},
+            request_id=f"{request_id}:unban",
+        )
+        return True
 
 
 class VkApiTransport:

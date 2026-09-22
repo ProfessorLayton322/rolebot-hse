@@ -87,6 +87,13 @@ describe("telegram egress", () => {
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain("api.telegram.org/bot123:token/sendMessage");
   });
 
+  it("forwards an allowlisted chat-management method to Telegram", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true, result: true })));
+    const response = await handle(await signedRequest("promoteChatMember"), env);
+    expect(response.status).toBe(200);
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain("api.telegram.org/bot123:token/promoteChatMember");
+  });
+
   it("rejects unsupported methods", async () => {
     vi.stubGlobal("fetch", vi.fn());
     expect((await handle(await signedRequest("getUpdates"), env)).status).toBe(400);

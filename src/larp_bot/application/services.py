@@ -39,12 +39,13 @@ from larp_bot.domain.models import (
     User,
     event_reference,
     format_game_date,
+    normalize_telegram_handle,
     surname_and_name,
 )
 from larp_bot.domain.security import participant_key
 
 from .deadlines import format_confirmation_deadline
-from .identity import identities_for_local_user
+from .identity import global_users, identities_for_local_user
 from .navigation import confirmation_button, main_menu_button
 from .ports import (
     AdminConfigProvider,
@@ -53,6 +54,7 @@ from .ports import (
     OrderedCommandPublisher,
     RegistrationRepository,
     RegistrationShowcaseRepository,
+    TelegramChatGateway,
     UserRepository,
 )
 
@@ -523,6 +525,40 @@ class RegistrationService:
         event = await self._event(event_id)
         identities = await self._identities(platform, user_id)
         return _effective_registration(await self._registrations(event, identities))
+
+    async def get_registration_for_telegram_member(
+        self,
+        event_id: str,
+        user_id: int,
+        username: str | None,
+    ) -> Registration | None:
+        """Resolve a Telegram member by numeric/global identity, then by stored handle."""
+
+        direct = await self.get_registration(event_id, Platform.TELEGRAM, user_id)
+        handle = normalize_telegram_handle(username)
+        if direct is not None:
+            await self._remember_telegram_member(user_id, handle)
+            return direct
+        if handle is None:
+            return None
+        matches = [
+            registration
+            for registration in await self.catalog.registrations.find_by_telegram_profile(handle)
+            if registration.event_id == event_id
+        ]
+        registration = _effective_registration(matches)
+        if registration is not None:
+            await self._remember_telegram_member(user_id, handle)
+        return registration
+
+    async def _remember_telegram_member(self, user_id: int, handle: str | None) -> None:
+        if self.users is None or handle is None:
+            return
+        user = await self.users.get(Platform.TELEGRAM, user_id)
+        if user is None:
+            await self.users.save(TelegramUser(tg_id=user_id, telegram_handle=handle))
+        elif isinstance(user, TelegramUser) and user.telegram_handle != handle:
+            await self.users.update_telegram_handle(user_id, handle)
 
     async def registrations_on_date(
         self,
@@ -1467,12 +1503,15 @@ class ConfirmationNotificationService:
         users: UserRepository,
         transport: DeferredTransport,
         participant_secret: str,
+        *,
+        telegram_chat: TelegramChatGateway | None = None,
     ) -> None:
         self.events = events
         self.catalog = catalog
         self.users = users
         self.transport = transport
         self.participant_secret = participant_secret
+        self.telegram_chat = telegram_chat
 
     @staticmethod
     def _identity(user: User) -> tuple[Platform, int]:
@@ -1853,6 +1892,71 @@ class ConfirmationNotificationService:
             if reached:
                 delivered += 1
         return delivered
+
+    async def kick_cancelled_participant(
+        self,
+        command: OrderedRegistrationCommand,
+        *,
+        event_id: str | None = None,
+        confirmed: bool | None = None,
+    ) -> bool:
+        """Remove a formerly confirmed global user's Telegram profile from its game chat."""
+
+        if command.operation not in {Operation.CANCEL, Operation.CONFIRM}:
+            raise ValueError("command does not cancel confirmed participation")
+        event = await self.events.get(event_id or command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if self.telegram_chat is None or event.telegram_chat_id is None:
+            return False
+        cancelled_participant_key: str | None = None
+        if confirmed is None:
+            if command.operation is not Operation.CANCEL:
+                raise ValueError("replacement cancellation must state its prior status")
+            if event.last_participant_removal_operation_id != command.operation_id:
+                return False
+            cancellation = next(
+                (
+                    parsed
+                    for parsed in map(_parse_cancellation_snapshot_entry, event.participant_removal_keys)
+                    if parsed is not None
+                ),
+                None,
+            )
+            confirmed = cancellation is not None and cancellation[0]
+            cancelled_participant_key = cancellation[1] if cancellation is not None else None
+        if not confirmed:
+            return False
+
+        telegram_user_id: int | None = None
+        if command.platform is Platform.TELEGRAM:
+            telegram_user_id = command.platform_user_id
+        else:
+            local_user = await self.users.get(command.platform, command.platform_user_id)
+            if local_user is not None:
+                for profile in await global_users(self.users, local_user):
+                    if isinstance(profile, TelegramUser):
+                        telegram_user_id = profile.tg_id
+                        break
+            if telegram_user_id is None:
+                key = cancelled_participant_key or participant_key(
+                    self.participant_secret,
+                    command.platform,
+                    command.platform_user_id,
+                    event.event_id,
+                )
+                registration = await self.catalog.registrations.get(event.event_id, key)
+                if registration is not None and registration.telegram_profile is not None:
+                    telegram_user = await self.users.find_telegram_by_handle(registration.telegram_profile)
+                    if telegram_user is not None:
+                        telegram_user_id = telegram_user.tg_id
+        if telegram_user_id is None:
+            return False
+        return await self.telegram_chat.kick_member(
+            chat_id=event.telegram_chat_id,
+            user_id=telegram_user_id,
+            request_id=f"{command.operation_id}:kick:{event.event_id}:{telegram_user_id}",
+        )
 
     async def notify_masters_of_replaced_participation(
         self,

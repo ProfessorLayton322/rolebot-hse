@@ -5192,12 +5192,25 @@ class ConversationEngine:
                 command_enqueued=True,
             )
         if action == "notify-link":
-            user.dialog_state = "ADMIN_NOTIFICATION_LINK_TEXT"
-            return _confirmed_notification_prompt(
+            if event.telegram_chat_invite_link is None:
+                await self._clear(user)
+                return BotResponse(
+                    text="Чат ещё не привязан к этой игре. Добавьте бота в чат и используйте команду /tie.",
+                    buttons=[notification_management_button(event.event_id)],
+                )
+            recipient_count = await self.administration.confirmed_registration_count(
+                event.event_id,
+                main_roster_only=True,
+            )
+            user.dialog_state = "ADMIN_NOTIFICATION_CONFIRM"
+            user.dialog_context["notification_text"] = event.telegram_chat_invite_link
+            user.dialog_context["notification_recipient_count"] = recipient_count
+            return _confirmed_notification_preview(
                 event.name,
                 event.event_id,
-                link=True,
-                game_date=event.game_date,
+                event.telegram_chat_invite_link,
+                recipient_count,
+                event.game_date,
             )
         if action == "notify-all":
             user.dialog_state = "ADMIN_ALL_PLAYERS_NOTIFICATION_TEXT"
