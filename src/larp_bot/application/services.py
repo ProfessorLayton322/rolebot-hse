@@ -1416,7 +1416,8 @@ def enlistment_success_text(
     )
     if same_day_warning and event.game_date is not None:
         text = f"{text}\n\n{same_day_signup_warning(event.game_date)}"
-    return f"{text}\n\n{master_contacts_section(masters)}"
+    masters_text = event_masters_text(masters)
+    return f"{text}\n\n{masters_text}" if masters_text else text
 
 
 class ConfirmationNotificationService:
