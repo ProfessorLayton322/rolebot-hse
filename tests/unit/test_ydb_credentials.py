@@ -13,7 +13,7 @@ from larp_bot.adapters.ydb.repositories import (
     _dt,
     _optional_pass,
 )
-from larp_bot.domain.models import BotIdentity, Button, PassDetails, Platform, TelegramUser, VkUser
+from larp_bot.domain.models import BotIdentity, Button, PassDetails, Platform, PrivilegedRole, TelegramUser, VkUser
 
 
 def test_ydb_uses_function_context_token_instead_of_metadata() -> None:
@@ -203,6 +203,7 @@ async def test_user_repository_persists_telegram_identity_without_overwriting_ro
     assert params["$telegram_handle"] == "@game_master"
     assert params["$linked_vk_id"] == 84
     assert "is_gamemaster" not in query
+    assert "privileged_role" not in query
     assert "$is_gamemaster" not in params
 
 
@@ -228,6 +229,7 @@ async def test_user_repository_finds_telegram_user_by_own_handle() -> None:
                     "last_delivery_operation_id": None,
                     "last_bot_buttons_json": None,
                     "is_gamemaster": True,
+                    "privileged_role": "gamemaster_viewer",
                     "gamemaster_grant_operation_id": "grant-1",
                     "created_at": timestamp,
                     "updated_at": timestamp,
@@ -239,7 +241,8 @@ async def test_user_repository_finds_telegram_user_by_own_handle() -> None:
     user = await YdbUserRepository(executor).find_telegram_by_handle("@player_name")
 
     assert user is not None and user.tg_id == 42 and user.profile_complete
-    assert user.is_gamemaster and user.gamemaster_grant_operation_id == "grant-1"
+    assert user.is_gamemaster and user.privileged_role is PrivilegedRole.GAMEMASTER_VIEWER
+    assert user.gamemaster_grant_operation_id == "grant-1"
     assert executor.query.await_args.args[1] == {"$handle": "@player_name"}
 
 
@@ -301,27 +304,34 @@ async def test_user_repository_sets_larp_experience_without_rewriting_profile(ex
 
 
 @pytest.mark.asyncio
-async def test_user_repository_grants_gamemaster_in_selected_platform_table() -> None:
+async def test_user_repository_sets_privileged_role_in_selected_platform_table() -> None:
     executor = SimpleNamespace(query=AsyncMock(return_value=[]))
 
-    await YdbUserRepository(executor).grant_gamemaster(Platform.VK, 84, "grant-1")
+    await YdbUserRepository(executor).set_privileged_role(
+        Platform.VK,
+        84,
+        PrivilegedRole.PASS_MANAGER,
+        "grant-1",
+    )
 
     query, params = executor.query.await_args.args
     assert "UPDATE `vk_users`" in query
     assert "SET is_gamemaster = TRUE" in query
-    assert params == {"$user_id": 84, "$operation_id": "grant-1"}
+    assert "privileged_role = $role" in query
+    assert params == {"$user_id": 84, "$role": "pass_manager", "$operation_id": "grant-1"}
 
 
 @pytest.mark.asyncio
-async def test_user_repository_revokes_gamemaster_in_selected_platform_table() -> None:
+async def test_user_repository_clears_privileged_role_in_selected_platform_table() -> None:
     executor = SimpleNamespace(query=AsyncMock(return_value=[]))
 
-    await YdbUserRepository(executor).revoke_gamemaster(Platform.TELEGRAM, 42, "revoke-1")
+    await YdbUserRepository(executor).clear_privileged_role(Platform.TELEGRAM, 42, "revoke-1")
 
     query, params = executor.query.await_args.args
     assert "UPDATE `tg_users`" in query
     assert "SET is_gamemaster = FALSE" in query
-    assert params == {"$user_id": 42, "$operation_id": "revoke-1"}
+    assert "privileged_role = $role" in query
+    assert params == {"$user_id": 42, "$role": None, "$operation_id": "revoke-1"}
 
 
 @pytest.mark.asyncio

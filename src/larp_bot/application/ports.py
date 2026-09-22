@@ -14,6 +14,7 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     PassDetails,
     Platform,
+    PrivilegedRole,
     Registration,
     TelegramUser,
     User,
@@ -43,9 +44,15 @@ class UserRepository(Protocol):
 
     async def grant_larp_experience(self, platform: Platform, user_id: int) -> None: ...
 
-    async def grant_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None: ...
+    async def set_privileged_role(
+        self,
+        platform: Platform,
+        user_id: int,
+        role: PrivilegedRole,
+        operation_id: str,
+    ) -> None: ...
 
-    async def revoke_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None: ...
+    async def clear_privileged_role(self, platform: Platform, user_id: int, operation_id: str) -> None: ...
 
     async def list_all(self) -> Sequence[User]: ...
 

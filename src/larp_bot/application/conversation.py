@@ -30,6 +30,7 @@ from larp_bot.domain.models import (
     PassDetails,
     Platform,
     PlayerAmountPayload,
+    PrivilegedRole,
     ProfileSyncPayload,
     Registration,
     ReplyContext,
@@ -130,7 +131,8 @@ CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
 MANAGE_GAMES = "Управление играми"
 ARCHIVED_GAMES = "Архив игр"
-MANAGE_MODERATORS = "Управление модераторами"
+MANAGE_MODERATORS = "Управление ролями"
+LEGACY_MANAGE_MODERATORS = "Управление модераторами"
 
 LOGGER = logging.getLogger("larp_bot.application.conversation")
 MANAGE_STATISTICS = "Управление статистикой"
@@ -139,8 +141,10 @@ STATS_ADD_GAME = "Добавить игру в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
 CHANGE_GAME_DETAILS = "Изменить название и дату"
 GRANT_GAMEMASTER = "➕ Назначить модератора"
-REVOKE_GAMEMASTER = "➖ Снять модератора"
-LIST_GAMEMASTERS = "📋 Список модераторов"
+GRANT_GAMEMASTER_VIEWER = "➕ Модератор-наблюдатель"
+GRANT_PASS_MANAGER = "➕ Менеджер пропусков"
+REVOKE_GAMEMASTER = "➖ Снять роль"
+LIST_GAMEMASTERS = "📋 Список ролей"
 MANAGE_MASTERS = "Мастера"
 ADD_EVENT_LEADER = "➕ Добавить мастера"
 ADD_SELF_EVENT_LEADER = "➕ Добавить себя мастером"
@@ -177,6 +181,17 @@ EVENT_STATUS_LABELS = {
     EventStatus.CONFIRMATION_OPEN: STATUS_CONFIRMATION,
     EventStatus.CLOSED: STATUS_CLOSED,
 }
+PRIVILEGED_ROLE_LABELS = {
+    PrivilegedRole.GAMEMASTER: "Модератор",
+    PrivilegedRole.GAMEMASTER_VIEWER: "Модератор-наблюдатель",
+    PrivilegedRole.PASS_MANAGER: "Менеджер пропусков",
+    PrivilegedRole.ADMIN: "Администратор",
+}
+ASSIGNABLE_PRIVILEGED_ROLES = (
+    PrivilegedRole.GAMEMASTER,
+    PrivilegedRole.GAMEMASTER_VIEWER,
+    PrivilegedRole.PASS_MANAGER,
+)
 ADMIN_STATUS_CHOICES = {
     "admin:status:registration": (STATUS_REGISTRATION, Operation.OPEN_REGISTRATION),
     "admin:status:confirmation": (STATUS_CONFIRMATION, Operation.OPEN_CONFIRMATION),
@@ -214,7 +229,10 @@ ADMIN_ACTIONS = frozenset(
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
         MANAGE_MODERATORS,
+        LEGACY_MANAGE_MODERATORS,
         GRANT_GAMEMASTER,
+        GRANT_GAMEMASTER_VIEWER,
+        GRANT_PASS_MANAGER,
         REVOKE_GAMEMASTER,
         LIST_GAMEMASTERS,
         MANAGE_MASTERS,
@@ -779,11 +797,11 @@ class ConversationEngine:
                 if return_to_profile
                 else await self._main(user, "Действие отменено.")
             )
-        elif value in {ADMIN_MENU, MANAGE_MODERATORS}:
+        elif value in {ADMIN_MENU, MANAGE_MODERATORS, LEGACY_MANAGE_MODERATORS}:
             await self._clear(user)
             response = (
                 await self._moderator_management_menu(user)
-                if value == MANAGE_MODERATORS
+                if value in {MANAGE_MODERATORS, LEGACY_MANAGE_MODERATORS}
                 else await self._admin_menu(user)
             )
         elif value.startswith(("ag:manage:", "ag:masters:", "ag:players:", "ag:notifications:")):
@@ -2303,16 +2321,28 @@ class ConversationEngine:
         return "\n".join(lines)
 
     async def _moderator_users(self, *, removable: bool = False) -> list[User]:
-        users, configured = await asyncio.gather(self.users.list_all(), self.admins.list_gamemasters())
-        configured_keys = {(identity.platform, identity.platform_user_id) for identity in configured}
+        users, configured_moderators, configured_admins = await asyncio.gather(
+            self.users.list_all(),
+            self.admins.list_gamemasters(),
+            self.admins.list_admins(),
+        )
+        configured_moderator_keys = {
+            (identity.platform, identity.platform_user_id) for identity in configured_moderators
+        }
+        configured_admin_keys = {(identity.platform, identity.platform_user_id) for identity in configured_admins}
         matches = []
         for profile in users:
             identity = self._identity(profile)
-            configured_role = (identity.platform, identity.platform_user_id) in configured_keys
+            identity_key = (identity.platform, identity.platform_user_id)
+            configured_moderator = identity_key in configured_moderator_keys
+            configured_admin = identity_key in configured_admin_keys
             if removable:
-                if profile.is_gamemaster and not configured_role:
+                has_removable_role = profile.privileged_role is not None or (
+                    profile.is_gamemaster and not configured_moderator
+                )
+                if has_removable_role and not configured_admin:
                     matches.append(profile)
-            elif profile.is_gamemaster or configured_role:
+            elif profile.effective_privileged_role is not None or configured_moderator or configured_admin:
                 matches.append(profile)
         return sorted(
             matches,
@@ -2369,6 +2399,14 @@ class ConversationEngine:
         await self._clear(user)
         return BotResponse(text="Только мастера этой игры могут изменять её данные.")
 
+    async def _can_view_event_details(self, user: User, event_id: str) -> bool:
+        is_admin, is_leader, can_view_unassigned = await asyncio.gather(
+            self._is_admin(user),
+            self._is_event_leader(user, event_id),
+            self._can_view_unassigned_games(user),
+        )
+        return is_admin or is_leader or can_view_unassigned
+
     async def _is_admin(self, user: User) -> bool:
         identities = await global_identities(self.users, user)
         configured = await asyncio.gather(
@@ -2376,7 +2414,7 @@ class ConversationEngine:
         )
         return any(configured)
 
-    async def _user_role_label(self, user: User) -> str:
+    async def _privileged_role(self, user: User) -> PrivilegedRole | None:
         profiles = await global_users(self.users, user)
         identities = [self._identity(profile) for profile in profiles]
         configured_admins, configured_moderators = await asyncio.gather(
@@ -2388,33 +2426,35 @@ class ConversationEngine:
             ),
         )
         if any(configured_admins):
-            return "Администратор"
-        if any(profile.is_gamemaster for profile in profiles) or any(configured_moderators):
-            return "Модератор"
-        return "Игрок"
+            return PrivilegedRole.ADMIN
+        roles = [
+            *(profile.effective_privileged_role for profile in profiles),
+            *(PrivilegedRole.GAMEMASTER for configured in configured_moderators if configured),
+        ]
+        return max((role for role in roles if role is not None), key=lambda role: role.level, default=None)
+
+    async def _user_role_label(self, user: User) -> str:
+        role = await self._privileged_role(user)
+        return "Игрок" if role is None else PRIVILEGED_ROLE_LABELS[role]
 
     async def _has_admin_access(self, user: User) -> bool:
-        if await self._is_admin(user):
-            return True
-        profiles = await global_users(self.users, user)
-        if any(profile.is_gamemaster for profile in profiles):
-            return True
-        configured = await asyncio.gather(
-            *(
-                self.admins.is_gamemaster(identity.platform, identity.platform_user_id)
-                for identity in (self._identity(profile) for profile in profiles)
-            )
-        )
-        return any(configured)
+        role = await self._privileged_role(user)
+        return role is not None and role.includes(PrivilegedRole.GAMEMASTER)
+
+    async def _can_view_unassigned_games(self, user: User) -> bool:
+        role = await self._privileged_role(user)
+        return role is not None and role.includes(PrivilegedRole.GAMEMASTER_VIEWER)
 
     async def _moderator_management_menu(self, user: User) -> BotResponse:
         if not await self._is_admin(user):
             return BotResponse(text="Недостаточно прав.")
         await self._clear(user)
         return BotResponse(
-            text="Управление модераторами",
+            text="Управление ролями",
             buttons=[
                 Button(label=GRANT_GAMEMASTER, value=GRANT_GAMEMASTER),
+                Button(label=GRANT_GAMEMASTER_VIEWER, value=GRANT_GAMEMASTER_VIEWER),
+                Button(label=GRANT_PASS_MANAGER, value=GRANT_PASS_MANAGER),
                 Button(label=REVOKE_GAMEMASTER, value=REVOKE_GAMEMASTER),
                 Button(label=LIST_GAMEMASTERS, value=LIST_GAMEMASTERS),
                 Button(label=BACK, value=ADMIN_MENU),
@@ -2430,22 +2470,24 @@ class ConversationEngine:
         if offset >= len(profiles) and offset:
             offset = max(0, ((len(profiles) - 1) // PAGE_SIZE) * PAGE_SIZE)
         page = profiles[offset : offset + PAGE_SIZE]
+        roles = await asyncio.gather(*(self._privileged_role(profile) for profile in page))
         user.dialog_state = "ADMIN_MODERATOR_REMOVE" if mode == "remove" else "ADMIN_MODERATOR_LIST"
         user.dialog_context = {"moderator_offset": offset}
         if mode == "remove":
-            text = "Выберите модератора, с которого нужно снять полномочия:"
-            empty = "Нет назначенных в боте модераторов, которых можно снять."
+            text = "Выберите пользователя, с которого нужно снять назначенную роль:"
+            empty = "Нет назначенных в боте ролей, которые можно снять."
             action = "remove-pick"
         else:
-            text = "Модераторы:"
-            empty = "Модераторов пока нет."
+            text = "Привилегированные пользователи:"
+            empty = "Привилегированных пользователей пока нет."
             action = "view"
         buttons = [
             Button(
-                label=self._person_label(self._identity(profile), profile),
+                label=(f"{self._person_label(self._identity(profile), profile)} · {PRIVILEGED_ROLE_LABELS[role]}"),
                 value=(f"mod:{action}:{self._platform_code(self._identity(profile).platform)}:{user_id(profile)}"),
             )
-            for profile in page
+            for profile, role in zip(page, roles, strict=True)
+            if role is not None
         ]
         buttons.extend(
             _pagination_buttons(
@@ -2457,17 +2499,18 @@ class ConversationEngine:
         return BotResponse(text=text if page else empty, buttons=buttons)
 
     async def _event_masters_menu(self, user: User, event: Event) -> BotResponse:
-        denied = await self._event_leader_required(user, event.event_id)
-        if denied is not None:
-            return denied
+        can_manage = await self._event_leader_required(user, event.event_id) is None
+        if not can_manage and not await self._can_view_event_details(user, event.event_id):
+            return BotResponse(text="Недостаточно прав.")
         await self._clear(user)
-        buttons = [
-            Button(label=ADD_EVENT_LEADER, value=f"master:add:{event.event_id}"),
-            Button(label=REMOVE_EVENT_LEADER, value=f"master:remove:{event.event_id}"),
-            Button(label=LIST_EVENT_LEADERS, value=f"master:list:{event.event_id}"),
-            game_management_button(event.event_id),
-        ]
-        if await self._is_admin(user) and not await self._is_event_leader(user, event.event_id):
+        buttons = [Button(label=LIST_EVENT_LEADERS, value=f"master:list:{event.event_id}")]
+        if can_manage:
+            buttons[:0] = [
+                Button(label=ADD_EVENT_LEADER, value=f"master:add:{event.event_id}"),
+                Button(label=REMOVE_EVENT_LEADER, value=f"master:remove:{event.event_id}"),
+            ]
+        buttons.append(game_management_button(event.event_id))
+        if can_manage and await self._is_admin(user) and not await self._is_event_leader(user, event.event_id):
             buttons.insert(0, Button(label=ADD_SELF_EVENT_LEADER, value=f"master:self-add:{event.event_id}"))
         return BotResponse(
             text=f"Мастера игры {event_reference(event.name, event.game_date)}",
@@ -2536,11 +2579,11 @@ class ConversationEngine:
             )
         )
         text = (
-            "Выберите модератора или администратора, которого нужно добавить мастером игры "
+            "Выберите привилегированного пользователя, которого нужно добавить мастером игры "
             f"{event_reference(event.name, event.game_date)}:"
             if page
             else (
-                "Нет модераторов или администраторов, которых можно выбрать. "
+                "Нет привилегированных пользователей, которых можно выбрать. "
                 "Можно ввести Telegram- или VK-профиль напрямую."
             )
         )
@@ -2611,10 +2654,10 @@ class ConversationEngine:
             date.fromisoformat(str(user.dialog_context["game_date"])),
         )
         text = (
-            f"Выберите модератора или администратора, который станет первым мастером игры {reference}:"
+            f"Выберите привилегированного пользователя, который станет первым мастером игры {reference}:"
             if page
             else (
-                "Нет других модераторов или администраторов, которых можно выбрать мастером. "
+                "Нет других привилегированных пользователей, которых можно выбрать мастером. "
                 "Можно ввести Telegram- или VK-профиль напрямую."
             )
         )
@@ -2798,7 +2841,7 @@ class ConversationEngine:
             return await self._show_creation_master_candidates(
                 user,
                 offset=offset,
-                notice="Мастером можно выбрать только модератора или администратора.\n\n",
+                notice="Мастером можно выбрать только привилегированного пользователя.\n\n",
             )
         return await self._show_creation_master_candidates(user, offset=offset)
 
@@ -2851,7 +2894,7 @@ class ConversationEngine:
             master = await self._creation_master(user)
         except ValueError:
             await self._clear(user)
-            return BotResponse(text="Выбранный мастер больше не является модератором или администратором.")
+            return BotResponse(text="Выбранный мастер больше не является привилегированным пользователем.")
         master_identity = None if master is None else self._identity(master)
         event = await self.administration.create_event(
             str(context["event_name"]),
@@ -3022,9 +3065,12 @@ class ConversationEngine:
                 target = await self.users.get(platform, int(parts[3]))
                 if target is None:
                     return BotResponse(text="Пользователь не найден.")
+                role = await self._privileged_role(target)
+                if role is None:
+                    return await self._show_moderators(user, "list")
                 offset = int(user.dialog_context.get("moderator_offset", 0))
                 return BotResponse(
-                    text=self._profile_text("Модератор", self._identity(target), target),
+                    text=self._profile_text(PRIVILEGED_ROLE_LABELS[role], self._identity(target), target),
                     buttons=[Button(label=BACK, value=f"mod:list-page:{offset}")],
                 )
             if value.startswith("mod:remove-pick:") and len(parts) == 4:
@@ -3032,16 +3078,22 @@ class ConversationEngine:
                     return BotResponse(text="Недостаточно прав.")
                 platform = self._platform_from_code(parts[2])
                 target = await self.users.get(platform, int(parts[3]))
-                configured = {
-                    (identity.platform, identity.platform_user_id) for identity in await self.admins.list_gamemasters()
-                }
-                if target is None or not target.is_gamemaster or (platform, int(parts[3])) in configured:
+                if target is None:
+                    return await self._show_moderators(user, "remove")
+                role = target.effective_privileged_role
+                if role is None or await self._is_admin(target):
                     return await self._show_moderators(user, "remove")
                 user.dialog_state = "ADMIN_MODERATOR_REMOVE_CONFIRM"
                 user.dialog_context["target_platform"] = platform.value
                 user.dialog_context["target_user_id"] = int(parts[3])
+                user.dialog_context["target_role"] = role.value
+                confirmation = (
+                    f"Снять полномочия модератора с пользователя «{target.full_name}»?"
+                    if role is PrivilegedRole.GAMEMASTER
+                    else f"Снять роль «{PRIVILEGED_ROLE_LABELS[role]}» с пользователя «{target.full_name}»?"
+                )
                 return BotResponse(
-                    text=(f"Снять полномочия модератора с пользователя «{target.full_name}»?"),
+                    text=confirmation,
                     buttons=[
                         Button(label="Да, снять", value="mod:remove-confirm"),
                         Button(label=BACK, value=f"mod:remove-page:{user.dialog_context['moderator_offset']}"),
@@ -3053,23 +3105,38 @@ class ConversationEngine:
                 platform = Platform(str(user.dialog_context["target_platform"]))
                 target_id = int(user.dialog_context["target_user_id"])
                 target = await self.users.get(platform, target_id)
-                request_id = f"gamemaster-revoke:{platform.value}:{target_id}:{message.update_id}"
+                removed_role = PrivilegedRole(str(user.dialog_context["target_role"]))
+                request_id = (
+                    f"gamemaster-revoke:{platform.value}:{target_id}:{message.update_id}"
+                    if removed_role is PrivilegedRole.GAMEMASTER
+                    else f"privileged-role-revoke:{removed_role.value}:{platform.value}:{target_id}:{message.update_id}"
+                )
                 if target is None:
                     await self._clear(user)
                     return BotResponse(
-                        text="Этот пользователь уже не является модератором.",
+                        text="У этого пользователя уже нет назначенной роли.",
                         buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
                     )
-                if target.is_gamemaster:
-                    await self.users.revoke_gamemaster(platform, target_id, request_id)
+                target_profiles = await global_users(self.users, target)
+                profiles_with_role = [
+                    profile for profile in target_profiles if profile.effective_privileged_role is not None
+                ]
+                if profiles_with_role:
+                    for linked_profile in profiles_with_role:
+                        identity = self._identity(linked_profile)
+                        await self.users.clear_privileged_role(
+                            identity.platform,
+                            identity.platform_user_id,
+                            request_id,
+                        )
                     refreshed = await self.users.get(platform, target_id)
-                    if refreshed is None or refreshed.is_gamemaster:
-                        raise RuntimeError("gamemaster revocation was not persisted")
+                    if refreshed is None or refreshed.effective_privileged_role is not None:
+                        raise RuntimeError("privileged role revocation was not persisted")
                     target = refreshed
                 elif target.gamemaster_grant_operation_id != request_id:
                     await self._clear(user)
                     return BotResponse(
-                        text="Этот пользователь уже не является модератором.",
+                        text="У этого пользователя уже нет назначенной роли.",
                         buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
                     )
                 if target.last_delivery_operation_id != request_id:
@@ -3077,14 +3144,23 @@ class ConversationEngine:
                         user,
                         target,
                         request_id=request_id,
-                        text=GAMEMASTER_REVOKED_NOTIFICATION,
+                        text=(
+                            GAMEMASTER_REVOKED_NOTIFICATION
+                            if removed_role is PrivilegedRole.GAMEMASTER
+                            else "С вас снята привилегированная роль."
+                        ),
                     )
                 if self._identity(user) == self._identity(target):
+                    user.privileged_role = None
                     user.is_gamemaster = False
                     user.gamemaster_grant_operation_id = request_id
                 await self._clear(user)
                 return BotResponse(
-                    text="✅ Полномочия модератора сняты.",
+                    text=(
+                        "✅ Полномочия модератора сняты."
+                        if removed_role is PrivilegedRole.GAMEMASTER
+                        else "✅ Назначенная роль снята."
+                    ),
                     buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
                 )
             if value.startswith("master:add:") and len(parts) == 3:
@@ -3109,8 +3185,9 @@ class ConversationEngine:
                     return BotResponse(text="Игра не найдена.")
                 if event.archived_at is not None:
                     return BotResponse(text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.")
-                denied = await self._event_leader_required(user, event.event_id)
-                return denied or await self._show_event_masters(user, event, "list")
+                if not await self._can_view_event_details(user, event.event_id):
+                    return BotResponse(text="Недостаточно прав.")
+                return await self._show_event_masters(user, event, "list")
             if value.startswith("master:add-page:"):
                 event = await self.events.get(str(user.dialog_context["event_id"]))
                 if event is None:
@@ -3279,6 +3356,11 @@ class ConversationEngine:
             "ADMIN_WAITING_PICK",
             "ADMIN_PROFILES_PICK",
         }
+        view_only_event_states = {
+            "ADMIN_EVENT_LEADER_LIST",
+            "ADMIN_WAITING_PICK",
+            "ADMIN_PROFILES_PICK",
+        }
         if user.dialog_state in event_bound_states:
             event_id = str(user.dialog_context["event_id"])
             event = await self.events.get(event_id)
@@ -3309,9 +3391,14 @@ class ConversationEngine:
                 await self._clear(user)
                 return BotResponse(text="Недостаточно прав.")
             if not deleting_archived and not pending_self_removal:
-                denied = await self._event_leader_required(user, event_id)
-                if denied is not None:
-                    return denied
+                if user.dialog_state in view_only_event_states:
+                    if not await self._can_view_event_details(user, event_id):
+                        await self._clear(user)
+                        return BotResponse(text="Недостаточно прав.")
+                else:
+                    denied = await self._event_leader_required(user, event_id)
+                    if denied is not None:
+                        return denied
         if value.startswith(("mod:", "master:")):
             admin_response = await self._admin_callback(user, message, value)
             if admin_response is not None:
@@ -3325,9 +3412,10 @@ class ConversationEngine:
                 "admin:gamemaster:vk": Platform.VK,
             }
             target_platform = platforms.get(value)
+            role = PrivilegedRole(str(user.dialog_context.get("privileged_role", PrivilegedRole.GAMEMASTER.value)))
             if target_platform is None:
                 return BotResponse(
-                    text="Выберите бот, которым пользуется новый модератор:",
+                    text=f"Выберите бот, которым пользуется будущий {PRIVILEGED_ROLE_LABELS[role].casefold()}:",
                     buttons=[
                         Button(label="Telegram", value="admin:gamemaster:telegram"),
                         Button(label="VK", value="admin:gamemaster:vk"),
@@ -3335,11 +3423,12 @@ class ConversationEngine:
                     ],
                 )
             user.dialog_state = "ADMIN_GAMEMASTER_PROFILE"
-            user.dialog_context = {"gamemaster_platform": target_platform.value}
+            user.dialog_context["gamemaster_platform"] = target_platform.value
+            role_label = PRIVILEGED_ROLE_LABELS[role].casefold()
             if target_platform is Platform.TELEGRAM:
-                prompt = "Отправьте ссылку на профиль Telegram или @username будущего модератора:"
+                prompt = f"Отправьте ссылку на профиль Telegram или @username будущего {role_label}:"
             else:
-                prompt = "Отправьте ссылку на профиль VK будущего модератора:"
+                prompt = f"Отправьте ссылку на профиль VK будущего {role_label}:"
             return BotResponse(text=prompt, buttons=[Button(label=BACK, value=MANAGE_MODERATORS)])
         if user.dialog_state == "ADMIN_GAMEMASTER_PROFILE":
             return await self._grant_gamemaster(user, message, value)
@@ -3794,6 +3883,10 @@ class ConversationEngine:
             await self._clear(user)
             return BotResponse(text="Недостаточно прав.")
         target_platform = Platform(str(user.dialog_context["gamemaster_platform"]))
+        role = PrivilegedRole(str(user.dialog_context.get("privileged_role", PrivilegedRole.GAMEMASTER.value)))
+        if role not in ASSIGNABLE_PRIVILEGED_ROLES:
+            await self._clear(user)
+            return BotResponse(text="Некорректная роль.")
         target: User | None
         try:
             if target_platform is Platform.TELEGRAM:
@@ -3823,44 +3916,67 @@ class ConversationEngine:
                 buttons=[Button(label=BACK, value=MANAGE_MODERATORS)],
             )
         target_id = user_id(target)
-        request_id = f"gamemaster-grant:{target_platform.value}:{target_id}:{message.update_id}"
-        target_profiles = await global_users(self.users, target)
-        configured_gamemasters = await asyncio.gather(
-            *(
-                self.admins.is_gamemaster(identity.platform, identity.platform_user_id)
-                for identity in (self._identity(profile) for profile in target_profiles)
-            )
+        request_id = (
+            f"gamemaster-grant:{target_platform.value}:{target_id}:{message.update_id}"
+            if role is PrivilegedRole.GAMEMASTER
+            else f"privileged-role-grant:{role.value}:{target_platform.value}:{target_id}:{message.update_id}"
         )
-        has_persisted_grant = any(profile.is_gamemaster for profile in target_profiles)
-        if any(configured_gamemasters) or (has_persisted_grant and target.gamemaster_grant_operation_id != request_id):
+        target_profiles = await global_users(self.users, target)
+        current_role = await self._privileged_role(target)
+        if current_role is PrivilegedRole.ADMIN:
             await self._clear(user)
-            return BotResponse(text="Этот пользователь уже является модератором.")
+            return BotResponse(text="Администратору нельзя назначить другую роль.")
+        same_operation = target.effective_privileged_role is role and target.gamemaster_grant_operation_id == request_id
+        if current_role is role and not same_operation:
+            await self._clear(user)
+            return BotResponse(text=f"У этого пользователя уже роль «{PRIVILEGED_ROLE_LABELS[role]}».")
 
-        if not target.is_gamemaster:
-            await self.users.grant_gamemaster(target_platform, target_id, request_id)
+        profiles_to_update = [profile for profile in target_profiles if profile.effective_privileged_role is not role]
+        if not same_operation or profiles_to_update:
+            ordered_profiles = [target, *profiles_to_update]
+            seen: set[tuple[Platform, int]] = set()
+            for profile in ordered_profiles:
+                identity = self._identity(profile)
+                identity_key = (identity.platform, identity.platform_user_id)
+                if identity_key in seen or (same_operation and profile.effective_privileged_role is role):
+                    continue
+                seen.add(identity_key)
+                await self.users.set_privileged_role(
+                    identity.platform,
+                    identity.platform_user_id,
+                    role,
+                    request_id,
+                )
             refreshed = await self.users.get(target_platform, target_id)
-            if refreshed is None or not refreshed.is_gamemaster:
-                raise RuntimeError("gamemaster grant was not persisted")
+            if refreshed is None or refreshed.effective_privileged_role is not role:
+                raise RuntimeError("privileged role grant was not persisted")
             target = refreshed
         if target.gamemaster_grant_operation_id != request_id:
             await self._clear(user)
-            return BotResponse(text="Этот пользователь уже является модератором.")
+            return BotResponse(text=f"У этого пользователя уже роль «{PRIVILEGED_ROLE_LABELS[role]}».")
         if target.last_delivery_operation_id != request_id:
             await self._notify_status_change(
                 user,
                 target,
                 request_id=request_id,
-                text=GAMEMASTER_NOTIFICATION,
+                text=(
+                    GAMEMASTER_NOTIFICATION
+                    if role is PrivilegedRole.GAMEMASTER
+                    else f"Вам назначена роль «{PRIVILEGED_ROLE_LABELS[role]}»! 🎉"
+                ),
                 buttons=[admin_menu_button()],
             )
 
         if message.identity.platform is target_platform and message.identity.platform_user_id == target_id:
+            user.privileged_role = role
             user.is_gamemaster = True
             user.gamemaster_grant_operation_id = request_id
             user.last_delivery_operation_id = request_id
         await self._clear(user)
         platform_name = "Telegram" if target_platform is Platform.TELEGRAM else "VK"
-        return BotResponse(text=f"✅ Пользователь назначен модератором в {platform_name}.")
+        if role is PrivilegedRole.GAMEMASTER:
+            return BotResponse(text=f"✅ Пользователь назначен модератором в {platform_name}.")
+        return BotResponse(text=f"✅ Пользователю назначена роль «{PRIVILEGED_ROLE_LABELS[role]}» в {platform_name}.")
 
     async def _find_telegram_target(self, value: str) -> TelegramUser | None:
         handle = normalize_telegram_profile(value)
@@ -3885,16 +4001,24 @@ class ConversationEngine:
             refreshed = await self.users.get(identity.platform, identity.platform_user_id)
             return refreshed or target
 
-        same_operation = target.is_gamemaster and target.gamemaster_grant_operation_id == request_id
+        same_operation = (
+            target.effective_privileged_role is PrivilegedRole.GAMEMASTER
+            and target.gamemaster_grant_operation_id == request_id
+        )
         if not same_operation and await self._has_admin_access(target):
             user.dialog_context["completed_master_promotion"] = request_id
             await self.users.save(user)
             return target
 
-        if not target.is_gamemaster:
-            await self.users.grant_gamemaster(identity.platform, identity.platform_user_id, request_id)
+        if target.effective_privileged_role is None:
+            await self.users.set_privileged_role(
+                identity.platform,
+                identity.platform_user_id,
+                PrivilegedRole.GAMEMASTER,
+                request_id,
+            )
         refreshed = await self.users.get(identity.platform, identity.platform_user_id)
-        if refreshed is None or not refreshed.is_gamemaster:
+        if refreshed is None or refreshed.effective_privileged_role is None:
             raise RuntimeError("gamemaster grant was not persisted")
         target = refreshed
         if target.gamemaster_grant_operation_id == request_id:
@@ -3967,8 +4091,8 @@ class ConversationEngine:
         request_id = (
             f"leader-grant:{event_id}:{identity.platform.value}:{identity.platform_user_id}:{message.update_id}"
         )
-        configured_admin, has_admin_access = await asyncio.gather(
-            self._is_admin(target),
+        target_role, has_admin_access = await asyncio.gather(
+            self._privileged_role(target),
             self._has_admin_access(target),
         )
         if not has_admin_access:
@@ -3980,7 +4104,8 @@ class ConversationEngine:
                 confirm_value="master:promote:yes",
                 decline_value="master:promote:no",
             )
-        role_name = "Администратор" if configured_admin else "Модератор"
+        assert target_role is not None
+        role_name = PRIVILEGED_ROLE_LABELS[target_role]
         reference = event_reference(event.name, event.game_date)
         notification_button = Button(label="Управление игрой", value=f"ag:manage:{event_id}")
         target_identities, leaders = await asyncio.gather(
@@ -4822,9 +4947,10 @@ class ConversationEngine:
                     Button(label=BACK, value=ARCHIVED_GAMES),
                 ],
             )
-        is_leader, is_admin = await asyncio.gather(
+        is_leader, is_admin, can_view_unassigned = await asyncio.gather(
             self._is_event_leader(user, event.event_id),
             self._is_admin(user),
+            self._can_view_unassigned_games(user),
         )
         text = (
             f"Управление игрой {event_reference(event.name, event.game_date)}\n\n"
@@ -4839,6 +4965,20 @@ class ConversationEngine:
         if event.confirmation_deadline is not None:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
         if not is_leader and not is_admin:
+            if can_view_unassigned:
+                view_actions = [
+                    (LIST_WAITING_PLAYERS, "waiting"),
+                    (EVENT_TABLES, "tables"),
+                    (LIST_PLAYER_PROFILES, "profiles"),
+                ]
+                buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in view_actions]
+                buttons.extend(
+                    [
+                        Button(label=LIST_EVENT_LEADERS, value=f"master:list:{event.event_id}"),
+                        Button(label=BACK, value=MANAGE_GAMES),
+                    ]
+                )
+                return BotResponse(text=text + "\n\nДоступен просмотр данных игры:", buttons=buttons)
             return BotResponse(
                 text=text + "\n\nАдминистративные действия доступны только мастерам этой игры.",
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
@@ -4875,15 +5015,17 @@ class ConversationEngine:
         )
 
     @staticmethod
-    def _player_management(event: Event) -> BotResponse:
-        return BotResponse(
-            text=(f"Управление игроками игры {event_reference(event.name, event.game_date)}\n\nВыберите действие:"),
-            buttons=[
+    def _player_management(event: Event, *, can_manage: bool) -> BotResponse:
+        buttons = [Button(label=LIST_PLAYER_PROFILES, value=f"ag:profiles:{event.event_id}")]
+        if can_manage:
+            buttons[:0] = [
                 Button(label=REMOVE_PLAYER, value=f"ag:remove:{event.event_id}"),
                 Button(label=REMOVE_WAITING_PLAYERS, value=f"ag:remove-waiting:{event.event_id}"),
-                Button(label=LIST_PLAYER_PROFILES, value=f"ag:profiles:{event.event_id}"),
-                game_management_button(event.event_id),
-            ],
+            ]
+        buttons.append(game_management_button(event.event_id))
+        return BotResponse(
+            text=(f"Управление игроками игры {event_reference(event.name, event.game_date)}\n\nВыберите действие:"),
+            buttons=buttons,
         )
 
     async def _admin_game_action(
@@ -4965,10 +5107,19 @@ class ConversationEngine:
                 text=f"Игра {event_reference(event.name, event.game_date)} уже архивирована.",
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
-        denied = await self._event_leader_required(user, event.event_id)
-        if denied is not None:
-            denied.buttons = [Button(label=BACK, value=MANAGE_GAMES)]
-            return denied
+        is_admin, is_leader, can_view_unassigned = await asyncio.gather(
+            self._is_admin(user),
+            self._is_event_leader(user, event.event_id),
+            self._can_view_unassigned_games(user),
+        )
+        can_manage = is_admin or is_leader
+        read_only_actions = {"waiting", "tables", "players", "profiles", "masters"}
+        if not can_manage and (not can_view_unassigned or action not in read_only_actions):
+            await self._clear(user)
+            return BotResponse(
+                text="Только мастера этой игры могут изменять её данные.",
+                buttons=[Button(label=BACK, value=MANAGE_GAMES)],
+            )
 
         user.dialog_context = {
             "event_id": event.event_id,
@@ -5061,14 +5212,20 @@ class ConversationEngine:
         if action == "waiting":
             return await self._show_waiting_players(user, event)
         if action == "players":
-            return self._player_management(event)
+            return self._player_management(event, can_manage=can_manage)
         if action == "tables":
             await self._clear(user)
-            event = await self.administration.ensure_event_tables(event)
-            await self.administration.create_pass_table(event.event_id)
+            if can_manage:
+                event = await self.administration.ensure_event_tables(event)
+                await self.administration.create_pass_table(event.event_id)
             refreshed = await self.events.get(event.event_id)
             if refreshed is None:
                 return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+            if refreshed.public_table_public_url is None or refreshed.pass_table_public_url is None:
+                return BotResponse(
+                    text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
+                    buttons=[game_management_button(event.event_id)],
+                )
             return BotResponse(
                 text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(refreshed)}"),
                 buttons=[game_management_button(event.event_id)],
@@ -5190,13 +5347,19 @@ class ConversationEngine:
             *LEGACY_STATUS_ACTIONS,
         }:
             return await self._show_admin_games(user)
-        if value == GRANT_GAMEMASTER:
+        role_grants = {
+            GRANT_GAMEMASTER: PrivilegedRole.GAMEMASTER,
+            GRANT_GAMEMASTER_VIEWER: PrivilegedRole.GAMEMASTER_VIEWER,
+            GRANT_PASS_MANAGER: PrivilegedRole.PASS_MANAGER,
+        }
+        if value in role_grants:
             if not await self._is_admin(user):
                 return BotResponse(text="Недостаточно прав.")
+            role = role_grants[value]
             user.dialog_state = "ADMIN_GAMEMASTER_PLATFORM"
-            user.dialog_context = {}
+            user.dialog_context = {"privileged_role": role.value}
             return BotResponse(
-                text="Выберите бот, которым пользуется новый модератор:",
+                text=f"Выберите бот, которым пользуется будущий {PRIVILEGED_ROLE_LABELS[role].casefold()}:",
                 buttons=[
                     Button(label="Telegram", value="admin:gamemaster:telegram"),
                     Button(label="VK", value="admin:gamemaster:vk"),
