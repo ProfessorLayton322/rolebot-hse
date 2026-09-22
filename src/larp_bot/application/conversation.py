@@ -4974,6 +4974,7 @@ class ConversationEngine:
                 view_actions = [
                     (LIST_WAITING_PLAYERS, "waiting"),
                     (EVENT_TABLES, "tables"),
+                    (EXPORT_ACHIEVEMENTS, "achievements"),
                     (LIST_PLAYER_PROFILES, "profiles"),
                 ]
                 buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in view_actions]
@@ -5119,8 +5120,8 @@ class ConversationEngine:
             self._can_view_unassigned_games(user),
         )
         can_manage = is_admin or is_leader
-        read_only_actions = {"waiting", "tables", "players", "profiles", "masters"}
-        if not can_manage and (not can_view_unassigned or action not in read_only_actions):
+        viewer_actions = {"waiting", "tables", "achievements", "players", "profiles", "masters"}
+        if not can_manage and (not can_view_unassigned or action not in viewer_actions):
             await self._clear(user)
             return BotResponse(
                 text="Только мастера этой игры могут изменять её данные.",

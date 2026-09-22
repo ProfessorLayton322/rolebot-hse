@@ -2095,12 +2095,14 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     assert removal_denied.text == "Только мастера этой игры могут изменять её данные."
     profiles_denied = await engine.handle(inbound(9, f"ag:profiles:{event.event_id}", callback=True))
     assert profiles_denied.text == "Только мастера этой игры могут изменять её данные."
+    achievements_denied = await engine.handle(inbound(10, f"ag:achievements:{event.event_id}", callback=True))
+    assert achievements_denied.text == "Только мастера этой игры могут изменять её данные."
     assert publisher.commands == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", [PrivilegedRole.GAMEMASTER_VIEWER, PrivilegedRole.PASS_MANAGER])
-async def test_viewer_roles_can_inspect_but_not_mutate_an_unled_game(
+async def test_viewer_roles_can_inspect_and_export_but_not_administer_an_unled_game(
     disk_store: MemoryDiskStore,
     event: Event,
     role: PrivilegedRole,
@@ -2113,7 +2115,12 @@ async def test_viewer_roles_can_inspect_but_not_mutate_an_unled_game(
             "pass_table_public_url": "https://disk.example/pass-table",
         }
     )
-    engine, users, publisher, registrations = await engine_setup(disk_store, event, privileged_role=role)
+    engine, users, publisher, registrations = await engine_setup(
+        disk_store,
+        event,
+        privileged_role=role,
+        achievement_template=achievement_template_bytes(),
+    )
     await users.save(
         TelegramUser(
             tg_id=2,
@@ -2137,31 +2144,39 @@ async def test_viewer_roles_can_inspect_but_not_mutate_an_unled_game(
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
     labels = {button.label for button in management.buttons}
-    assert {LIST_WAITING_PLAYERS, EVENT_TABLES, LIST_PLAYER_PROFILES, LIST_EVENT_LEADERS} <= labels
+    assert {
+        LIST_WAITING_PLAYERS,
+        EVENT_TABLES,
+        EXPORT_ACHIEVEMENTS,
+        LIST_PLAYER_PROFILES,
+        LIST_EVENT_LEADERS,
+    } <= labels
     assert CHANGE_STATUS not in labels
-    assert EXPORT_ACHIEVEMENTS not in labels
     assert REMOVE_PLAYER not in labels
 
-    tables = await engine.handle(inbound(2, f"ag:tables:{event.event_id}", callback=True))
+    achievements = await engine.handle(inbound(2, f"ag:achievements:{event.event_id}", callback=True))
+    assert achievements.text.endswith("https://disk.example/public/2")
+
+    tables = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
     assert "https://disk.example/public-table" in tables.text
     assert "https://disk.example/pass-table" in tables.text
 
-    await engine.handle(inbound(3, f"ag:manage:{event.event_id}", callback=True))
-    profiles = await engine.handle(inbound(4, f"ag:profiles:{event.event_id}", callback=True))
+    await engine.handle(inbound(4, f"ag:manage:{event.event_id}", callback=True))
+    profiles = await engine.handle(inbound(5, f"ag:profiles:{event.event_id}", callback=True))
     profile_button = next(button for button in profiles.buttons if button.value.startswith("admin:profiles:pick:"))
-    profile = await engine.handle(inbound(5, profile_button.value, callback=True))
+    profile = await engine.handle(inbound(6, profile_button.value, callback=True))
     assert "Петров Пётр" in profile.text
 
-    await engine.handle(inbound(6, "/start"))
-    await engine.handle(inbound(7, f"ag:manage:{event.event_id}", callback=True))
-    masters = await engine.handle(inbound(8, f"master:list:{event.event_id}", callback=True))
+    await engine.handle(inbound(7, "/start"))
+    await engine.handle(inbound(8, f"ag:manage:{event.event_id}", callback=True))
+    masters = await engine.handle(inbound(9, f"master:list:{event.event_id}", callback=True))
     assert "Мастера игры" in masters.text or "мастеров" in masters.text
 
-    await engine.handle(inbound(9, "/start"))
-    denied = await engine.handle(inbound(10, f"ag:remove:{event.event_id}", callback=True))
+    await engine.handle(inbound(10, "/start"))
+    denied = await engine.handle(inbound(11, f"ag:remove:{event.event_id}", callback=True))
     assert denied.text == "Только мастера этой игры могут изменять её данные."
-    achievements_denied = await engine.handle(inbound(11, f"ag:achievements:{event.event_id}", callback=True))
-    assert achievements_denied.text == "Только мастера этой игры могут изменять её данные."
+    repeated_achievements = await engine.handle(inbound(12, f"ag:achievements:{event.event_id}", callback=True))
+    assert repeated_achievements.text == achievements.text
     assert publisher.commands == []
 
 
