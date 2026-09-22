@@ -83,6 +83,26 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
         workbook.close()
 
 
+def test_confirmation_callback_payload_is_omitted_from_character_wish_cells() -> None:
+    registration = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Иванов Иван",
+        wish_play="Без пожеланий",
+        character_wish="unexpected SELECT:CONFIRM:b49df060-85f7-45fd-851a-2e3dcf706320 callback",
+    )
+
+    for content, character_wish_column in (
+        (showcase_workbook_bytes([registration]), 8),
+        (public_showcase_workbook_bytes([registration]), 5),
+    ):
+        workbook = load_workbook(BytesIO(content))
+        try:
+            assert workbook.active.cell(2, character_wish_column).value is None
+        finally:
+            workbook.close()
+
+
 @pytest.mark.asyncio
 async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: MemoryDiskStore, event: Event) -> None:
     public_path = "disk:/larp-bot/events/event-a1/public_table_Лесной предел.xlsx"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from io import BytesIO
@@ -89,6 +90,7 @@ TABLEAU_10_COLORS = (
     "9C755F",
     "BAB0AC",
 )
+CHARACTER_WISH_CALLBACK_RE = re.compile(r"select:confirm:[a-z0-9-]{8,80}", re.IGNORECASE)
 
 
 class WorkbookIntegrityError(RuntimeError):
@@ -114,6 +116,11 @@ def _cell_text(value: object) -> str:
 def safe_cell(value: str) -> str:
     """Neutralize spreadsheet formulas while retaining the visible user text."""
     return f"'{value}" if value.startswith(("=", "+", "-", "@")) else value
+
+
+def character_wish_cell(value: str) -> str:
+    """Hide leaked confirmation callback payloads from generated workbooks."""
+    return "" if CHARACTER_WISH_CALLBACK_RE.search(value) else safe_cell(value)
 
 
 def display_cell(value: object) -> str:
@@ -250,7 +257,7 @@ def showcase_workbook_bytes(
                 _bool_cell(registration.larp_experience),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
-                safe_cell(registration.character_wish),
+                character_wish_cell(registration.character_wish),
                 registration.attendance_status.value,
             )
         )
@@ -268,7 +275,7 @@ def showcase_workbook_bytes(
                 _bool_cell(registration.larp_experience),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
-                safe_cell(registration.character_wish),
+                character_wish_cell(registration.character_wish),
                 registration.attendance_status.value,
             )
         )
@@ -300,7 +307,7 @@ def public_showcase_workbook_bytes(
                 safe_cell(registration.nickname or surname_and_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
-                safe_cell(registration.character_wish),
+                character_wish_cell(registration.character_wish),
                 registration.attendance_status.value,
             )
         )
@@ -315,7 +322,7 @@ def public_showcase_workbook_bytes(
                 safe_cell(registration.nickname or surname_and_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
-                safe_cell(registration.character_wish),
+                character_wish_cell(registration.character_wish),
                 registration.attendance_status.value,
             )
         )
