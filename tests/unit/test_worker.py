@@ -367,8 +367,7 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
         "Сейчас вы в основном составе.\n\n"
         f"Актуальный список записавшихся и состав можно посмотреть здесь: {link}\n\n"
         "Когда будете уверены, что сможете прийти на игру, подтвердите участие до 10.09.26 19:00 (мск).\n\n"
-        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре».\n\n"
-        f"{NO_MASTERS_SECTION}"
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
     )
     assert transport.sent[1][3] == (
         f"Вы записались на игру «{event.name}»!\n\n"
@@ -376,8 +375,7 @@ async def test_enlist_delivery_reports_main_or_reserve_position_from_ordered_sta
         "Если вы перейдёте в основной состав, бот сообщит об этом отдельным сообщением.\n\n"
         f"Актуальный список записавшихся и состав можно посмотреть здесь: {link}\n\n"
         "Когда будете уверены, что сможете прийти на игру, подтвердите участие до 10.09.26 19:00 (мск).\n\n"
-        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре».\n\n"
-        f"{NO_MASTERS_SECTION}"
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
     )
     assert all(
         [(button.label, button.value) for button in sent[4]]
@@ -428,14 +426,13 @@ async def test_enlist_delivery_uses_closed_confirmation_text_and_keeps_default_b
         f"{stored_event.public_table_public_url}\n\n"
         "Подтверждение участия пока не открыто. Мы обязательно пришлём вам уведомление, "
         "когда можно будет подтвердиться.\n\n"
-        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре».\n\n"
-        f"{NO_MASTERS_SECTION}"
+        "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
     )
     assert transport.sent[0][4] == (Button(label=MAIN_MENU_LABEL, value=MAIN_MENU),)
 
 
 @pytest.mark.asyncio
-async def test_signup_and_confirmation_list_masters_and_warn_about_no_shows(
+async def test_no_show_warning_is_sent_after_confirmation_but_not_signup(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -500,7 +497,9 @@ async def test_signup_and_confirmation_list_masters_and_warn_about_no_shows(
         "https://vk.com/id77\n"
         "Жукова Вера\n"
         "Орлов Борис — https://vk.com/id42\n"
-        "Смирнова Анна — https://t.me/anna_master\n\n"
+        "Смирнова Анна — https://t.me/anna_master"
+    )
+    confirmation_disclaimer = (
         "Если вы решите не участвовать в игре, пожалуйста сообщите об этом мастерам: "
         "https://vk.com/id77 https://vk.com/id42 https://t.me/anna_master . "
         "Если вы не придете на игру, ничего нам не сообщив, к вам могут быть применены санкции Ролевого Клуба"
@@ -508,12 +507,13 @@ async def test_signup_and_confirmation_list_masters_and_warn_about_no_shows(
     signup, confirmation = (sent[3] for sent in transport.sent)
     assert signup.startswith(f"Вы записались на игру «{event.name}»!\n\nСейчас вы в основном составе.\n\n")
     assert signup.endswith(f"«🎭 Пожелания по игре».\n\n{masters}")
+    assert confirmation_disclaimer not in signup
     assert confirmation == (
         f"✅ Участие в игре «{event.name}» подтверждено.\n\n"
         "Мастера скоро отправят вам ссылку на чат игры!\n\n"
         "Пожелания по персонажу:\nDoctor\n\n"
         "Позже их можно изменить через «🎭 Пожелания по игре».\n\n"
-        f"{masters}"
+        f"{masters}\n\n{confirmation_disclaimer}"
     )
 
 
