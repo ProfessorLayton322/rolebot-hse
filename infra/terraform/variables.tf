@@ -25,7 +25,7 @@ variable "function_zip_path" {
 
 variable "function_package_bucket" {
   type        = string
-  description = "Existing private Object Storage bucket used for the Function deployment package."
+  description = "Existing private, versioned Object Storage bucket used for Terraform state and the Function package."
 }
 
 variable "cloudflare_account_id" {
