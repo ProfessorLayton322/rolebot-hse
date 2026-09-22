@@ -566,6 +566,7 @@ class YdbEventRepository:
         registration_open_notification_completed_at,
         confirmation_deadline, registrations_migrated_at,
         pass_table_resource_path, pass_table_public_url,
+        achievement_resource_path, achievement_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
         last_reserve_promotion_delivered_operation_id,
@@ -619,6 +620,8 @@ class YdbEventRepository:
             ),
             pass_table_resource_path=row.get("pass_table_resource_path"),
             pass_table_public_url=row.get("pass_table_public_url"),
+            achievement_resource_path=row.get("achievement_resource_path"),
+            achievement_public_url=row.get("achievement_public_url"),
             confirmed_notifications=_confirmed_notifications(row.get("confirmed_notifications_json")),
             last_confirmed_notification_operation_id=row.get("last_confirmed_notification_operation_id"),
             last_reserve_promotion_operation_id=row.get("last_reserve_promotion_operation_id"),
@@ -713,6 +716,8 @@ class YdbEventRepository:
             DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $pass_table_resource_path AS Optional<Utf8>;
             DECLARE $pass_table_public_url AS Optional<Utf8>;
+            DECLARE $achievement_resource_path AS Optional<Utf8>;
+            DECLARE $achievement_public_url AS Optional<Utf8>;
             DECLARE $confirmed_notifications_json AS Utf8;
             DECLARE $last_confirmed_notification_operation_id AS Optional<Utf8>;
             DECLARE $last_reserve_promotion_operation_id AS Optional<Utf8>;
@@ -735,6 +740,7 @@ class YdbEventRepository:
                 registration_open_notification_completed_at,
                 confirmation_deadline, registrations_migrated_at,
                 pass_table_resource_path, pass_table_public_url,
+                achievement_resource_path, achievement_public_url,
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
                 last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
                 last_reserve_promotion_delivered_operation_id,
@@ -752,6 +758,7 @@ class YdbEventRepository:
                 $registration_open_notification_completed_at,
                 $confirmation_deadline, $registrations_migrated_at,
                 $pass_table_resource_path, $pass_table_public_url,
+                $achievement_resource_path, $achievement_public_url,
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
                 $last_reserve_promotion_delivered_operation_id,
@@ -787,6 +794,8 @@ class YdbEventRepository:
                 "$registrations_migrated_at": event.registrations_migrated_at,
                 "$pass_table_resource_path": event.pass_table_resource_path,
                 "$pass_table_public_url": event.pass_table_public_url,
+                "$achievement_resource_path": event.achievement_resource_path,
+                "$achievement_public_url": event.achievement_public_url,
                 "$confirmed_notifications_json": json.dumps(
                     event.confirmed_notifications,
                     ensure_ascii=False,
@@ -1156,6 +1165,29 @@ class YdbEventRepository:
                 pass_table_public_url = $public_url,
                 updated_at = $updated_at
             WHERE event_id = $event_id AND pass_table_public_url IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$resource_path": resource_path,
+                "$public_url": public_url,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def set_achievement(self, event_id: str, resource_path: str, public_url: str) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.achievement_public_url is not None:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $resource_path AS Utf8;
+            DECLARE $public_url AS Utf8; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET achievement_resource_path = $resource_path,
+                achievement_public_url = $public_url,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND achievement_public_url IS NULL;
             """,
             {
                 "$event_id": event_id,

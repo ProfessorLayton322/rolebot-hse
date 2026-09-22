@@ -14,6 +14,10 @@ from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from larp_bot.adapters.yandex_disk.achievements import (
+    ACHIEVEMENT_TEMPLATE_PATH,
+    achievement_presentation_bytes,
+)
 from larp_bot.domain.models import (
     DEFAULT_PLAYER_AMOUNT,
     MAX_PLAYER_AMOUNT,
@@ -91,6 +95,8 @@ TABLEAU_10_COLORS = (
     "BAB0AC",
 )
 CHARACTER_WISH_CALLBACK_RE = re.compile(r"select:confirm:[a-z0-9-]{8,80}", re.IGNORECASE)
+XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
 class WorkbookIntegrityError(RuntimeError):
@@ -491,16 +497,16 @@ class YandexDiskRestClient:
 
     async def _upload(self, path: str, content: bytes, *, overwrite: bool) -> None:
         href = await self._link("resources/upload", path, overwrite=overwrite)
+        if path.endswith(".json"):
+            content_type = "application/json"
+        elif path.endswith(".pptx"):
+            content_type = PPTX_MIME_TYPE
+        else:
+            content_type = XLSX_MIME_TYPE
         response = await self._client.put(
             href,
             content=content,
-            headers={
-                "Content-Type": (
-                    "application/json"
-                    if path.endswith(".json")
-                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            },
+            headers={"Content-Type": content_type},
         )
         response.raise_for_status()
 
@@ -549,8 +555,9 @@ class YandexDiskRestClient:
 
 
 class YandexDiskShowcaseRepository:
-    def __init__(self, store: DiskObjectStore) -> None:
+    def __init__(self, store: DiskObjectStore, *, achievement_template: bytes | None = None) -> None:
         self.store = store
+        self._achievement_template = achievement_template
 
     async def _create_event_workbook(self, disk_path: str, content: bytes) -> str:
         await self.store.upload_new(disk_path, content)
@@ -597,6 +604,22 @@ class YandexDiskShowcaseRepository:
         await self.store.replace(disk_path, content)
 
     async def delete_pass_table(self, disk_path: str) -> None:
+        await self.store.delete(disk_path)
+
+    async def create_achievement_presentation(self, disk_path: str, game_name: str) -> str:
+        template = self._achievement_template
+        if template is None:
+            template = await asyncio.to_thread(ACHIEVEMENT_TEMPLATE_PATH.read_bytes)
+            self._achievement_template = template
+        content = await asyncio.to_thread(achievement_presentation_bytes, template, game_name)
+        await self.store.upload_new(disk_path, content)
+        try:
+            return await self.store.publish(disk_path)
+        except Exception:
+            await self.store.delete(disk_path)
+            raise
+
+    async def delete_achievement_presentation(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
 
     async def read_legacy_registrations(self, event: Event) -> Sequence[Registration]:

@@ -10,6 +10,7 @@ from openpyxl import Workbook, load_workbook
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository
 from larp_bot.adapters.yandex_disk.repository import (
     LEGACY_HEADERS,
+    PPTX_MIME_TYPE,
     PUBLIC_HEADERS,
     STATEFUL_HEADERS,
     TABLEAU_10_COLORS,
@@ -559,6 +560,23 @@ async def test_yandex_disk_download_follows_transfer_redirect() -> None:
         "downloader.disk.yandex.ru",
         "storage.yandex.net",
     ]
+
+
+@pytest.mark.asyncio
+async def test_yandex_disk_upload_uses_presentation_content_type() -> None:
+    content_types: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "cloud-api.yandex.net":
+            return httpx.Response(200, json={"href": "https://uploader.disk.yandex.net/file"})
+        content_types.append(request.headers["Content-Type"])
+        return httpx.Response(201)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        disk = YandexDiskRestClient("token", client)
+        await disk._upload("disk:/larp-bot/achievements/event-a1.pptx", b"presentation", overwrite=False)
+
+    assert content_types == [PPTX_MIME_TYPE]
 
 
 @pytest.mark.asyncio

@@ -332,6 +332,20 @@ class MemoryEventRepository:
         )
         return True
 
+    async def set_achievement(self, event_id: str, resource_path: str, public_url: str) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.achievement_public_url is not None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "achievement_resource_path": resource_path,
+                "achievement_public_url": public_url,
+                "updated_at": datetime.now(event.updated_at.tzinfo),
+            }
+        )
+        return True
+
     async def append_confirmed_notification(self, event_id: str, text: str, operation_id: str) -> bool:
         event = self.rows.get(event_id)
         if event is None:

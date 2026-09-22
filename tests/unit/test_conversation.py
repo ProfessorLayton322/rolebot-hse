@@ -44,6 +44,7 @@ from larp_bot.application.conversation import (
     EMAIL_PROMPT,
     ENLIST,
     EVENT_TABLES,
+    EXPORT_ACHIEVEMENTS,
     FREE_TEXT_DIALOG_STATES,
     GAME_WISHES,
     GAMEMASTER_NOTIFICATION,
@@ -128,7 +129,7 @@ from larp_bot.domain.models import (
     VkUser,
     event_name_with_date,
 )
-from tests.conftest import MemoryDiskStore
+from tests.conftest import MemoryDiskStore, achievement_template_bytes
 
 
 def inbound(
@@ -185,6 +186,7 @@ async def engine_setup(
     tg_admin_ids: set[int] | None = None,
     vk_admin_ids: set[int] | None = None,
     vk_profile_ids: dict[str, int] | None = None,
+    achievement_template: bytes | None = None,
 ) -> tuple[
     ConversationEngine,
     MemoryUserRepository,
@@ -206,7 +208,7 @@ async def engine_setup(
     )
     events = MemoryEventRepository([event, *additional_events])
     tables = MemoryRegistrationRepository()
-    showcase = YandexDiskShowcaseRepository(store)
+    showcase = YandexDiskShowcaseRepository(store, achievement_template=achievement_template)
     await showcase.create_event_workbook(event.disk_resource_path)
     catalog = RegistrationCatalog(events, tables, showcase)
     publisher = MemoryCommandPublisher()
@@ -2137,6 +2139,7 @@ async def test_viewer_roles_can_inspect_but_not_mutate_an_unled_game(
     labels = {button.label for button in management.buttons}
     assert {LIST_WAITING_PLAYERS, EVENT_TABLES, LIST_PLAYER_PROFILES, LIST_EVENT_LEADERS} <= labels
     assert CHANGE_STATUS not in labels
+    assert EXPORT_ACHIEVEMENTS not in labels
     assert REMOVE_PLAYER not in labels
 
     tables = await engine.handle(inbound(2, f"ag:tables:{event.event_id}", callback=True))
@@ -2157,6 +2160,8 @@ async def test_viewer_roles_can_inspect_but_not_mutate_an_unled_game(
     await engine.handle(inbound(9, "/start"))
     denied = await engine.handle(inbound(10, f"ag:remove:{event.event_id}", callback=True))
     assert denied.text == "Только мастера этой игры могут изменять её данные."
+    achievements_denied = await engine.handle(inbound(11, f"ag:achievements:{event.event_id}", callback=True))
+    assert achievements_denied.text == "Только мастера этой игры могут изменять её данные."
     assert publisher.commands == []
 
 
@@ -4447,6 +4452,35 @@ async def test_event_tables_action_returns_all_three_permanent_links(disk_store:
 
     repeated = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
     assert repeated.text == tables.text
+
+
+@pytest.mark.asyncio
+async def test_game_management_exports_achievements_once_and_reuses_the_link(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    template = achievement_template_bytes()
+    engine, _, _, _ = await engine_setup(
+        disk_store,
+        event,
+        admin=True,
+        achievement_template=template,
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    assert EXPORT_ACHIEVEMENTS in [button.label for button in management.buttons]
+
+    first = await engine.handle(inbound(2, f"ag:achievements:{event.event_id}", callback=True))
+    achievement_path = f"disk:/larp-bot/achievements/{event.event_id}.pptx"
+    assert first.text.endswith("https://disk.example/public/2")
+    assert achievement_path in disk_store.files
+    first_content = disk_store.files[achievement_path]
+
+    repeated = await engine.handle(inbound(3, f"ag:achievements:{event.event_id}", callback=True))
+
+    assert repeated.text == first.text
+    assert disk_store.files[achievement_path] == first_content
+    assert disk_store.replace_count.get(achievement_path, 0) == 0
 
 
 @pytest.mark.asyncio
