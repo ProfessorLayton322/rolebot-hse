@@ -374,7 +374,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `YC_DEPLOY_SERVICE_ACCOUNT_ID` | Deployment SA linked to the GitHub subject |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
-| `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket |
+| `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket, where a prefix-scoped lifecycle retains three non-current packages and expires older ones after one day |
 | `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent `player_attendance_stats.xlsx` and `master_statistics.xlsx` files |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
@@ -497,6 +497,7 @@ Worker binding updates create a new encrypted Worker version; Yandex runtimes ne
 Terraform manages:
 
 - five least-purpose service accounts, runtime IAM and invocation bindings;
+- the pre-created deployment bucket's Function-package lifecycle, without expiring any Terraform-state versions;
 - one Serverless YDB database and five application tables;
 - one FIFO command queue and one standard kick queue;
 - gateway and ordered-worker Functions, versions, logging, and scaling policies;

@@ -24,7 +24,7 @@ locals {
 # Storage. A stable object key plus source_hash updates the object in place,
 # while user_hash makes Terraform create new Function versions when it changes.
 resource "yandex_storage_object" "function_package" {
-  bucket       = var.function_package_bucket
+  bucket       = yandex_storage_bucket.deployment.bucket
   key          = "${var.project_name}/functions/function-package.zip"
   source       = var.function_zip_path
   source_hash  = local.function_package_hash
