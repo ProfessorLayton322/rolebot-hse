@@ -13,6 +13,7 @@ from larp_bot.domain.models import (
     EventStatus,
     OrderedRegistrationCommand,
     Platform,
+    PrivilegedRole,
     Registration,
     TelegramUser,
     User,
@@ -104,15 +105,23 @@ class MemoryUserRepository:
             user.larp_experience = True
             user.updated_at = datetime.now(UTC)
 
-    async def grant_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+    async def set_privileged_role(
+        self,
+        platform: Platform,
+        user_id: int,
+        role: PrivilegedRole,
+        operation_id: str,
+    ) -> None:
         user = self.rows[(platform, user_id)]
-        if not user.is_gamemaster:
+        if user.effective_privileged_role is not role or user.gamemaster_grant_operation_id != operation_id:
+            user.privileged_role = role
             user.is_gamemaster = True
             user.gamemaster_grant_operation_id = operation_id
 
-    async def revoke_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+    async def clear_privileged_role(self, platform: Platform, user_id: int, operation_id: str) -> None:
         user = self.rows[(platform, user_id)]
-        if user.is_gamemaster:
+        if user.effective_privileged_role is not None:
+            user.privileged_role = None
             user.is_gamemaster = False
             user.gamemaster_grant_operation_id = operation_id
 

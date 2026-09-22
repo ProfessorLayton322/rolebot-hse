@@ -20,6 +20,7 @@ from larp_bot.domain.models import (
     EventStatus,
     PassDetails,
     Platform,
+    PrivilegedRole,
     Registration,
     TelegramUser,
     User,
@@ -214,7 +215,7 @@ class YdbUserRepository:
     COMMON_COLUMNS = """
         full_name, nickname, crossplay, larp_experience, needs_pass, pass_details_json,
         dialog_state, dialog_context_json, last_update_id, last_update_at,
-        last_delivery_operation_id, last_bot_buttons_json, is_gamemaster,
+        last_delivery_operation_id, last_bot_buttons_json, is_gamemaster, privileged_role,
         gamemaster_grant_operation_id, created_at, updated_at
     """
 
@@ -260,6 +261,7 @@ class YdbUserRepository:
             "last_delivery_operation_id": row.get("last_delivery_operation_id"),
             "last_bot_buttons": _buttons(row.get("last_bot_buttons_json")),
             "is_gamemaster": row.get("is_gamemaster") or False,
+            "privileged_role": row.get("privileged_role"),
             "gamemaster_grant_operation_id": row.get("gamemaster_grant_operation_id"),
             "created_at": _dt(row["created_at"]),
             "updated_at": _dt(row["updated_at"]),
@@ -493,31 +495,49 @@ class YdbUserRepository:
             },
         )
 
-    async def grant_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+    async def set_privileged_role(
+        self,
+        platform: Platform,
+        user_id: int,
+        role: PrivilegedRole,
+        operation_id: str,
+    ) -> None:
         table, id_column, _ = self._location(platform)
         await self.db.query(
             f"""
             DECLARE $user_id AS Uint64;
+            DECLARE $role AS Utf8;
             DECLARE $operation_id AS Utf8;
             UPDATE `{table}`
-            SET is_gamemaster = TRUE, gamemaster_grant_operation_id = $operation_id
+            SET is_gamemaster = TRUE,
+                privileged_role = $role,
+                gamemaster_grant_operation_id = $operation_id
             WHERE {id_column} = $user_id
-              AND (is_gamemaster IS NULL OR is_gamemaster = FALSE);
+              AND (
+                privileged_role IS NULL
+                OR privileged_role != $role
+                OR gamemaster_grant_operation_id IS NULL
+                OR gamemaster_grant_operation_id != $operation_id
+              );
             """,
-            {"$user_id": user_id, "$operation_id": operation_id},
+            {"$user_id": user_id, "$role": role.value, "$operation_id": operation_id},
         )
 
-    async def revoke_gamemaster(self, platform: Platform, user_id: int, operation_id: str) -> None:
+    async def clear_privileged_role(self, platform: Platform, user_id: int, operation_id: str) -> None:
         table, id_column, _ = self._location(platform)
         await self.db.query(
             f"""
             DECLARE $user_id AS Uint64;
+            DECLARE $role AS Optional<Utf8>;
             DECLARE $operation_id AS Utf8;
             UPDATE `{table}`
-            SET is_gamemaster = FALSE, gamemaster_grant_operation_id = $operation_id
-            WHERE {id_column} = $user_id AND is_gamemaster = TRUE;
+            SET is_gamemaster = FALSE,
+                privileged_role = $role,
+                gamemaster_grant_operation_id = $operation_id
+            WHERE {id_column} = $user_id
+              AND (is_gamemaster = TRUE OR privileged_role IS NOT NULL);
             """,
-            {"$user_id": user_id, "$operation_id": operation_id},
+            {"$user_id": user_id, "$role": None, "$operation_id": operation_id},
         )
 
     async def claim_delivery(

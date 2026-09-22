@@ -39,6 +39,7 @@ locals {
     { name = "last_delivery_operation_id", type = "Utf8", not_null = false },
     { name = "last_bot_buttons_json", type = "Utf8", not_null = false },
     { name = "is_gamemaster", type = "Bool", not_null = false },
+    { name = "privileged_role", type = "Utf8", not_null = false },
     { name = "gamemaster_grant_operation_id", type = "Utf8", not_null = false },
     { name = "created_at", type = "Timestamp", not_null = true },
     { name = "updated_at", type = "Timestamp", not_null = true },

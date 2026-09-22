@@ -131,6 +131,27 @@ class Platform(StrEnum):
     SYSTEM = "system"
 
 
+class PrivilegedRole(StrEnum):
+    """Ordered global bot roles, using the established internal role names."""
+
+    GAMEMASTER = "gamemaster"
+    GAMEMASTER_VIEWER = "gamemaster_viewer"
+    PASS_MANAGER = "pass_manager"
+    ADMIN = "admin"
+
+    @property
+    def level(self) -> int:
+        return {
+            PrivilegedRole.GAMEMASTER: 1,
+            PrivilegedRole.GAMEMASTER_VIEWER: 2,
+            PrivilegedRole.PASS_MANAGER: 3,
+            PrivilegedRole.ADMIN: 4,
+        }[self]
+
+    def includes(self, required: PrivilegedRole) -> bool:
+        return self.level >= required.level
+
+
 class UnreachableRecipient(RuntimeError):
     """One recipient can never receive bot messages on their platform.
 
@@ -371,7 +392,10 @@ class UserBase(StrictModel):
     last_update_at: datetime | None = None
     last_delivery_operation_id: str | None = None
     last_bot_buttons: list[Button] = Field(default_factory=list)
+    # ``is_gamemaster`` predates the role hierarchy. Keep it as a migration
+    # fallback until every production row has received ``privileged_role``.
     is_gamemaster: bool = False
+    privileged_role: PrivilegedRole | None = None
     gamemaster_grant_operation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -386,6 +410,16 @@ class UserBase(StrictModel):
     def common_profile_complete(self) -> bool:
         basics = self.full_name is not None and self.crossplay is not None and self.needs_pass is not None
         return basics and (not self.needs_pass or self.pass_details is not None)
+
+    @property
+    def effective_privileged_role(self) -> PrivilegedRole | None:
+        if self.privileged_role is not None:
+            return self.privileged_role
+        return PrivilegedRole.GAMEMASTER if self.is_gamemaster else None
+
+    def has_privileged_role(self, required: PrivilegedRole) -> bool:
+        role = self.effective_privileged_role
+        return role is not None and role.includes(required)
 
 
 class TelegramUser(UserBase):

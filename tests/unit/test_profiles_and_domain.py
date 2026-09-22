@@ -12,6 +12,7 @@ from larp_bot.domain.models import (
     EventStatus,
     PassDetails,
     PlayerAmountPayload,
+    PrivilegedRole,
     Registration,
     TelegramUser,
     VkUser,
@@ -24,6 +25,20 @@ from larp_bot.domain.models import (
     parse_game_date,
     surname_and_name,
 )
+
+
+def test_privileged_roles_form_a_strict_hierarchy() -> None:
+    roles = [
+        PrivilegedRole.GAMEMASTER,
+        PrivilegedRole.GAMEMASTER_VIEWER,
+        PrivilegedRole.PASS_MANAGER,
+        PrivilegedRole.ADMIN,
+    ]
+
+    assert [role.level for role in roles] == [1, 2, 3, 4]
+    for index, role in enumerate(roles):
+        assert all(role.includes(required) for required in roles[: index + 1])
+        assert all(not role.includes(required) for required in roles[index + 1 :])
 
 
 def test_nickname_is_optional_normalized_public_profile_data() -> None:

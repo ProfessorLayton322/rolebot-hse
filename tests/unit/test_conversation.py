@@ -49,6 +49,8 @@ from larp_bot.application.conversation import (
     GAMEMASTER_NOTIFICATION,
     GAMEMASTER_REVOKED_NOTIFICATION,
     GRANT_GAMEMASTER,
+    GRANT_GAMEMASTER_VIEWER,
+    GRANT_PASS_MANAGER,
     INACTIVE_GAME_RESPONSE,
     INVALID_INPUT_RESPONSE,
     LATIN_FULL_NAME_PROMPT,
@@ -119,6 +121,7 @@ from larp_bot.domain.models import (
     PassDetails,
     Platform,
     PlayerAmountPayload,
+    PrivilegedRole,
     ProfileSyncPayload,
     Registration,
     TelegramUser,
@@ -178,6 +181,7 @@ async def engine_setup(
     *additional_events: Event,
     admin: bool = False,
     gamemaster: bool = False,
+    privileged_role: PrivilegedRole | None = None,
     tg_admin_ids: set[int] | None = None,
     vk_admin_ids: set[int] | None = None,
     vk_profile_ids: dict[str, int] | None = None,
@@ -196,6 +200,8 @@ async def engine_setup(
             crossplay=True,
             larp_experience=True,
             needs_pass=False,
+            is_gamemaster=privileged_role is not None,
+            privileged_role=privileged_role,
         )
     )
     events = MemoryEventRepository([event, *additional_events])
@@ -1624,6 +1630,27 @@ async def test_profile_shows_persisted_moderator_status(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "label"),
+    [
+        (PrivilegedRole.GAMEMASTER_VIEWER, "Модератор-наблюдатель"),
+        (PrivilegedRole.PASS_MANAGER, "Менеджер пропусков"),
+    ],
+)
+async def test_profile_shows_higher_privileged_role(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    role: PrivilegedRole,
+    label: str,
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, privileged_role=role)
+
+    shown = await engine.handle(inbound(1, PROFILE))
+
+    assert f"Статус: {label}" in shown.text
+
+
+@pytest.mark.asyncio
 async def test_completed_profile_display_and_edit_menu_include_pass_fields(
     disk_store: MemoryDiskStore,
     event: Event,
@@ -2054,6 +2081,70 @@ async def test_gamemaster_has_privileged_interface_but_cannot_mutate_an_unled_ga
     assert removal_denied.text == "Только мастера этой игры могут изменять её данные."
     profiles_denied = await engine.handle(inbound(9, f"ag:profiles:{event.event_id}", callback=True))
     assert profiles_denied.text == "Только мастера этой игры могут изменять её данные."
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [PrivilegedRole.GAMEMASTER_VIEWER, PrivilegedRole.PASS_MANAGER])
+async def test_viewer_roles_can_inspect_but_not_mutate_an_unled_game(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    role: PrivilegedRole,
+) -> None:
+    event = event.model_copy(
+        update={
+            "public_table_resource_path": f"disk:/larp-bot/events/{event.event_id}-public.xlsx",
+            "public_table_public_url": "https://disk.example/public-table",
+            "pass_table_resource_path": f"disk:/larp-bot/passes/{event.event_id}.xlsx",
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    engine, users, publisher, registrations = await engine_setup(disk_store, event, privileged_role=role)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@registered_player",
+            full_name="Петров Пётр",
+            vk_url="https://vk.com/id2",
+            crossplay=False,
+            needs_pass=False,
+        )
+    )
+    await registrations.import_missing(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, 2, event.event_id),
+                display_name="Петров Пётр",
+                wish_play="Без пожеланий",
+            )
+        ]
+    )
+
+    management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
+    labels = {button.label for button in management.buttons}
+    assert {LIST_WAITING_PLAYERS, EVENT_TABLES, LIST_PLAYER_PROFILES, LIST_EVENT_LEADERS} <= labels
+    assert CHANGE_STATUS not in labels
+    assert REMOVE_PLAYER not in labels
+
+    tables = await engine.handle(inbound(2, f"ag:tables:{event.event_id}", callback=True))
+    assert "https://disk.example/public-table" in tables.text
+    assert "https://disk.example/pass-table" in tables.text
+
+    await engine.handle(inbound(3, f"ag:manage:{event.event_id}", callback=True))
+    profiles = await engine.handle(inbound(4, f"ag:profiles:{event.event_id}", callback=True))
+    profile_button = next(button for button in profiles.buttons if button.value.startswith("admin:profiles:pick:"))
+    profile = await engine.handle(inbound(5, profile_button.value, callback=True))
+    assert "Петров Пётр" in profile.text
+
+    await engine.handle(inbound(6, "/start"))
+    await engine.handle(inbound(7, f"ag:manage:{event.event_id}", callback=True))
+    masters = await engine.handle(inbound(8, f"master:list:{event.event_id}", callback=True))
+    assert "Мастера игры" in masters.text or "мастеров" in masters.text
+
+    await engine.handle(inbound(9, "/start"))
+    denied = await engine.handle(inbound(10, f"ag:remove:{event.event_id}", callback=True))
+    assert denied.text == "Только мастера этой игры могут изменять её данные."
     assert publisher.commands == []
 
 
@@ -2503,6 +2594,146 @@ async def test_admin_grants_telegram_gamemaster_by_profile_and_notifies_them(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("grant_button", "role", "role_label"),
+    [
+        (GRANT_GAMEMASTER_VIEWER, PrivilegedRole.GAMEMASTER_VIEWER, "Модератор-наблюдатель"),
+        (GRANT_PASS_MANAGER, PrivilegedRole.PASS_MANAGER, "Менеджер пропусков"),
+    ],
+)
+async def test_admin_assigns_higher_privileged_roles(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    grant_button: str,
+    role: PrivilegedRole,
+    role_label: str,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@target_player",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
+
+    role_menu = await engine.handle(inbound(1, MANAGE_MODERATORS))
+    assert grant_button in {button.value for button in role_menu.buttons}
+    platform = await engine.handle(inbound(2, grant_button, callback=True))
+    assert [button.label for button in platform.buttons[:2]] == ["Telegram", "VK"]
+    await engine.handle(inbound(3, "admin:gamemaster:telegram", callback=True))
+    granted = await engine.handle(inbound(4, "@target_player"))
+
+    target = await users.get(Platform.TELEGRAM, 2)
+    assert target is not None and target.privileged_role is role and target.is_gamemaster
+    assert granted.text == f"✅ Пользователю назначена роль «{role_label}» в Telegram."
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == [
+        (
+            Platform.TELEGRAM,
+            2,
+            f"privileged-role-grant:{role.value}:telegram:2:4",
+            f"Вам назначена роль «{role_label}»! 🎉",
+            (Button(label=ADMIN_MENU, value=ADMIN_MENU),),
+        )
+    ]
+
+    profile = await engine.handle(inbound(5, PROFILE, user_id=2, telegram_username="target_player"))
+    assert f"Статус: {role_label}" in profile.text
+
+
+@pytest.mark.asyncio
+async def test_admin_removes_a_higher_privileged_role(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@pass_manager",
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/anna",
+            crossplay=True,
+            needs_pass=False,
+            is_gamemaster=True,
+            privileged_role=PrivilegedRole.PASS_MANAGER,
+        )
+    )
+
+    removal = await engine.handle(inbound(1, REVOKE_GAMEMASTER))
+    target_button = next(button for button in removal.buttons if button.value == "mod:remove-pick:t:2")
+    warning = await engine.handle(inbound(2, target_button.value, callback=True))
+    assert "Менеджер пропусков" in warning.text
+    removed = await engine.handle(inbound(3, "mod:remove-confirm", callback=True))
+
+    target = await users.get(Platform.TELEGRAM, 2)
+    assert target is not None and target.effective_privileged_role is None and not target.is_gamemaster
+    assert removed.text == "✅ Назначенная роль снята."
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent == [
+        (
+            Platform.TELEGRAM,
+            2,
+            "privileged-role-revoke:pass_manager:telegram:2:3",
+            "С вас снята привилегированная роль.",
+            (),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_role_changes_apply_to_both_profiles_of_a_linked_user(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    await users.save(
+        TelegramUser(
+            tg_id=2,
+            telegram_handle="@linked_role",
+            linked_vk_id=22,
+            full_name="Петрова Анна",
+            vk_url="https://vk.com/id22",
+            crossplay=True,
+            needs_pass=False,
+        )
+    )
+    await users.save(
+        VkUser(
+            vk_id=22,
+            telegram_handle="@linked_role",
+            full_name="Петрова Анна",
+            crossplay=True,
+            needs_pass=False,
+        )
+    )
+
+    await engine.handle(inbound(1, GRANT_GAMEMASTER_VIEWER))
+    await engine.handle(inbound(2, "admin:gamemaster:telegram", callback=True))
+    await engine.handle(inbound(3, "@linked_role"))
+
+    telegram = await users.get(Platform.TELEGRAM, 2)
+    vk = await users.get(Platform.VK, 22)
+    assert telegram is not None and telegram.privileged_role is PrivilegedRole.GAMEMASTER_VIEWER
+    assert vk is not None and vk.privileged_role is PrivilegedRole.GAMEMASTER_VIEWER
+
+    removal = await engine.handle(inbound(4, REVOKE_GAMEMASTER))
+    target_button = next(button for button in removal.buttons if button.value == "mod:remove-pick:t:2")
+    await engine.handle(inbound(5, target_button.value, callback=True))
+    await engine.handle(inbound(6, "mod:remove-confirm", callback=True))
+
+    telegram = await users.get(Platform.TELEGRAM, 2)
+    vk = await users.get(Platform.VK, 22)
+    assert telegram is not None and telegram.effective_privileged_role is None
+    assert vk is not None and vk.effective_privileged_role is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("profile", ["@legacy_player", "[id42|@legacy_player]"])
 async def test_admin_grants_legacy_telegram_user_via_registration_history_and_backfills_handle(
     profile: str, disk_store: MemoryDiskStore, event: Event
@@ -2699,7 +2930,8 @@ async def test_admin_lists_and_removes_moderators_with_pagination_and_notificati
     profile_buttons = [button for button in first_page.buttons if button.value.startswith("mod:view:")]
     assert len(profile_buttons) == PAGE_SIZE
     assert any(button.value == f"mod:list-page:{PAGE_SIZE}" for button in first_page.buttons)
-    profile = await engine.handle(inbound(4, profile_buttons[0].value, callback=True))
+    moderator_button = next(button for button in profile_buttons if button.value == "mod:view:t:2")
+    profile = await engine.handle(inbound(4, moderator_button.value, callback=True))
     assert "Модератор" in profile.text
     assert "https://t.me/moderator_" in profile.text
     assert "https://vk.com/id" in profile.text
@@ -3031,7 +3263,7 @@ async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_fir
     second_page = await engine.handle(inbound(6, "create:master-page:5", callback=True))
 
     assert first_page.text == (
-        "Выберите модератора или администратора, который станет первым мастером игры «Новая игра» (15.11.26):"
+        "Выберите привилегированного пользователя, который станет первым мастером игры «Новая игра» (15.11.26):"
     )
     assert [button.value for button in first_page.buttons] == [
         *(f"create:master:t:{target_id}" for target_id in range(2, 7)),
@@ -3226,7 +3458,7 @@ async def test_admin_creation_master_picker_returns_to_question_and_rechecks_adm
     question = await engine.handle(inbound(6, "create:master-choice", callback=True))
 
     assert empty.text == (
-        "Нет других модераторов или администраторов, которых можно выбрать мастером. "
+        "Нет других привилегированных пользователей, которых можно выбрать мастером. "
         "Можно ввести Telegram- или VK-профиль напрямую."
     )
     assert empty.buttons == [
