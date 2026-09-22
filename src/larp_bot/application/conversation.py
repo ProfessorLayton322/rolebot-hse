@@ -433,7 +433,12 @@ def _event_buttons(events: list[Event], flow: str) -> list[Button]:
 def _signup_game_text(event: Event, platform: Platform) -> str:
     game_date = format_game_date(event.game_date) if event.game_date is not None else "не указана"
     post_url = event.telegram_post_url if platform is Platform.TELEGRAM else event.vk_post_url
-    return f"Игра: «{event.name}»\nДата: {game_date}\nПост об игре: {post_url or 'ссылка пока не добавлена'}"
+    return (
+        f"Это меню записи на игру «{event.name}» ({game_date}).\n\n"
+        f"Игра: «{event.name}»\n"
+        f"Дата: {game_date}\n"
+        f"Пост об игре: {post_url or 'ссылка пока не добавлена'}"
+    )
 
 
 def _my_game_text(
@@ -468,7 +473,6 @@ def co_player_wish_prompt(*, skip_value: str, same_day_warning_date: date | None
             "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
             "Укажите каждого как «Фамилия Имя», через запятую. "
             "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
-            f"Ответ должен быть не длиннее {MAX_CO_PLAYER_WISH_LENGTH} символов. "
             "Если пожеланий нет, нажмите «Пропустить»."
         ),
         buttons=[Button(label=SKIP, value=skip_value), dialog_exit_button()],
@@ -1671,7 +1675,7 @@ class ConversationEngine:
                 f"Игра: {event_reference(event.name, event.game_date)}\n"
                 f"Статус: {_attendance_status_text(registration.attendance_status)}\n\n"
                 f"Текущие пожелания: {current}\n\n"
-                f"Отправьте пожелания по персонажу для этой игры — до {MAX_CHARACTER_WISH_LENGTH} символов.\n\n"
+                "Отправьте пожелания по персонажу для этой игры.\n\n"
                 "После отправки ответа ваше участие будет подтверждено."
             ),
             buttons=[
@@ -1947,7 +1951,7 @@ class ConversationEngine:
                     f"Игра: {event_reference(event.name, event.game_date)}\n"
                     f"Статус: {_attendance_status_text(registration.attendance_status)}\n\n"
                     f"Текущие пожелания:\n{registration.character_wish}\n\n"
-                    f"Отправьте новый вариант — до {MAX_CHARACTER_WISH_LENGTH} символов."
+                    "Отправьте новый вариант."
                 ),
                 buttons=[Button(label=NO_WISHES, value=NO_WISHES), dialog_exit_button()],
             )
