@@ -249,6 +249,10 @@ class RegistrationCatalog:
         self,
         event: Event,
         registrations: list[Registration] | None = None,
+        *,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> Event:
         """Attach the contact-free workbook to an event created before the dual-table rollout."""
 
@@ -262,7 +266,27 @@ class RegistrationCatalog:
             disk_path,
             rows,
             player_amount=event.player_amount,
+            callback={
+                "kind": "event_tables",
+                "event_id": event.event_id,
+                "resource_path": disk_path,
+                "component": "public",
+                **(
+                    {
+                        "requester": {
+                            "platform": requester.platform.value,
+                            "user_id": reply_user_id or requester.platform_user_id,
+                            "profile_user_id": requester.platform_user_id,
+                        }
+                    }
+                    if requester is not None
+                    else {}
+                ),
+            },
+            before_invoke=before_invoke,
         )
+        if public_url is None:
+            return event
         try:
             attached = await self.events.set_public_table(event.event_id, disk_path, public_url)
         except Exception:
@@ -903,14 +927,14 @@ class RegistrationService:
 
 @dataclass(frozen=True)
 class PassTableExport:
-    public_url: str
+    public_url: str | None
     created: bool
     row_count: int | None
 
 
 @dataclass(frozen=True)
 class AchievementExport:
-    public_url: str
+    public_url: str | None
     created: bool
 
 
@@ -936,6 +960,10 @@ class EventAdministrationService:
         self.users = users
         self.participant_secret = participant_secret
 
+    @property
+    def deferred_uploads(self) -> bool:
+        return self.showcase.deferred_uploads
+
     async def create_event(
         self,
         name: str,
@@ -943,7 +971,13 @@ class EventAdministrationService:
         player_amount: int,
         leaders: Sequence[BotIdentity],
         registration_open_at: datetime | None = None,
-    ) -> Event:
+        *,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
+        master_label: str | None = None,
+        masters_pending: bool = False,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> Event | None:
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Название игры не может быть пустым")
@@ -960,50 +994,78 @@ class EventAdministrationService:
         event_id = str(uuid4())
         master_path, public_path = event_table_paths(event_id, clean_name)
         pass_path = f"disk:/larp-bot/passes/{event_id}.xlsx"
-        created_event_paths: list[str] = []
-        pass_table_created = False
-        try:
-            master_url = await self.showcase.create_event_workbook(master_path, player_amount=player_amount)
-            created_event_paths.append(master_path)
-            public_url = await self.showcase.create_public_event_workbook(public_path, player_amount=player_amount)
-            created_event_paths.append(public_path)
-            leader_keys = {(leader.platform, leader.platform_user_id) for leader in leaders}
-            leader_pass_profiles = []
-            for user in await self.users.list_all():
-                identity = (
-                    (Platform.TELEGRAM, user.tg_id) if isinstance(user, TelegramUser) else (Platform.VK, user.vk_id)
-                )
-                if identity in leader_keys and user.needs_pass is True and user.pass_details is not None:
-                    leader_pass_profiles.append(user.pass_details)
-            pass_url = await self.showcase.create_pass_table(pass_path, leader_pass_profiles)
-            pass_table_created = True
-            event = Event(
-                event_id=event_id,
-                name=clean_name,
-                game_date=game_date,
-                player_amount=player_amount,
-                disk_resource_path=master_path,
-                public_registration_url=master_url,
-                public_table_resource_path=public_path,
-                public_table_public_url=public_url,
-                pass_table_resource_path=pass_path,
-                pass_table_public_url=pass_url,
-                registration_open_at=registration_open_at,
-                signup_token=signup_token,
-            )
-            await self.events.create(event, leaders)
-        except Exception:
-            await asyncio.gather(
-                *(self.showcase.delete_event_workbook(path) for path in created_event_paths),
-                *([self.showcase.delete_pass_table(pass_path)] if pass_table_created else []),
-                return_exceptions=True,
-            )
-            raise
+        leader_keys = {(leader.platform, leader.platform_user_id) for leader in leaders}
+        leader_pass_profiles = []
+        for user in await self.users.list_all():
+            identity = (Platform.TELEGRAM, user.tg_id) if isinstance(user, TelegramUser) else (Platform.VK, user.vk_id)
+            if identity in leader_keys and user.needs_pass is True and user.pass_details is not None:
+                leader_pass_profiles.append(user.pass_details)
+        callback: dict[str, object] = {
+            "kind": "event_created",
+            "event": {
+                "event_id": event_id,
+                "name": clean_name,
+                "game_date": game_date.isoformat(),
+                "player_amount": player_amount,
+                "disk_resource_path": master_path,
+                "public_table_resource_path": public_path,
+                "pass_table_resource_path": pass_path,
+                "registration_open_at": registration_open_at.isoformat() if registration_open_at else None,
+                "signup_token": signup_token,
+            },
+            "leaders": [leader.model_dump(mode="json") for leader in leaders],
+            "master_label": master_label,
+            "masters_pending": masters_pending,
+        }
+        if requester is not None:
+            callback["requester"] = {
+                "platform": requester.platform.value,
+                "user_id": reply_user_id or requester.platform_user_id,
+                "profile_user_id": requester.platform_user_id,
+            }
+        urls = await self.showcase.create_event_bundle(
+            master_path,
+            public_path,
+            pass_path,
+            leader_pass_profiles,
+            player_amount=player_amount,
+            callback=callback,
+            before_invoke=before_invoke,
+        )
+        if urls is None:
+            return None
+        event = Event(
+            event_id=event_id,
+            name=clean_name,
+            game_date=game_date,
+            player_amount=player_amount,
+            disk_resource_path=master_path,
+            public_registration_url=urls["master"],
+            public_table_resource_path=public_path,
+            public_table_public_url=urls["public"],
+            pass_table_resource_path=pass_path,
+            pass_table_public_url=urls["pass"],
+            registration_open_at=registration_open_at,
+            signup_token=signup_token,
+        )
+        await self.events.create(event, leaders)
         return event
 
-    async def ensure_event_tables(self, event: Event) -> Event:
+    async def ensure_event_tables(
+        self,
+        event: Event,
+        *,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> Event:
         event = await self.catalog.ensure_migrated(event)
-        return await self.catalog.ensure_public_table(event)
+        return await self.catalog.ensure_public_table(
+            event,
+            requester=requester,
+            reply_user_id=reply_user_id,
+            before_invoke=before_invoke,
+        )
 
     async def _registration_page(
         self,
@@ -1154,7 +1216,14 @@ class EventAdministrationService:
             raise EventNotFound("Игра не найдена")
         return await self.catalog.get(event, participant_key)
 
-    async def create_pass_table(self, event_id: str) -> PassTableExport:
+    async def create_pass_table(
+        self,
+        event_id: str,
+        *,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> PassTableExport:
         event = await self.events.get(event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
@@ -1172,7 +1241,30 @@ class EventAdministrationService:
         )
 
         disk_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
-        public_url = await self.showcase.create_pass_table(disk_path, profiles)
+        public_url = await self.showcase.create_pass_table(
+            disk_path,
+            profiles,
+            callback={
+                "kind": "event_tables",
+                "event_id": event.event_id,
+                "resource_path": disk_path,
+                "component": "pass",
+                **(
+                    {
+                        "requester": {
+                            "platform": requester.platform.value,
+                            "user_id": reply_user_id or requester.platform_user_id,
+                            "profile_user_id": requester.platform_user_id,
+                        }
+                    }
+                    if requester is not None
+                    else {}
+                ),
+            },
+            before_invoke=before_invoke,
+        )
+        if public_url is None:
+            return PassTableExport(None, created=True, row_count=len(profiles))
         try:
             if not await self.events.set_pass_table(event.event_id, disk_path, public_url):
                 raise EventNotFound("Игра была удалена во время создания таблицы")
@@ -1197,7 +1289,14 @@ class EventAdministrationService:
         )
         await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
 
-    async def export_achievements(self, event_id: str) -> AchievementExport:
+    async def export_achievements(
+        self,
+        event_id: str,
+        *,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> AchievementExport:
         event = await self.events.get(event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
@@ -1205,7 +1304,29 @@ class EventAdministrationService:
             return AchievementExport(event.achievement_public_url, created=False)
 
         disk_path = f"disk:/larp-bot/achievements/{event.event_id}.pptx"
-        public_url = await self.showcase.create_achievement_presentation(disk_path, event.name)
+        public_url = await self.showcase.create_achievement_presentation(
+            disk_path,
+            event.name,
+            callback={
+                "kind": "achievement",
+                "event_id": event.event_id,
+                "resource_path": disk_path,
+                **(
+                    {
+                        "requester": {
+                            "platform": requester.platform.value,
+                            "user_id": reply_user_id or requester.platform_user_id,
+                            "profile_user_id": requester.platform_user_id,
+                        }
+                    }
+                    if requester is not None
+                    else {}
+                ),
+            },
+            before_invoke=before_invoke,
+        )
+        if public_url is None:
+            return AchievementExport(None, created=True)
         try:
             if not await self.events.set_achievement(event.event_id, disk_path, public_url):
                 current = await self.events.get(event.event_id)

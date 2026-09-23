@@ -39,8 +39,8 @@ validate_numeric_ids "VK_ADMIN_IDS" "${VK_ADMIN_IDS}"
 validate_numeric_ids "TG_GAMEMASTER_IDS" "${TG_GAMEMASTER_IDS}"
 validate_numeric_ids "VK_GAMEMASTER_IDS" "${VK_GAMEMASTER_IDS}"
 if ! printf '%s' "${YANDEX_SERVICE_ACCOUNT_IDS}" | jq -e \
-  'type == "array" and length == 2 and all(.[]; type == "string" and length > 0)' >/dev/null; then
-  echo "YANDEX_SERVICE_ACCOUNT_IDS must contain the two runtime service-account IDs" >&2
+  'type == "array" and length == 3 and all(.[]; type == "string" and length > 0)' >/dev/null; then
+  echo "YANDEX_SERVICE_ACCOUNT_IDS must contain the three runtime service-account IDs" >&2
   exit 1
 fi
 

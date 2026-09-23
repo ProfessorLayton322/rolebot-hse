@@ -15,7 +15,12 @@ python3 -m pip install \
   --requirement "${repo_dir}/requirements.txt" \
   --target "${package_dir}"
 cp -R "${repo_dir}/src/larp_bot" "${package_dir}/larp_bot"
-cp "${repo_dir}/main.py" "${repo_dir}/ordered_worker.py" "${repo_dir}/registration_notifier.py" "${package_dir}/"
+cp \
+  "${repo_dir}/main.py" \
+  "${repo_dir}/ordered_worker.py" \
+  "${repo_dir}/registration_notifier.py" \
+  "${repo_dir}/upload_completion.py" \
+  "${package_dir}/"
 
 find "${package_dir}" -type d -name '__pycache__' -prune -exec rm -rf '{}' +
 find "${package_dir}" -type f -exec touch -t 198001010000 '{}' +

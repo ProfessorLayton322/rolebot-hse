@@ -23,6 +23,12 @@ variable "function_zip_path" {
   default     = "../../dist/function-package.zip"
 }
 
+variable "disk_uploader_zip_path" {
+  type        = string
+  description = "Deterministic Go uploader ZIP produced by scripts/build_disk_uploader.sh."
+  default     = "../../dist/disk-uploader.zip"
+}
+
 variable "function_package_bucket" {
   type        = string
   description = "Existing private, versioned Object Storage bucket used for Terraform state and the Function package."

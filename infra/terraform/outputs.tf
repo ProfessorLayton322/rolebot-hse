@@ -19,7 +19,11 @@ output "telegram_egress_url" {
 }
 
 output "runtime_service_account_ids" {
-  value       = jsonencode([yandex_iam_service_account.gateway.id, yandex_iam_service_account.worker.id])
+  value = jsonencode([
+    yandex_iam_service_account.gateway.id,
+    yandex_iam_service_account.worker.id,
+    yandex_iam_service_account.disk_uploader.id,
+  ])
   description = "Allowed OIDC subjects for the Cloudflare runtime config endpoint."
 }
 

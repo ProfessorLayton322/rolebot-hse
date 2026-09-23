@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from datetime import date, datetime
 from typing import Protocol
 
@@ -307,6 +307,8 @@ class RegistrationRepository(Protocol):
 
 
 class RegistrationShowcaseRepository(Protocol):
+    deferred_uploads: bool
+
     async def read_legacy_registrations(self, event: Event) -> Sequence[Registration]: ...
 
     async def replace(self, event: Event, registrations: Sequence[Registration]) -> None: ...
@@ -317,7 +319,9 @@ class RegistrationShowcaseRepository(Protocol):
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
-    ) -> str: ...
+        callback: dict[str, object] | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> str | None: ...
 
     async def create_public_event_workbook(
         self,
@@ -325,17 +329,45 @@ class RegistrationShowcaseRepository(Protocol):
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
-    ) -> str: ...
+        callback: dict[str, object] | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> str | None: ...
+
+    async def create_event_bundle(
+        self,
+        master_path: str,
+        public_path: str,
+        pass_path: str,
+        pass_profiles: Sequence[PassDetails],
+        *,
+        player_amount: int,
+        callback: dict[str, object],
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict[str, str] | None: ...
 
     async def delete_event_workbook(self, disk_path: str) -> None: ...
 
-    async def create_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> str: ...
+    async def create_pass_table(
+        self,
+        disk_path: str,
+        profiles: Sequence[PassDetails],
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> str | None: ...
 
     async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None: ...
 
     async def delete_pass_table(self, disk_path: str) -> None: ...
 
-    async def create_achievement_presentation(self, disk_path: str, game_name: str) -> str: ...
+    async def create_achievement_presentation(
+        self,
+        disk_path: str,
+        game_name: str,
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> str | None: ...
 
     async def delete_achievement_presentation(self, disk_path: str) -> None: ...
 

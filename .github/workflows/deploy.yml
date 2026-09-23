@@ -39,6 +39,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: functions/disk_uploader/go.mod
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.15.9"
@@ -53,6 +57,7 @@ jobs:
           pytest
           python scripts/check_storage_constraint.py
           bash scripts/check_telegram_isolation.sh
+          (cd functions/disk_uploader && go test ./... && go vet ./...)
       - name: Fetch achievement presentation template
         run: |
           python scripts/fetch_achievement_template.py \
@@ -60,7 +65,9 @@ jobs:
             --key "larp-bot/roleclub_achievement_basic.pptx" \
             --output "src/larp_bot/assets/roleclub_achievement_basic.pptx"
       - name: Build deterministic Function package
-        run: bash scripts/build_function.sh
+        run: |
+          bash scripts/build_function.sh
+          bash scripts/build_disk_uploader.sh
       # One command per line and one step per Worker. A previous `&&` chain
       # followed by another line hid a failing `npm test`: Bash `-e` ignores a
       # non-final command of an `&&` list, the step took its status from the

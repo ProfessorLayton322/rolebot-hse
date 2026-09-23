@@ -18,6 +18,7 @@ async def _run(context: Any) -> dict[str, int]:
         _container = await build_container(iam_token=iam_token)
     elif iam_token is not None:
         _container.config.set_iam_token(iam_token)
+        _container.disk_uploader.set_iam_token(iam_token)
     return {"processed": await _container.worker.run()}
 
 

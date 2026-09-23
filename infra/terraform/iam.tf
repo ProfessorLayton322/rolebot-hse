@@ -10,6 +10,12 @@ resource "yandex_iam_service_account" "worker" {
   folder_id   = var.yandex_folder_id
 }
 
+resource "yandex_iam_service_account" "disk_uploader" {
+  name        = "${var.project_name}-disk-uploader"
+  description = "Runtime identity for the low-memory Yandex Disk uploader"
+  folder_id   = var.yandex_folder_id
+}
+
 resource "yandex_iam_service_account" "trigger" {
   name        = "${var.project_name}-kick-trigger"
   description = "Invokes background Functions and reads the standard kick queue"
@@ -51,13 +57,29 @@ locals {
 # Cloudflare Worker verifies the signature, audience, expiry, and subject.
 resource "yandex_iam_service_account_iam_member" "runtime_self_token_creator" {
   for_each = {
-    gateway = yandex_iam_service_account.gateway.id
-    worker  = yandex_iam_service_account.worker.id
+    gateway  = yandex_iam_service_account.gateway.id
+    worker   = yandex_iam_service_account.worker.id
+    uploader = yandex_iam_service_account.disk_uploader.id
   }
 
   service_account_id = each.value
   role               = "iam.serviceAccounts.tokenCreator"
   member             = "serviceAccount:${each.value}"
+}
+
+resource "yandex_storage_bucket_iam_binding" "disk_stagers" {
+  bucket = yandex_storage_bucket.deployment.bucket
+  role   = "storage.uploader"
+  members = [
+    "serviceAccount:${yandex_iam_service_account.gateway.id}",
+    "serviceAccount:${yandex_iam_service_account.worker.id}",
+  ]
+}
+
+resource "yandex_storage_bucket_iam_binding" "disk_uploader" {
+  bucket  = yandex_storage_bucket.deployment.bucket
+  role    = "storage.editor"
+  members = ["serviceAccount:${yandex_iam_service_account.disk_uploader.id}"]
 }
 
 resource "yandex_resourcemanager_folder_iam_member" "runtime" {
@@ -93,6 +115,36 @@ resource "yandex_function_iam_member" "worker_from_trigger" {
 
 resource "yandex_function_iam_member" "registration_notifier_from_trigger" {
   function_id = yandex_function.registration_notifier.id
+  role        = "functions.functionInvoker"
+  member      = "serviceAccount:${yandex_iam_service_account.trigger.id}"
+}
+
+resource "yandex_function_iam_member" "disk_uploader_from_gateway" {
+  function_id = yandex_function.disk_uploader.id
+  role        = "functions.functionInvoker"
+  member      = "serviceAccount:${yandex_iam_service_account.gateway.id}"
+}
+
+resource "yandex_function_iam_member" "disk_uploader_from_worker" {
+  function_id = yandex_function.disk_uploader.id
+  role        = "functions.functionInvoker"
+  member      = "serviceAccount:${yandex_iam_service_account.worker.id}"
+}
+
+resource "yandex_function_iam_member" "disk_uploader_from_trigger" {
+  function_id = yandex_function.disk_uploader.id
+  role        = "functions.functionInvoker"
+  member      = "serviceAccount:${yandex_iam_service_account.trigger.id}"
+}
+
+resource "yandex_function_iam_member" "upload_completion_from_uploader" {
+  function_id = yandex_function.upload_completion.id
+  role        = "functions.functionInvoker"
+  member      = "serviceAccount:${yandex_iam_service_account.disk_uploader.id}"
+}
+
+resource "yandex_function_iam_member" "upload_completion_from_trigger" {
+  function_id = yandex_function.upload_completion.id
   role        = "functions.functionInvoker"
   member      = "serviceAccount:${yandex_iam_service_account.trigger.id}"
 }

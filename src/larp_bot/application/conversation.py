@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from secrets import token_urlsafe
 from uuid import NAMESPACE_URL, uuid5
@@ -2391,6 +2392,45 @@ class ConversationEngine:
             actor.last_delivery_operation_id = request_id
             actor.last_bot_buttons = buttons.copy()
 
+    def _upload_pending_callback(
+        self,
+        user: User,
+        message: InboundMessage,
+        *,
+        text: str,
+        buttons: list[Button],
+        operation: str,
+    ) -> Callable[[], Awaitable[None]] | None:
+        if not self.administration.deferred_uploads:
+            return None
+        identity = self._identity(user)
+        request_id = (
+            f"upload-pending:{operation}:{identity.platform.value}:{identity.platform_user_id}:{message.update_id}"
+        )
+
+        async def send() -> None:
+            if user.last_delivery_operation_id == request_id:
+                return
+            if self.transport is None:
+                raise RuntimeError("deferred transport is not configured")
+            await self.transport.send(
+                platform=identity.platform,
+                user_id=message.chat_id or message.peer_id or identity.platform_user_id,
+                request_id=request_id,
+                text=text,
+                buttons=buttons,
+            )
+            await self.users.claim_delivery(
+                identity.platform,
+                identity.platform_user_id,
+                request_id,
+                buttons,
+            )
+            user.last_delivery_operation_id = request_id
+            user.last_bot_buttons = buttons.copy()
+
+        return send
+
     async def _is_event_leader(self, user: User, event_id: str) -> bool:
         identities, leaders = await asyncio.gather(
             global_identities(self.users, user),
@@ -2901,13 +2941,41 @@ class ConversationEngine:
             await self._clear(user)
             return BotResponse(text="Выбранный мастер больше не является привилегированным пользователем.")
         master_identity = None if master is None else self._identity(master)
+        requester = self._identity(user)
+        masters_pending = master_identity is None
+        master_label = (
+            self._person_label(master_identity, master)
+            if master_identity is not None and master_identity != requester
+            else None
+        )
+        pending_buttons = [Button(label=BACK, value=MANAGE_GAMES)]
+        before_invoke = self._upload_pending_callback(
+            user,
+            message,
+            text="⏳ Файлы игры создаются. Бот пришлёт ссылки, когда загрузка завершится.",
+            buttons=pending_buttons,
+            operation="event",
+        )
         event = await self.administration.create_event(
             str(context["event_name"]),
             game_date,
             int(context["player_amount"]),
             [] if master_identity is None else [master_identity],
             registration_open_at,
+            requester=requester,
+            reply_user_id=message.chat_id or message.peer_id or requester.platform_user_id,
+            master_label=master_label,
+            masters_pending=masters_pending,
+            before_invoke=before_invoke,
         )
+        if event is None:
+            await self._clear(user)
+            return BotResponse(
+                text="",
+                buttons=pending_buttons,
+                deferred=requester.platform is Platform.TELEGRAM,
+                silent=True,
+            )
         if master_identity is None:
             await self._clear(user)
             return await self._game_created_response(event, game_date, masters_pending=True)
@@ -5235,13 +5303,46 @@ class ConversationEngine:
             return self._player_management(event, can_manage=can_manage)
         if action == "tables":
             await self._clear(user)
+            pending_buttons = [game_management_button(event.event_id)]
+            before_invoke = self._upload_pending_callback(
+                user,
+                message,
+                text="⏳ Таблицы создаются. Бот пришлёт ссылки, когда загрузка завершится.",
+                buttons=pending_buttons,
+                operation=f"tables:{event.event_id}",
+            )
             if can_manage:
-                event = await self.administration.ensure_event_tables(event)
-                await self.administration.create_pass_table(event.event_id)
+                requester = self._identity(user)
+                reply_user_id = message.chat_id or message.peer_id or requester.platform_user_id
+                event = await self.administration.ensure_event_tables(
+                    event,
+                    requester=requester,
+                    reply_user_id=reply_user_id,
+                    before_invoke=before_invoke,
+                )
+                await self.administration.create_pass_table(
+                    event.event_id,
+                    requester=requester,
+                    reply_user_id=reply_user_id,
+                    before_invoke=before_invoke,
+                )
             refreshed = await self.events.get(event.event_id)
             if refreshed is None:
                 return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
             if refreshed.public_table_public_url is None or refreshed.pass_table_public_url is None:
+                if can_manage:
+                    if before_invoke is not None:
+                        return BotResponse(
+                            text="",
+                            buttons=pending_buttons,
+                            deferred=requester.platform is Platform.TELEGRAM,
+                            silent=True,
+                        )
+                    return BotResponse(
+                        text="⏳ Таблицы создаются. Бот пришлёт ссылки, когда загрузка завершится.",
+                        buttons=pending_buttons,
+                        deferred=True,
+                    )
                 return BotResponse(
                     text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
                     buttons=[game_management_button(event.event_id)],
@@ -5252,7 +5353,34 @@ class ConversationEngine:
             )
         if action == "achievements":
             await self._clear(user)
-            export = await self.administration.export_achievements(event.event_id)
+            requester = self._identity(user)
+            pending_buttons = [game_management_button(event.event_id)]
+            before_invoke = self._upload_pending_callback(
+                user,
+                message,
+                text="⏳ Ачивки создаются. Бот пришлёт ссылку, когда загрузка завершится.",
+                buttons=pending_buttons,
+                operation=f"achievement:{event.event_id}",
+            )
+            export = await self.administration.export_achievements(
+                event.event_id,
+                requester=requester,
+                reply_user_id=message.chat_id or message.peer_id or requester.platform_user_id,
+                before_invoke=before_invoke,
+            )
+            if export.public_url is None:
+                if before_invoke is not None:
+                    return BotResponse(
+                        text="",
+                        buttons=pending_buttons,
+                        deferred=requester.platform is Platform.TELEGRAM,
+                        silent=True,
+                    )
+                return BotResponse(
+                    text="⏳ Ачивки создаются. Бот пришлёт ссылку, когда загрузка завершится.",
+                    buttons=pending_buttons,
+                    deferred=True,
+                )
             return BotResponse(
                 text=(f"Ачивки игры {event_reference(event.name, event.game_date)}\n\n{export.public_url}"),
                 buttons=[game_management_button(event.event_id)],

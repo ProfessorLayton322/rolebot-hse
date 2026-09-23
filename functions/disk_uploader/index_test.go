@@ -1,0 +1,225 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestValidateJobRejectsObjectsOutsideItsStagingDirectory(t *testing.T) {
+	job := uploadJob{
+		SchemaVersion: 1,
+		JobID:         "12345678-1234-1234-1234-123456789abc",
+		Bucket:        "private-bucket",
+		Files: []uploadFile{{
+			Role:        "master",
+			ObjectKey:   "larp-bot/uploads/a-different-job/master.xlsx",
+			DiskPath:    "disk:/larp-bot/events/game.xlsx",
+			ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			SHA256:      strings.Repeat("a", 64),
+			Generation:  "00000000000000000001-job",
+			Publish:     true,
+		}},
+	}
+
+	if err := validateJob(&job); err == nil {
+		t.Fatal("validateJob accepted an object from another staging directory")
+	}
+}
+
+func TestProcessStreamsPublishesDeletesAndCallsCompletion(t *testing.T) {
+	content := []byte("workbook bytes")
+	digest := sha256.Sum256(content)
+	jobID := "12345678-1234-1234-1234-123456789abc"
+	objectKey := stagingPrefix + jobID + "/master.xlsx"
+	diskPath := "disk:/larp-bot/events/game.xlsx"
+	generation := "00000000000000000001-job"
+	published := false
+	deleted := false
+	lockReleased := false
+	var completionPayload completion
+
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/metadata":
+			if request.Header.Get("Metadata-Flavor") != "Google" {
+				t.Error("metadata request did not opt in to service-account metadata")
+			}
+			io.WriteString(writer, `{"access_token":"iam-token"}`)
+		case request.URL.Path == "/token":
+			io.WriteString(writer, `{"access_token":"identity-token"}`)
+		case request.URL.Path == "/config":
+			if request.Header.Get("Authorization") != "Bearer identity-token" {
+				t.Errorf("unexpected runtime-config authorization: %q", request.Header.Get("Authorization"))
+			}
+			io.WriteString(writer, `{"values":{"YANDEX_DISK_TOKEN":"disk-token"}}`)
+		case request.Method == http.MethodGet && request.URL.Path == "/private-bucket/"+stateKey(diskPath):
+			http.NotFound(writer, request)
+		case request.Method == http.MethodPut && request.URL.Path == "/private-bucket/"+lockKey(diskPath):
+			if request.Header.Get("If-None-Match") != "*" {
+				t.Error("destination lock was not created conditionally")
+			}
+			writer.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+lockKey(diskPath):
+			lockReleased = true
+			writer.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodGet && request.URL.Path == "/private-bucket/"+objectKey:
+			writer.Header().Set("X-Amz-Meta-Sha256", hex.EncodeToString(digest[:]))
+			writer.Header().Set("X-Amz-Meta-Generation", generation)
+			writer.Write(content)
+		case request.Method == http.MethodPut && request.URL.Path == "/disk/resources":
+			writer.WriteHeader(http.StatusCreated)
+		case request.Method == http.MethodGet && request.URL.Path == "/disk/resources/upload":
+			io.WriteString(writer, `{"href":"`+server.URL+`/transfer"}`)
+		case request.Method == http.MethodPut && request.URL.Path == "/transfer":
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != string(content) {
+				t.Errorf("unexpected streamed body: %q", body)
+			}
+			writer.WriteHeader(http.StatusCreated)
+		case request.Method == http.MethodPut && request.URL.Path == "/disk/resources/publish":
+			published = true
+			writer.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodGet && request.URL.Path == "/disk/resources":
+			io.WriteString(writer, `{"public_url":"https://disk.example/game"}`)
+		case request.Method == http.MethodPut && request.URL.Path == "/private-bucket/"+stateKey(diskPath):
+			body, _ := io.ReadAll(request.Body)
+			if string(body) != generation {
+				t.Errorf("unexpected generation marker: %q", body)
+			}
+			writer.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+objectKey:
+			if !published {
+				t.Error("staged object was deleted before publication completed")
+			}
+			deleted = true
+			writer.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodPost && request.URL.Path == "/completion":
+			if request.URL.Query().Get("integration") != "async" {
+				t.Error("completion was not invoked asynchronously")
+			}
+			if !deleted {
+				t.Error("completion was invoked before staged-object cleanup")
+			}
+			if !lockReleased {
+				t.Error("completion was invoked before the destination lock was released")
+			}
+			if err := json.NewDecoder(request.Body).Decode(&completionPayload); err != nil {
+				t.Fatal(err)
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := uploaderService{
+		env: environment{
+			Bucket:                  "private-bucket",
+			RuntimeConfigURL:        server.URL + "/config",
+			RuntimeConfigAudience:   "https://config.example",
+			RuntimeServiceAccountID: "service-account-id",
+			CompletionFunctionURL:   server.URL + "/completion",
+		},
+		client:     server.Client(),
+		metadata:   server.URL + "/metadata",
+		tokenURL:   server.URL + "/token",
+		diskAPI:    server.URL + "/disk",
+		storageURL: server.URL,
+	}
+	job := uploadJob{
+		SchemaVersion: 1,
+		JobID:         jobID,
+		Bucket:        "private-bucket",
+		Files: []uploadFile{{
+			Role:        "master",
+			ObjectKey:   objectKey,
+			DiskPath:    diskPath,
+			ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			SHA256:      hex.EncodeToString(digest[:]),
+			Generation:  generation,
+			Publish:     true,
+		}},
+		Callback: map[string]any{"kind": "event_created"},
+	}
+
+	if err := service.process(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Fatal("staged object was not deleted")
+	}
+	if !completionPayload.Success || completionPayload.PublicURLs["master"] != "https://disk.example/game" {
+		t.Fatalf("unexpected completion payload: %#v", completionPayload)
+	}
+}
+
+func TestObjectURLKeepsObjectKeySegments(t *testing.T) {
+	service := uploaderService{storageURL: "https://storage.example"}
+	got := service.objectURL("bucket", "larp-bot/uploads/job/file name.xlsx")
+	want := "https://storage.example/bucket/larp-bot/uploads/job/file%20name.xlsx"
+	if got != want {
+		t.Fatalf("objectURL() = %q, want %q", got, want)
+	}
+	if _, err := url.Parse(got); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
+	jobID := "12345678-1234-1234-1234-123456789abc"
+	diskPath := "disk:/larp-bot/events/game.xlsx"
+	oldGeneration := fmt.Sprintf("%020d-%s", time.Now().Add(-7*time.Minute).UnixNano(), jobID)
+	newGeneration := fmt.Sprintf("%020d-%s", time.Now().UnixNano(), jobID)
+	putSeen := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			writer.Header().Set("ETag", `"old-lock-etag"`)
+			io.WriteString(writer, oldGeneration)
+		case http.MethodPut:
+			putSeen = true
+			if request.Header.Get("If-Match") != `"old-lock-etag"` {
+				t.Errorf("unexpected takeover precondition: %q", request.Header.Get("If-Match"))
+			}
+			body, _ := io.ReadAll(request.Body)
+			if string(body) != newGeneration {
+				t.Errorf("unexpected takeover generation: %q", body)
+			}
+			writer.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected method: %s", request.Method)
+		}
+	}))
+	defer server.Close()
+	service := uploaderService{client: server.Client(), storageURL: server.URL}
+
+	takenOver, err := service.takeOverStaleDestinationLock(
+		context.Background(),
+		"private-bucket",
+		uploadFile{DiskPath: diskPath, Generation: newGeneration},
+		"iam-token",
+	)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !takenOver || !putSeen {
+		t.Fatal("stale lock was not taken over")
+	}
+}

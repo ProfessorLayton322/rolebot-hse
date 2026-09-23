@@ -16,6 +16,7 @@ from larp_bot.adapters.yandex_disk.repository import (
     YandexDiskRestClient,
     YandexDiskShowcaseRepository,
 )
+from larp_bot.adapters.yandex_disk.uploader import StagedYandexDiskUploader
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.chat_management import TelegramChatManagementService
@@ -29,6 +30,7 @@ from larp_bot.application.services import (
     RegistrationService,
 )
 from larp_bot.application.statistics import StatisticsService
+from larp_bot.application.upload_completion import UploadCompletionService
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.config import Settings
 from larp_bot.config.logging import configure_logging
@@ -42,12 +44,14 @@ class AppContainer:
     events: YdbEventRepository
     registrations: YdbRegistrationRepository
     showcase: YandexDiskShowcaseRepository
+    disk_uploader: StagedYandexDiskUploader
     publisher: YmqCommandPublisher
     transport: MultiplexedDeferredTransport
     telegram_chat_management: TelegramChatManagementService
     conversation: ConversationEngine
     worker: OrderedWorker
     registration_opening_notifications: RegistrationOpeningNotificationService
+    upload_completion: UploadCompletionService
 
 
 def iam_token_from_context(context: Any) -> str | None:
@@ -82,10 +86,15 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     events = YdbEventRepository(db)
     registrations = YdbRegistrationRepository(db)
     disk = YandexDiskRestClient(secrets["YANDEX_DISK_TOKEN"])
+    disk_uploader = StagedYandexDiskUploader(
+        bucket=settings.disk_staging_bucket,
+        function_url=settings.disk_uploader_url,
+        iam_token=iam_token,
+    )
     google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
     player_statistics = GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id)
     master_statistics = GoogleDriveStatisticsRepository.masters(google_drive, settings.google_folder_id)
-    showcase = YandexDiskShowcaseRepository(disk)
+    showcase = YandexDiskShowcaseRepository(disk, disk_uploader)
     sqs = boto3.client(
         "sqs",
         endpoint_url=settings.ymq_endpoint,
@@ -143,6 +152,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         config,
         transport,
     )
+    upload_completion = UploadCompletionService(events, users, config, transport)
     worker = OrderedWorker(
         consumer,
         mutations,
@@ -165,10 +175,12 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         events=events,
         registrations=registrations,
         showcase=showcase,
+        disk_uploader=disk_uploader,
         publisher=publisher,
         transport=transport,
         telegram_chat_management=telegram_chat_management,
         conversation=conversation,
         worker=worker,
         registration_opening_notifications=registration_opening_notifications,
+        upload_completion=upload_completion,
     )

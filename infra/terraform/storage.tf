@@ -33,6 +33,40 @@ resource "yandex_storage_bucket" "deployment" {
     }
   }
 
+  lifecycle_rule {
+    id      = "expire-abandoned-disk-uploads"
+    enabled = true
+
+    filter {
+      prefix = "${var.project_name}/uploads/"
+    }
+
+    expiration {
+      days = 1
+    }
+
+    noncurrent_version_expiration {
+      days = 1
+    }
+  }
+
+  lifecycle_rule {
+    id      = "expire-abandoned-disk-upload-locks"
+    enabled = true
+
+    filter {
+      prefix = "${var.project_name}/upload-locks/"
+    }
+
+    expiration {
+      days = 1
+    }
+
+    noncurrent_version_expiration {
+      days = 1
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
   }

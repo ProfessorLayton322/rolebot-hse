@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
-from typing import Protocol
+from typing import Protocol, cast
 
 import httpx
 from openpyxl import Workbook, load_workbook
@@ -106,13 +107,30 @@ class WorkbookIntegrityError(RuntimeError):
 class DiskObjectStore(Protocol):
     async def download(self, path: str) -> bytes: ...
 
-    async def upload_new(self, path: str, content: bytes) -> None: ...
-
-    async def replace(self, path: str, content: bytes) -> None: ...
-
-    async def publish(self, path: str) -> str: ...
-
     async def delete(self, path: str) -> None: ...
+
+
+@dataclass(frozen=True)
+class DiskUpload:
+    role: str
+    disk_path: str
+    content: bytes
+    content_type: str
+    overwrite: bool
+    publish: bool
+
+
+UploadReadyCallback = Callable[[], Awaitable[None]]
+
+
+class DiskUploader(Protocol):
+    async def submit(
+        self,
+        files: Sequence[DiskUpload],
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> dict[str, str] | None: ...
 
 
 def _cell_text(value: object) -> str:
@@ -449,11 +467,11 @@ class YandexDiskRestClient:
         self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
         self._headers = {"Authorization": f"OAuth {token}"}
 
-    async def _link(self, endpoint: str, path: str, *, overwrite: bool = False) -> str:
+    async def _link(self, endpoint: str, path: str) -> str:
         response = await self._client.get(
             f"{self.API}/{endpoint}",
             headers=self._headers,
-            params={"path": path, "overwrite": str(overwrite).lower()},
+            params={"path": path},
         )
         response.raise_for_status()
         href = response.json().get("href")
@@ -495,55 +513,6 @@ class YandexDiskRestClient:
             if not items:
                 raise RuntimeError("Yandex Disk returned an incomplete directory listing")
 
-    async def _upload(self, path: str, content: bytes, *, overwrite: bool) -> None:
-        href = await self._link("resources/upload", path, overwrite=overwrite)
-        if path.endswith(".json"):
-            content_type = "application/json"
-        elif path.endswith(".pptx"):
-            content_type = PPTX_MIME_TYPE
-        else:
-            content_type = XLSX_MIME_TYPE
-        response = await self._client.put(
-            href,
-            content=content,
-            headers={"Content-Type": content_type},
-        )
-        response.raise_for_status()
-
-    async def _ensure_parent_directories(self, path: str) -> None:
-        if not path.startswith("disk:/") or "/" not in path.removeprefix("disk:/"):
-            return
-        parent = path.rsplit("/", 1)[0]
-        segments = parent.removeprefix("disk:/").split("/")
-        for index in range(1, len(segments) + 1):
-            directory = "disk:/" + "/".join(segments[:index])
-            response = await self._client.put(
-                f"{self.API}/resources",
-                headers=self._headers,
-                params={"path": directory},
-            )
-            if response.status_code != 409:
-                response.raise_for_status()
-
-    async def upload_new(self, path: str, content: bytes) -> None:
-        await self._ensure_parent_directories(path)
-        await self._upload(path, content, overwrite=False)
-
-    async def replace(self, path: str, content: bytes) -> None:
-        await self._upload(path, content, overwrite=True)
-
-    async def publish(self, path: str) -> str:
-        response = await self._client.put(f"{self.API}/resources/publish", headers=self._headers, params={"path": path})
-        response.raise_for_status()
-        metadata = await self._client.get(
-            f"{self.API}/resources", headers=self._headers, params={"path": path, "fields": "public_url"}
-        )
-        metadata.raise_for_status()
-        public_url = metadata.json().get("public_url")
-        if not isinstance(public_url, str) or not public_url.startswith("https://"):
-            raise RuntimeError("Yandex Disk resource was published without a public URL")
-        return public_url
-
     async def delete(self, path: str) -> None:
         response = await self._client.delete(
             f"{self.API}/resources",
@@ -555,17 +524,36 @@ class YandexDiskRestClient:
 
 
 class YandexDiskShowcaseRepository:
-    def __init__(self, store: DiskObjectStore, *, achievement_template: bytes | None = None) -> None:
+    def __init__(
+        self,
+        store: DiskObjectStore,
+        uploader: DiskUploader | None = None,
+        *,
+        achievement_template: bytes | None = None,
+    ) -> None:
         self.store = store
+        self.uploader = uploader if uploader is not None else cast(DiskUploader, store)
+        self.deferred_uploads = uploader is not None or bool(getattr(store, "deferred_uploads", False))
         self._achievement_template = achievement_template
 
-    async def _create_event_workbook(self, disk_path: str, content: bytes) -> str:
-        await self.store.upload_new(disk_path, content)
-        try:
-            return await self.store.publish(disk_path)
-        except Exception:
-            await self.store.delete(disk_path)
-            raise
+    async def _submit_one(
+        self,
+        disk_path: str,
+        content: bytes,
+        *,
+        content_type: str,
+        overwrite: bool,
+        publish: bool,
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+        role: str = "file",
+    ) -> str | None:
+        result = await self.uploader.submit(
+            [DiskUpload(role, disk_path, content, content_type, overwrite, publish)],
+            callback=callback,
+            before_invoke=before_invoke,
+        )
+        return None if result is None else result.get(role)
 
     async def create_event_workbook(
         self,
@@ -573,9 +561,19 @@ class YandexDiskShowcaseRepository:
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
-    ) -> str:
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> str | None:
         content = await asyncio.to_thread(showcase_workbook_bytes, registrations, player_amount=player_amount)
-        return await self._create_event_workbook(disk_path, content)
+        return await self._submit_one(
+            disk_path,
+            content,
+            content_type=XLSX_MIME_TYPE,
+            overwrite=False,
+            publish=True,
+            callback=callback,
+            before_invoke=before_invoke,
+        )
 
     async def create_public_event_workbook(
         self,
@@ -583,41 +581,105 @@ class YandexDiskShowcaseRepository:
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
-    ) -> str:
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> str | None:
         content = await asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=player_amount)
-        return await self._create_event_workbook(disk_path, content)
+        return await self._submit_one(
+            disk_path,
+            content,
+            content_type=XLSX_MIME_TYPE,
+            overwrite=False,
+            publish=True,
+            callback=callback,
+            before_invoke=before_invoke,
+        )
+
+    async def create_event_bundle(
+        self,
+        master_path: str,
+        public_path: str,
+        pass_path: str,
+        pass_profiles: Sequence[PassDetails],
+        *,
+        player_amount: int,
+        callback: dict[str, object],
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> dict[str, str] | None:
+        master, public, passes = await asyncio.gather(
+            asyncio.to_thread(showcase_workbook_bytes, player_amount=player_amount),
+            asyncio.to_thread(public_showcase_workbook_bytes, player_amount=player_amount),
+            asyncio.to_thread(pass_table_workbook_bytes, pass_profiles),
+        )
+        return await self.uploader.submit(
+            [
+                DiskUpload("master", master_path, master, XLSX_MIME_TYPE, False, True),
+                DiskUpload("public", public_path, public, XLSX_MIME_TYPE, False, True),
+                DiskUpload("pass", pass_path, passes, XLSX_MIME_TYPE, False, True),
+            ],
+            callback=callback,
+            before_invoke=before_invoke,
+        )
 
     async def delete_event_workbook(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
 
-    async def create_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> str:
+    async def create_pass_table(
+        self,
+        disk_path: str,
+        profiles: Sequence[PassDetails],
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> str | None:
         content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)
-        await self.store.upload_new(disk_path, content)
-        try:
-            return await self.store.publish(disk_path)
-        except Exception:
-            await self.store.delete(disk_path)
-            raise
+        return await self._submit_one(
+            disk_path,
+            content,
+            content_type=XLSX_MIME_TYPE,
+            overwrite=False,
+            publish=True,
+            callback=callback,
+            before_invoke=before_invoke,
+            role="pass",
+        )
 
     async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None:
         content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)
-        await self.store.replace(disk_path, content)
+        await self._submit_one(
+            disk_path,
+            content,
+            content_type=XLSX_MIME_TYPE,
+            overwrite=True,
+            publish=False,
+        )
 
     async def delete_pass_table(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
 
-    async def create_achievement_presentation(self, disk_path: str, game_name: str) -> str:
+    async def create_achievement_presentation(
+        self,
+        disk_path: str,
+        game_name: str,
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> str | None:
         template = self._achievement_template
         if template is None:
             template = await asyncio.to_thread(ACHIEVEMENT_TEMPLATE_PATH.read_bytes)
             self._achievement_template = template
         content = await asyncio.to_thread(achievement_presentation_bytes, template, game_name)
-        await self.store.upload_new(disk_path, content)
-        try:
-            return await self.store.publish(disk_path)
-        except Exception:
-            await self.store.delete(disk_path)
-            raise
+        return await self._submit_one(
+            disk_path,
+            content,
+            content_type=PPTX_MIME_TYPE,
+            overwrite=False,
+            publish=True,
+            callback=callback,
+            before_invoke=before_invoke,
+            role="achievement",
+        )
 
     async def delete_achievement_presentation(self, disk_path: str) -> None:
         await self.store.delete(disk_path)
@@ -631,6 +693,25 @@ class YandexDiskShowcaseRepository:
             asyncio.to_thread(showcase_workbook_bytes, registrations, player_amount=event.player_amount),
             asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=event.player_amount),
         )
-        await self.store.replace(event.master_table_resource_path, master_content)
+        uploads = [
+            DiskUpload(
+                "master",
+                event.master_table_resource_path,
+                master_content,
+                XLSX_MIME_TYPE,
+                True,
+                False,
+            )
+        ]
         if event.public_table_resource_path is not None:
-            await self.store.replace(event.public_table_resource_path, public_content)
+            uploads.append(
+                DiskUpload(
+                    "public",
+                    event.public_table_resource_path,
+                    public_content,
+                    XLSX_MIME_TYPE,
+                    True,
+                    False,
+                )
+            )
+        await self.uploader.submit(uploads)
