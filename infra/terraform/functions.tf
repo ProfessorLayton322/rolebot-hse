@@ -85,6 +85,8 @@ resource "yandex_function" "disk_uploader" {
     log_group_id = yandex_logging_group.application.id
     min_level    = "INFO"
   }
+
+  depends_on = [time_sleep.async_invoker_ready]
 }
 
 resource "yandex_function" "gateway" {
@@ -248,6 +250,7 @@ resource "yandex_function" "upload_completion" {
     yandex_ydb_table.tg_users,
     yandex_ydb_table.vk_users,
     yandex_ydb_table.events,
+    time_sleep.async_invoker_ready,
   ]
 }
 

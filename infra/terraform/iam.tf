@@ -44,13 +44,20 @@ resource "yandex_iam_service_account_static_access_key" "ymq_client" {
 
 locals {
   runtime_bindings = {
-    gateway_ydb    = { role = "ydb.editor", member = yandex_iam_service_account.gateway.id }
-    worker_ydb     = { role = "ydb.editor", member = yandex_iam_service_account.worker.id }
-    ymq_reader     = { role = "ymq.reader", member = yandex_iam_service_account.ymq_client.id }
-    ymq_writer     = { role = "ymq.writer", member = yandex_iam_service_account.ymq_client.id }
-    trigger_reader = { role = "ymq.reader", member = yandex_iam_service_account.trigger.id }
+    gateway_ydb     = { role = "ydb.editor", member = yandex_iam_service_account.gateway.id }
+    worker_ydb      = { role = "ydb.editor", member = yandex_iam_service_account.worker.id }
+    ymq_reader      = { role = "ymq.reader", member = yandex_iam_service_account.ymq_client.id }
+    ymq_writer      = { role = "ymq.writer", member = yandex_iam_service_account.ymq_client.id }
+    trigger_reader  = { role = "ymq.reader", member = yandex_iam_service_account.trigger.id }
+    trigger_invoker = { role = "functions.functionInvoker", member = yandex_iam_service_account.trigger.id }
   }
 }
+
+# Cloud Functions validates the asynchronous invocation identity while it
+# creates a function version. A function-scoped binding cannot satisfy that
+# bootstrap check because Terraform only learns the function ID after creating
+# the function and its first version, so the trigger needs this folder-scoped
+# invoker role before either async-enabled function is created.
 
 # Runtime Functions exchange their platform-provided IAM tokens for one-hour
 # Yandex OIDC ID tokens. Each identity can mint a token only for itself; the
@@ -87,6 +94,15 @@ resource "yandex_resourcemanager_folder_iam_member" "runtime" {
   folder_id = var.yandex_folder_id
   role      = each.value.role
   member    = "serviceAccount:${each.value.member}"
+}
+
+resource "time_sleep" "async_invoker_ready" {
+  depends_on      = [yandex_resourcemanager_folder_iam_member.runtime["trigger_invoker"]]
+  create_duration = "60s"
+
+  triggers = {
+    binding_id = yandex_resourcemanager_folder_iam_member.runtime["trigger_invoker"].id
+  }
 }
 
 # IAM bindings are eventually consistent. Queue creation authenticates with
