@@ -292,7 +292,7 @@ Terraform creates separate gateway, ordered-worker, disk-uploader, kick-trigger,
 | ordered worker | `ydb.editor`, stages generated files, invokes the disk uploader, and runs the completion callback; can mint an OIDC token only for its own service account |
 | disk uploader | reads and deletes staged objects, writes generation markers, invokes only upload completion, and can mint an OIDC token only for itself |
 | YMQ client key owner | `ymq.reader`, `ymq.writer` |
-| kick/async trigger | `ymq.reader`; invokes the ordered worker and supplies the async invocation identity for the uploader and completion functions |
+| kick/async trigger | `ymq.reader`; folder-scoped `functions.functionInvoker` is required to bootstrap async-enabled Function versions, with explicit per-function bindings retained for the application call paths |
 | API Gateway | invokes only gateway Function |
 
 Runtime Functions do not receive `admin` or `editor`. The deployment identity needs service-specific infrastructure administration, IAM-binding permissions, and read access to the private Function-package bucket; scope it to the production folder.

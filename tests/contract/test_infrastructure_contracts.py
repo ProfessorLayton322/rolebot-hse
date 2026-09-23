@@ -76,6 +76,7 @@ def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() 
     staging = (ROOT / "src/larp_bot/adapters/yandex_disk/uploader.py").read_text()
     go_uploader = (ROOT / "functions/disk_uploader/index.go").read_text()
     functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    iam = (ROOT / "infra/terraform/iam.tf").read_text()
     storage = (ROOT / "infra/terraform/storage.tf").read_text()
 
     assert "resources/upload" not in python_disk
@@ -83,6 +84,9 @@ def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() 
     assert '"?integration=async"' in staging
     assert 'runtime            = "golang123"' in functions
     assert re.search(r'resource "yandex_function" "disk_uploader" \{.*?memory\s+= 128', functions, re.DOTALL)
+    assert 'trigger_invoker = { role = "functions.functionInvoker"' in iam
+    assert 'resource "time_sleep" "async_invoker_ready"' in iam
+    assert functions.count("time_sleep.async_invoker_ready") == 2
     assert 'stagingPrefix    = "larp-bot/uploads/"' in go_uploader
     assert "resources/upload" in go_uploader
     assert "resources/publish" in go_uploader
