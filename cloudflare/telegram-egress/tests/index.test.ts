@@ -20,7 +20,7 @@ const env: Env = {
   YMQ_ACCESS_KEY_ID: "ymq-key-id",
   YMQ_SECRET_ACCESS_KEY: "ymq-secret",
   YANDEX_OIDC_AUDIENCE: "https://egress.example/runtime/config",
-  YANDEX_SERVICE_ACCOUNT_IDS: '["gateway-service-account","worker-service-account"]',
+  YANDEX_SERVICE_ACCOUNT_IDS: '["gateway-service-account","worker-service-account","uploader-service-account"]',
 };
 
 function base64Url(value: Uint8Array): string {

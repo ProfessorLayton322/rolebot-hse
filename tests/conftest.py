@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from io import BytesIO
 from zipfile import ZipFile
 
 import pytest
 
+from larp_bot.adapters.yandex_disk.repository import DiskUpload
 from larp_bot.domain.models import Event, EventStatus
 
 
@@ -51,22 +53,31 @@ class MemoryDiskStore:
     async def list_files(self, path: str) -> list[str]:
         return [name for name in self.files if name.rsplit("/", 1)[0] == path]
 
-    async def upload_new(self, path: str, content: bytes) -> None:
-        if path in self.files:
-            raise FileExistsError(path)
-        self.files[path] = bytes(content)
-
-    async def replace(self, path: str, content: bytes) -> None:
-        if path not in self.files:
-            raise FileNotFoundError(path)
-        self.files[path] = bytes(content)
-        self.replace_count[path] = self.replace_count.get(path, 0) + 1
-
-    async def publish(self, path: str) -> str:
-        if path not in self.files:
-            raise FileNotFoundError(path)
-        url = self.public_urls.setdefault(path, f"https://disk.example/public/{len(self.public_urls) + 1}")
-        return url
+    async def submit(
+        self,
+        files: Sequence[DiskUpload],
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> dict[str, str]:
+        del callback
+        if before_invoke is not None:
+            await before_invoke()
+        result: dict[str, str] = {}
+        for upload in files:
+            if not upload.overwrite and upload.disk_path in self.files:
+                raise FileExistsError(upload.disk_path)
+            if upload.overwrite and upload.disk_path not in self.files:
+                raise FileNotFoundError(upload.disk_path)
+            self.files[upload.disk_path] = bytes(upload.content)
+            if upload.overwrite:
+                self.replace_count[upload.disk_path] = self.replace_count.get(upload.disk_path, 0) + 1
+            if upload.publish:
+                result[upload.role] = self.public_urls.setdefault(
+                    upload.disk_path,
+                    f"https://disk.example/public/{len(self.public_urls) + 1}",
+                )
+        return result
 
     async def delete(self, path: str) -> None:
         self.files.pop(path, None)

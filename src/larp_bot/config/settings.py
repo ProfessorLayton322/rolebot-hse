@@ -18,6 +18,8 @@ class Settings(BaseModel):
     runtime_service_account_id: str
     telegram_egress_url: str
     google_folder_id: str
+    disk_staging_bucket: str
+    disk_uploader_url: str
     inline_safety_margin_ms: int = Field(default=100, ge=50, le=500)
     worker_max_seconds: float = Field(default=40.0, ge=1, le=300)
     app_log_level: str = "INFO"
@@ -34,6 +36,8 @@ class Settings(BaseModel):
             "runtime_service_account_id": "RUNTIME_SERVICE_ACCOUNT_ID",
             "telegram_egress_url": "TELEGRAM_EGRESS_URL",
             "google_folder_id": "GOOGLE_FOLDER_ID",
+            "disk_staging_bucket": "DISK_STAGING_BUCKET",
+            "disk_uploader_url": "DISK_UPLOADER_URL",
         }
         missing = [environment for environment in required.values() if not os.getenv(environment)]
         if missing:

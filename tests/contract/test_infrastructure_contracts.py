@@ -71,6 +71,25 @@ def test_scheduled_registration_notifications_use_an_isolated_timer_function() -
     assert "registration_notifier.py" in build
 
 
+def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() -> None:
+    python_disk = "\n".join(path.read_text() for path in (ROOT / "src/larp_bot/adapters/yandex_disk").glob("*.py"))
+    staging = (ROOT / "src/larp_bot/adapters/yandex_disk/uploader.py").read_text()
+    go_uploader = (ROOT / "functions/disk_uploader/index.go").read_text()
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    storage = (ROOT / "infra/terraform/storage.tf").read_text()
+
+    assert "resources/upload" not in python_disk
+    assert "resources/publish" not in python_disk
+    assert '"?integration=async"' in staging
+    assert 'runtime            = "golang123"' in functions
+    assert re.search(r'resource "yandex_function" "disk_uploader" \{.*?memory\s+= 128', functions, re.DOTALL)
+    assert 'stagingPrefix    = "larp-bot/uploads/"' in go_uploader
+    assert "resources/upload" in go_uploader
+    assert "resources/publish" in go_uploader
+    assert "deleteStaged" in go_uploader
+    assert 'id      = "expire-abandoned-disk-uploads"' in storage
+
+
 def test_deployment_packages_the_read_only_achievement_template() -> None:
     deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
     fetcher = (ROOT / "scripts/fetch_achievement_template.py").read_text()

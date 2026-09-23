@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 
@@ -16,7 +16,7 @@ from larp_bot.adapters.memory import (
     MemoryVkUserIdResolver,
     StaticAdminProvider,
 )
-from larp_bot.adapters.yandex_disk.repository import YandexDiskShowcaseRepository
+from larp_bot.adapters.yandex_disk.repository import DiskUpload, YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADD_EVENT_LEADER,
     ADD_POST_LINKS,
@@ -174,6 +174,25 @@ class FailOnceTransport(MemoryDeferredTransport):
             text=text,
             buttons=buttons,
         )
+
+
+class DeferredMemoryDiskStore(MemoryDiskStore):
+    deferred_uploads = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.jobs: list[tuple[tuple[DiskUpload, ...], dict[str, object] | None]] = []
+
+    async def submit(
+        self,
+        files: Sequence[DiskUpload],
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self.jobs.append((tuple(files), callback))
+        if before_invoke is not None:
+            await before_invoke()
 
 
 async def engine_setup(
@@ -3222,6 +3241,27 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
     assert {(leader.platform, leader.platform_user_id) for leader in leaders} == {
         (Platform.TELEGRAM, 1),
     }
+
+
+@pytest.mark.asyncio
+async def test_game_creation_returns_pending_while_production_upload_runs_asynchronously(event: Event) -> None:
+    disk_store = DeferredMemoryDiskStore()
+    engine, _, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Новая асинхронная игра"))
+    await engine.handle(inbound(3, "15.11.26"))
+    await engine.handle(inbound(4, "20"))
+    response = await engine.handle(inbound(5, "create:schedule:no", callback=True))
+
+    assert response.deferred and response.silent and response.text == ""
+    assert not any(candidate.name == "Новая асинхронная игра" for candidate in await engine.events.list_page(limit=10))
+    assert isinstance(engine.transport, MemoryDeferredTransport)
+    assert engine.transport.sent[-1][3] == "⏳ Файлы игры создаются. Бот пришлёт ссылки, когда загрузка завершится."
+    files, callback = disk_store.jobs[-1]
+    assert [file.role for file in files] == ["master", "public", "pass"]
+    assert callback is not None and callback["kind"] == "event_created"
+    assert callback["requester"] == {"platform": "telegram", "user_id": 1, "profile_user_id": 1}
 
 
 @pytest.mark.asyncio
