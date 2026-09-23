@@ -87,6 +87,8 @@ def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() 
     assert 'trigger_invoker = { role = "functions.functionInvoker"' in iam
     assert 'resource "time_sleep" "async_invoker_ready"' in iam
     assert functions.count("time_sleep.async_invoker_ready") == 2
+    assert 'async_function_revision = "async-iam-ready-v1"' in functions
+    assert functions.count("local.async_function_revision") == 2
     assert 'stagingPrefix    = "larp-bot/uploads/"' in go_uploader
     assert "resources/upload" in go_uploader
     assert "resources/publish" in go_uploader
