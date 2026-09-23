@@ -3,6 +3,11 @@ locals {
   disk_uploader_package_hash = filesha256(var.disk_uploader_zip_path)
   runtime_config_url         = "${local.telegram_egress_url}/runtime/config"
 
+  # The provider records the Function shell even when its initial version
+  # cannot be created. This revision makes the now-IAM-ready async Functions
+  # differ from those incomplete states so the provider publishes a version.
+  async_function_revision = "async-iam-ready-v1"
+
   base_function_environment = {
     # The Python YDB driver requires the TLS scheme. ydb_api_endpoint contains
     # only host:port; passing it through unchanged makes every driver wait time
@@ -63,7 +68,7 @@ resource "yandex_function" "disk_uploader" {
     UPLOAD_COMPLETION_URL      = "https://functions.yandexcloud.net/${yandex_function.upload_completion.id}"
   }
   tags      = ["production"]
-  user_hash = local.disk_uploader_package_hash
+  user_hash = sha256("${local.disk_uploader_package_hash}:${local.async_function_revision}")
 
   metadata_options {
     gce_http_endpoint    = 1
@@ -223,7 +228,7 @@ resource "yandex_function" "upload_completion" {
     DISK_UPLOADER_URL = "https://unused.invalid"
   })
   tags      = ["production"]
-  user_hash = local.function_package_hash
+  user_hash = sha256("${local.function_package_hash}:${local.async_function_revision}")
 
   metadata_options {
     gce_http_endpoint    = 1
