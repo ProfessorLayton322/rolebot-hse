@@ -26,6 +26,9 @@ dev = [
   "pytest-asyncio==1.4.0",
   "ruff==0.16.4",
 ]
+docs = [
+  "reportlab==4.4.4",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
