@@ -11,6 +11,7 @@ from larp_bot.adapters.memory import (
     MemoryRegistrationRepository,
     MemoryTelegramChatGateway,
     MemoryUserRepository,
+    StaticAdminProvider,
 )
 from larp_bot.adapters.telegram import TelegramGroupUpdate, parse_telegram_group_update
 from larp_bot.application.chat_management import TelegramChatManagementService, telegram_administrator_title
@@ -22,6 +23,7 @@ from larp_bot.application.services import (
     RegistrationService,
 )
 from larp_bot.domain.models import (
+    BotIdentity,
     EmptyPayload,
     Event,
     Operation,
@@ -50,6 +52,7 @@ def chat_service(
     events: MemoryEventRepository,
     tables: MemoryRegistrationRepository | None = None,
     users: MemoryUserRepository | None = None,
+    admins: StaticAdminProvider | None = None,
 ) -> tuple[TelegramChatManagementService, MemoryTelegramChatGateway, RegistrationService]:
     tables = tables or MemoryRegistrationRepository()
     users = users or MemoryUserRepository()
@@ -62,7 +65,17 @@ def chat_service(
         users,
     )
     gateway = MemoryTelegramChatGateway()
-    return TelegramChatManagementService(events, registrations, gateway), gateway, registrations
+    return (
+        TelegramChatManagementService(
+            events,
+            registrations,
+            gateway,
+            users,
+            admins or StaticAdminProvider(),
+        ),
+        gateway,
+        registrations,
+    )
 
 
 @pytest.mark.parametrize(
@@ -136,8 +149,9 @@ async def test_admin_grant_shows_paginated_unarchived_games() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tie_requires_explicit_admin_right_and_title_only_admin_is_denied() -> None:
-    events = MemoryEventRepository([make_event(1)])
+async def test_tie_requires_bot_privilege_and_explicit_chat_admin_right() -> None:
+    event = make_event(1)
+    events = MemoryEventRepository([event])
     service, gateway, _ = chat_service(events)
     command = TelegramGroupUpdate("1", "tie_command", -1001, actor_user_id=42)
     gateway.members[(-1001, 42)] = {
@@ -147,11 +161,96 @@ async def test_tie_requires_explicit_admin_right_and_title_only_admin_is_denied(
     }
 
     await service.handle(command)
+    assert gateway.sent[-1][2] == "Недостаточно привилегий для вызова этой команды"
+    assert gateway.sent[-1][3] == ()
+
+    await events.add_leader(event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=42))
+    await service.handle(TelegramGroupUpdate("2", "tie_command", -1001, actor_user_id=42))
     assert gateway.sent[-1][2] == "Недостаточно прав."
 
     gateway.members[(-1001, 42)]["can_delete_messages"] = True
-    await service.handle(TelegramGroupUpdate("2", "tie_command", -1001, actor_user_id=42))
+    await service.handle(TelegramGroupUpdate("3", "tie_command", -1001, actor_user_id=42))
     assert gateway.sent[-1][2].startswith("Выберите игру")
+
+
+@pytest.mark.asyncio
+async def test_moderator_cannot_invoke_tie_or_use_a_stale_event_button() -> None:
+    event = make_event(1)
+    events = MemoryEventRepository([event])
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=42, is_gamemaster=True))
+    service, gateway, _ = chat_service(
+        events,
+        users=users,
+        admins=StaticAdminProvider(tg_gamemaster_ids={42}),
+    )
+    gateway.members[(-1001, 42)] = {"status": "creator"}
+
+    await service.handle(TelegramGroupUpdate("1", "tie_command", -1001, actor_user_id=42))
+
+    assert gateway.sent == [
+        (-1001, "telegram-chat:1:privilege-denied", "Недостаточно привилегий для вызова этой команды", (), 1)
+    ]
+
+    await service.handle(
+        TelegramGroupUpdate(
+            "2",
+            "tie_callback",
+            -1001,
+            actor_user_id=42,
+            message_id=77,
+            callback_query_id="callback-1",
+            callback_data=TelegramChatManagementService._page_buttons([event], 0)[0].value,
+        )
+    )
+
+    stored = await events.get(event.event_id)
+    assert stored is not None and stored.telegram_chat_id is None
+    assert gateway.export_count == 0
+    assert gateway.answered[-1][2] == "Недостаточно привилегий для вызова этой команды"
+
+
+@pytest.mark.asyncio
+async def test_master_only_sees_led_games_while_bot_admin_sees_all_games() -> None:
+    led_event = make_event(1)
+    other_event = make_event(2)
+    events = MemoryEventRepository([led_event, other_event])
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=42, telegram_handle="@master", linked_vk_id=84))
+    await users.save(VkUser(vk_id=84, telegram_handle="@master"))
+    await events.add_leader(
+        led_event.event_id,
+        BotIdentity(platform=Platform.VK, platform_user_id=84),
+    )
+    master_service, master_gateway, _ = chat_service(events, users=users)
+    master_gateway.members[(-1001, 42)] = {"status": "creator"}
+
+    await master_service.handle(TelegramGroupUpdate("1", "tie_command", -1001, actor_user_id=42))
+
+    assert [button.label for button in master_gateway.sent[-1][3]] == [led_event.name]
+
+    await master_service.handle(
+        TelegramGroupUpdate(
+            "2",
+            "tie_callback",
+            -1001,
+            actor_user_id=42,
+            message_id=77,
+            callback_query_id="callback-other-event",
+            callback_data=TelegramChatManagementService._page_buttons([other_event], 0)[0].value,
+        )
+    )
+
+    stored_other = await events.get(other_event.event_id)
+    assert stored_other is not None and stored_other.telegram_chat_id is None
+    assert master_gateway.answered[-1][2] == "Недостаточно привилегий для вызова этой команды"
+
+    admin_service, admin_gateway, _ = chat_service(events, admins=StaticAdminProvider(tg_ids={99}))
+    admin_gateway.members[(-1001, 99)] = {"status": "creator"}
+
+    await admin_service.handle(TelegramGroupUpdate("3", "tie_command", -1001, actor_user_id=99))
+
+    assert [button.label for button in admin_gateway.sent[-1][3]] == [led_event.name, other_event.name]
 
 
 @pytest.mark.asyncio
@@ -159,6 +258,7 @@ async def test_tie_persists_and_reuses_exactly_one_primary_invite_link() -> None
     event = make_event(1)
     events = MemoryEventRepository([event])
     service, gateway, _ = chat_service(events)
+    await events.add_leader(event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=42))
     gateway.members[(-1001, 42)] = {"status": "creator"}
     await service.handle(TelegramGroupUpdate("1", "tie_command", -1001, actor_user_id=42))
     event_button = next(button for button in gateway.sent[-1][3] if button.value.startswith("tie:e:"))
