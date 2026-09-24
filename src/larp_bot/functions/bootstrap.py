@@ -146,7 +146,13 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         secrets["PARTICIPANT_KEY_HMAC_SECRET"],
         telegram_chat=telegram,
     )
-    telegram_chat_management = TelegramChatManagementService(events, registration_service, telegram)
+    telegram_chat_management = TelegramChatManagementService(
+        events,
+        registration_service,
+        telegram,
+        users,
+        config,
+    )
     registration_opening_notifications = RegistrationOpeningNotificationService(
         events,
         config,

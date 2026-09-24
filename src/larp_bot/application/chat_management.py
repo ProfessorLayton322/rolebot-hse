@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import datetime
@@ -8,18 +9,22 @@ from larp_bot.adapters.telegram import TelegramGroupUpdate
 from larp_bot.domain.models import (
     MAX_EVENT_PAGE_SIZE,
     AttendanceStatus,
+    BotIdentity,
     Button,
     Event,
+    Platform,
     event_name_with_date,
 )
 
-from .ports import EventRepository, TelegramChatGateway
+from .identity import identities_for_local_user
+from .ports import AdminConfigProvider, EventRepository, TelegramChatGateway, UserRepository
 from .services import RegistrationService
 
 LOGGER = logging.getLogger("larp_bot.application.chat_management")
 
 CHAT_PAGE_SIZE = 5
 _TIE_TEXT = "Выберите игру, к которой нужно привязать этот чат:"
+_TIE_PRIVILEGE_DENIED_TEXT = "Недостаточно привилегий для вызова этой команды"
 _EXPLICIT_ADMIN_RIGHTS = frozenset(
     {
         "can_change_info",
@@ -81,10 +86,14 @@ class TelegramChatManagementService:
         events: EventRepository,
         registrations: RegistrationService,
         telegram: TelegramChatGateway,
+        users: UserRepository,
+        admins: AdminConfigProvider,
     ) -> None:
         self.events = events
         self.registrations = registrations
         self.telegram = telegram
+        self.users = users
+        self.admins = admins
 
     async def _unarchived_events(self) -> list[Event]:
         events: list[Event] = []
@@ -126,8 +135,10 @@ class TelegramChatManagementService:
         *,
         page_number: int = 0,
         edit: bool = False,
+        events: list[Event] | None = None,
     ) -> None:
-        events = await self._unarchived_events()
+        if events is None:
+            events = await self._unarchived_events()
         if not events:
             text = "Нет неархивированных игр, к которым можно привязать чат."
             buttons: list[Button] = []
@@ -153,7 +164,7 @@ class TelegramChatManagementService:
             buttons=buttons,
         )
 
-    async def _actor_can_tie(self, update: TelegramGroupUpdate) -> bool:
+    async def _actor_has_chat_admin_right(self, update: TelegramGroupUpdate) -> bool:
         if update.actor_user_id is None:
             return False
         member = await self.telegram.get_chat_member(
@@ -163,22 +174,49 @@ class TelegramChatManagementService:
         )
         return _member_has_explicit_admin_right(member)
 
+    async def _actor_identities(self, update: TelegramGroupUpdate) -> tuple[BotIdentity, ...]:
+        if update.actor_user_id is None:
+            return ()
+        return await identities_for_local_user(self.users, Platform.TELEGRAM, update.actor_user_id)
+
+    async def _actor_is_admin(self, identities: tuple[BotIdentity, ...]) -> bool:
+        return any(
+            await asyncio.gather(
+                *(self.admins.is_admin(identity.platform, identity.platform_user_id) for identity in identities)
+            )
+        )
+
+    async def _tieable_events(self, update: TelegramGroupUpdate) -> tuple[bool, list[Event]]:
+        identities = await self._actor_identities(update)
+        if not identities:
+            return False, []
+        events = await self._unarchived_events()
+        if await self._actor_is_admin(identities):
+            return True, events
+        leader_lists = await asyncio.gather(*(self.events.list_leaders(event.event_id) for event in events))
+        tieable = [
+            event
+            for event, leaders in zip(events, leader_lists, strict=True)
+            if any(identity in leaders for identity in identities)
+        ]
+        return bool(tieable), tieable
+
+    async def _actor_can_tie_event(self, update: TelegramGroupUpdate, event: Event) -> bool:
+        identities = await self._actor_identities(update)
+        if not identities:
+            return False
+        if await self._actor_is_admin(identities):
+            return True
+        leaders = await self.events.list_leaders(event.event_id)
+        return any(identity in leaders for identity in identities)
+
     async def _event_for_token(self, token: str) -> Event | None:
         matches = [event for event in await self._unarchived_events() if _event_token(event.event_id) == token]
         if len(matches) > 1:
             raise RuntimeError("Telegram tie callback token collision")
         return matches[0] if matches else None
 
-    async def _tie(self, update: TelegramGroupUpdate, token: str) -> None:
-        event = await self._event_for_token(token)
-        if event is None:
-            await self.telegram.answer_callback(
-                callback_query_id=update.callback_query_id or "",
-                request_id=f"telegram-chat:{update.update_id}:missing",
-                text="Игра больше недоступна.",
-            )
-            await self._show_picker(update, edit=True)
-            return
+    async def _tie(self, update: TelegramGroupUpdate, event: Event) -> None:
         if not await self.events.bind_telegram_chat(event.event_id, update.chat_id):
             await self.telegram.answer_callback(
                 callback_query_id=update.callback_query_id or "",
@@ -217,15 +255,23 @@ class TelegramChatManagementService:
         )
 
     async def _handle_callback(self, update: TelegramGroupUpdate) -> None:
-        if not await self._actor_can_tie(update):
-            await self.telegram.answer_callback(
-                callback_query_id=update.callback_query_id or "",
-                request_id=f"telegram-chat:{update.update_id}:denied",
-                text="Недостаточно прав.",
-            )
-            return
         value = update.callback_data or ""
         if value.startswith("tie:p:"):
+            privileged, events = await self._tieable_events(update)
+            if not privileged:
+                await self.telegram.answer_callback(
+                    callback_query_id=update.callback_query_id or "",
+                    request_id=f"telegram-chat:{update.update_id}:privilege-denied",
+                    text=_TIE_PRIVILEGE_DENIED_TEXT,
+                )
+                return
+            if not await self._actor_has_chat_admin_right(update):
+                await self.telegram.answer_callback(
+                    callback_query_id=update.callback_query_id or "",
+                    request_id=f"telegram-chat:{update.update_id}:denied",
+                    text="Недостаточно прав.",
+                )
+                return
             try:
                 page_number = int(value.removeprefix("tie:p:"))
             except ValueError:
@@ -234,10 +280,48 @@ class TelegramChatManagementService:
                 callback_query_id=update.callback_query_id or "",
                 request_id=f"telegram-chat:{update.update_id}:page-answered",
             )
-            await self._show_picker(update, page_number=page_number, edit=True)
+            await self._show_picker(update, page_number=page_number, edit=True, events=events)
             return
         if value.startswith("tie:e:"):
-            await self._tie(update, value.removeprefix("tie:e:"))
+            event = await self._event_for_token(value.removeprefix("tie:e:"))
+            if event is None:
+                privileged, events = await self._tieable_events(update)
+                if not privileged:
+                    await self.telegram.answer_callback(
+                        callback_query_id=update.callback_query_id or "",
+                        request_id=f"telegram-chat:{update.update_id}:privilege-denied",
+                        text=_TIE_PRIVILEGE_DENIED_TEXT,
+                    )
+                    return
+                if not await self._actor_has_chat_admin_right(update):
+                    await self.telegram.answer_callback(
+                        callback_query_id=update.callback_query_id or "",
+                        request_id=f"telegram-chat:{update.update_id}:denied",
+                        text="Недостаточно прав.",
+                    )
+                    return
+                await self.telegram.answer_callback(
+                    callback_query_id=update.callback_query_id or "",
+                    request_id=f"telegram-chat:{update.update_id}:missing",
+                    text="Игра больше недоступна.",
+                )
+                await self._show_picker(update, edit=True, events=events)
+                return
+            if not await self._actor_can_tie_event(update, event):
+                await self.telegram.answer_callback(
+                    callback_query_id=update.callback_query_id or "",
+                    request_id=f"telegram-chat:{update.update_id}:privilege-denied",
+                    text=_TIE_PRIVILEGE_DENIED_TEXT,
+                )
+                return
+            if not await self._actor_has_chat_admin_right(update):
+                await self.telegram.answer_callback(
+                    callback_query_id=update.callback_query_id or "",
+                    request_id=f"telegram-chat:{update.update_id}:denied",
+                    text="Недостаточно прав.",
+                )
+                return
+            await self._tie(update, event)
 
     async def _handle_join(self, update: TelegramGroupUpdate) -> None:
         if update.member_is_bot or update.member_user_id is None:
@@ -269,8 +353,15 @@ class TelegramChatManagementService:
         if update.action == "bot_admin_granted":
             await self._show_picker(update)
         elif update.action == "tie_command":
-            if await self._actor_can_tie(update):
-                await self._show_picker(update)
+            privileged, events = await self._tieable_events(update)
+            if not privileged:
+                await self.telegram.send_message(
+                    chat_id=update.chat_id,
+                    request_id=f"telegram-chat:{update.update_id}:privilege-denied",
+                    text=_TIE_PRIVILEGE_DENIED_TEXT,
+                )
+            elif await self._actor_has_chat_admin_right(update):
+                await self._show_picker(update, events=events)
             else:
                 await self.telegram.send_message(
                     chat_id=update.chat_id,
