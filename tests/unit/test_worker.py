@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from typing import cast
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -20,6 +22,7 @@ from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.application.navigation import CONFIRM_PARTICIPATION, MAIN_MENU, MAIN_MENU_LABEL
 from larp_bot.application.services import (
     ConfirmationNotificationService,
+    MutationResult,
     OrderedMutationService,
     RegistrationCatalog,
     confirmation_success_text,
@@ -164,6 +167,31 @@ async def add_command_author_as_leader(events: MemoryEventRepository, event: Eve
         event.event_id,
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
     )
+
+
+@pytest.mark.asyncio
+async def test_deadline_releases_in_progress_and_unstarted_batch_messages(event: Event) -> None:
+    envelopes = [queued(event, Operation.CLOSE_EVENT, EmptyPayload(), index) for index in range(3)]
+    consumer = FakeConsumer(envelopes)
+    mutations = AsyncMock()
+    calls = 0
+
+    async def slow_apply(command: OrderedRegistrationCommand) -> MutationResult:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            await asyncio.Event().wait()
+        return MutationResult("Done", notifications_enabled=False)
+
+    mutations.apply.side_effect = slow_apply
+    worker = OrderedWorker(consumer, mutations, MemoryUserRepository(), MemoryDeferredTransport(), max_seconds=0.05)
+
+    with pytest.raises(TimeoutError):
+        await worker.run()
+
+    assert consumer.deleted == ["receipt-0"]
+    assert set(consumer.released) == {"receipt-1", "receipt-2"}
+    assert calls == 2
 
 
 @pytest.mark.asyncio

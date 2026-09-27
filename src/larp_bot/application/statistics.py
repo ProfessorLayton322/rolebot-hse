@@ -76,15 +76,25 @@ class StatisticsService:
             if key in confirmed_participant_keys:
                 experienced.append((platform, user_id))
 
-        async def grant(platform: Platform, user_id: int) -> None:
-            await self.administration.users.grant_larp_experience(platform, user_id)
-            await self.registrations.enqueue_profile_updates(
-                platform,
-                user_id,
-                idempotency_key=f"{operation_id}:statistics-experience",
-            )
+        # Each profile refresh itself fans out database reads across games.
+        # Bound this outer fanout and cancel siblings on failure: gather would
+        # otherwise leave them publishing commands in the cached event loop
+        # after the statistics command has already failed.
+        semaphore = asyncio.Semaphore(3)
 
-        await asyncio.gather(*(grant(platform, user_id) for platform, user_id in experienced))
+        async def grant(platform: Platform, user_id: int) -> None:
+            async with semaphore:
+                await self.administration.users.grant_larp_experience(platform, user_id)
+                await self.registrations.enqueue_profile_updates(
+                    platform,
+                    user_id,
+                    idempotency_key=f"{operation_id}:statistics-experience",
+                    concurrency=1,
+                )
+
+        async with asyncio.TaskGroup() as tasks:
+            for platform, user_id in experienced:
+                tasks.create_task(grant(platform, user_id))
 
     async def sync_profile(self, command: OrderedRegistrationCommand) -> str:
         payload = command.payload

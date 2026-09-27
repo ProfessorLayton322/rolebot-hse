@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -50,9 +53,44 @@ from larp_bot.domain.models import (
     TelegramUser,
     VkUser,
 )
+from larp_bot.domain.security import participant_key
 from tests.conftest import MemoryDiskStore
 from tests.unit.test_conversation import engine_setup, inbound
 from tests.unit.test_worker import FakeConsumer
+
+
+async def test_statistics_fanout_is_bounded_and_cancels_siblings_on_failure() -> None:
+    users = [TelegramUser(tg_id=index) for index in range(1, 7)]
+    repository = AsyncMock()
+    repository.list_all.return_value = users
+    registrations = AsyncMock()
+    administration = SimpleNamespace(users=repository, participant_secret="test-secret")
+    service = StatisticsService(AsyncMock(), AsyncMock(), AsyncMock(), administration, registrations)
+    started: list[int] = []
+    cancelled: list[int] = []
+    ready = asyncio.Event()
+
+    async def enqueue(platform: Platform, user_id: int, **kwargs: Any) -> int:
+        started.append(user_id)
+        if len(started) == 3:
+            ready.set()
+        if user_id == 1:
+            await ready.wait()
+            raise RuntimeError("publish failed")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(user_id)
+            raise
+        return 0
+
+    registrations.enqueue_profile_updates.side_effect = enqueue
+    confirmed = {participant_key("test-secret", Platform.TELEGRAM, user.tg_id, "event") for user in users}
+    with pytest.raises(ExceptionGroup, match="unhandled errors"):
+        await service._grant_experience("event", confirmed, "operation")
+
+    assert max(started) <= 4  # A freed permit may start one sibling before cancellation is delivered.
+    assert set(cancelled) == set(started) - {1}
 
 
 def template() -> bytes:

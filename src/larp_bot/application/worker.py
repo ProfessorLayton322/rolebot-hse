@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Sequence
@@ -72,11 +73,24 @@ class OrderedWorker:
         )
 
     async def run(self) -> int:
+        pending_receipts: set[str] = set()
+        try:
+            # Check the deadline inside slow commands, not only between batches.
+            # Leave time before the platform kills the process to release leases.
+            async with asyncio.timeout(self.max_seconds):
+                return await self._drain(pending_receipts)
+        finally:
+            for receipt_handle in pending_receipts:
+                try:
+                    await self.consumer.release(receipt_handle)
+                except Exception:
+                    LOGGER.exception("ordered_command_release_failed")
+
+    async def _drain(self, pending_receipts: set[str]) -> int:
         started = time.monotonic()
         processed = 0
         failed_groups: set[str] = set()
         retryable_error: Exception | None = None
-        retryable_receipts: list[str] = []
         while time.monotonic() - started < self.max_seconds:
             received = await self.consumer.receive(max_messages=5, wait_seconds=1 if processed else 3)
             if not received:
@@ -86,6 +100,7 @@ class OrderedWorker:
                 if not isinstance(raw, QueueEnvelope):
                     raise TypeError("consumer returned an invalid queue envelope")
                 envelopes.append(raw)
+                pending_receipts.add(raw.receipt_handle)
 
             # SYNC_PROFILE has its own per-user group, so moving it behind
             # foreground commands cannot violate FIFO ordering. Its external
@@ -95,7 +110,6 @@ class OrderedWorker:
                 command = raw.command
                 group_id = command.queue_group_id
                 if group_id in failed_groups:
-                    retryable_receipts.append(raw.receipt_handle)
                     continue
                 command_response_delivered = False
                 # Profile projections are background maintenance. Keep stale
@@ -193,13 +207,13 @@ class OrderedWorker:
                     if notifications_enabled and not command_response_delivered:
                         await self._deliver_once(raw, text, buttons)
                     await self.consumer.delete(raw.receipt_handle)
+                    pending_receipts.discard(raw.receipt_handle)
                 except Exception as exc:
                     # Keep this command and every later command in the same FIFO
                     # group retryable, but continue draining independent groups.
                     # Release their receipts before re-raising so the kick retry
                     # cannot arrive while the FIFO group is still invisible.
                     failed_groups.add(group_id)
-                    retryable_receipts.append(raw.receipt_handle)
                     if retryable_error is None:
                         retryable_error = exc
                     LOGGER.exception(
@@ -223,10 +237,5 @@ class OrderedWorker:
                 )
                 processed += 1
         if retryable_error is not None:
-            for receipt_handle in dict.fromkeys(retryable_receipts):
-                try:
-                    await self.consumer.release(receipt_handle)
-                except Exception:
-                    LOGGER.exception("ordered_command_release_failed")
             raise retryable_error
         return processed

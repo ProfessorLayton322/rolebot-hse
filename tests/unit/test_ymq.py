@@ -20,6 +20,10 @@ class RecordingSqs:
     def __init__(self) -> None:
         self.messages: list[dict[str, Any]] = []
         self.visibility_changes: list[dict[str, Any]] = []
+        self.attributes = {"ApproximateNumberOfMessages": "0", "ApproximateNumberOfMessagesNotVisible": "0"}
+
+    def get_queue_attributes(self, **kwargs: Any) -> dict[str, Any]:
+        return {"Attributes": self.attributes}
 
     def send_message(self, **kwargs: Any) -> None:
         self.messages.append(kwargs)
@@ -115,3 +119,25 @@ def test_co_player_wish_command_round_trips_through_queue_json() -> None:
 
     assert isinstance(decoded.payload, CoPlayerWishPayload)
     assert decoded.payload.wish_play == "Петров Пётр"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processed,visible,invisible,expected", [(5, 0, 0, 1), (0, 3, 0, 1), (0, 0, 3, 1), (0, 0, 0, 0)]
+)
+async def test_partial_drain_and_invisible_backlog_keep_a_delayed_wakeup(
+    processed: int, visible: int, invisible: int, expected: int
+) -> None:
+    sqs = RecordingSqs()
+    sqs.attributes = {
+        "ApproximateNumberOfMessages": str(visible),
+        "ApproximateNumberOfMessagesNotVisible": str(invisible),
+    }
+    publisher = YmqCommandPublisher(sqs, "fifo-url", "kick-url")
+
+    await publisher.continue_if_pending(processed=processed)
+
+    assert len(sqs.messages) == expected
+    if expected:
+        assert sqs.messages[0]["QueueUrl"] == "kick-url"
+        assert sqs.messages[0]["DelaySeconds"] == 10
