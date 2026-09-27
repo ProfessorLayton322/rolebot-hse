@@ -33,15 +33,40 @@ class YmqCommandPublisher:
         )
         # A failed kick makes the HTTP attempt fail; the platform retry re-emits a kick while
         # FIFO deduplication prevents the already-durable command from being duplicated.
+        await self.wake(command.event_id)
+
+    async def wake(self, event_id: str = "continuation", *, delay_seconds: int = 0) -> None:
         await asyncio.to_thread(
             self.sqs.send_message,
             QueueUrl=self.kick_url,
-            MessageBody=json.dumps({"schema_version": 1, "event_id": command.event_id}, separators=(",", ":")),
+            MessageBody=json.dumps({"schema_version": 1, "event_id": event_id}, separators=(",", ":")),
+            DelaySeconds=delay_seconds,
         )
+
+    async def continue_if_pending(self, *, processed: int) -> None:
+        if processed:
+            # Queue counters are approximate. After making progress always
+            # arrange one more receive instead of trusting a stale zero.
+            await self.wake(delay_seconds=10)
+            return
+        result = await asyncio.to_thread(
+            self.sqs.get_queue_attributes,
+            QueueUrl=self.fifo_url,
+            AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"],
+        )
+        attributes = result["Attributes"]
+        if any(
+            int(attributes[name]) > 0
+            for name in ("ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible")
+        ):
+            # An empty receive can mean every FIFO group is leased by another
+            # invocation (including one killed by the platform). Preserve a
+            # wake-up until those leases expire; avoid a tight invocation loop.
+            await self.wake(delay_seconds=10)
 
 
 class YmqFifoConsumer:
-    def __init__(self, sqs_client: Any, fifo_url: str, visibility_timeout: int = 120) -> None:
+    def __init__(self, sqs_client: Any, fifo_url: str, visibility_timeout: int = 180) -> None:
         self.sqs = sqs_client
         self.fifo_url = fifo_url
         self.visibility_timeout = visibility_timeout

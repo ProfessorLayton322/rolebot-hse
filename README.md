@@ -620,6 +620,12 @@ In rough order of value per effort:
 
 **Queued acknowledgment arrives but final success does not:** inspect FIFO depth, kick queue/trigger, worker logs, YDB errors, Disk OAuth validity, and Google Drive service-account access to the configured folder/file. Do not delete the FIFO message manually until the authoritative mutation is understood.
 
+The ordered worker has a 120-second application deadline, a 150-second Function timeout, and 180-second FIFO leases and trigger visibility. On an application timeout it releases unfinished batch messages for retry. After progress it writes a delayed continuation kick before acknowledging the current kick; an empty receive also preserves a kick if queue counters show visible or leased messages. The trigger batches up to ten wake-ups. Statistics limits concurrent participant refreshes and cancels outstanding refresh tasks when one fails.
+
+To resume an existing backlog after deploying a fix, use `python scripts/wake_ordered_worker.py` with `YMQ_ACCESS_KEY_ID`, `YMQ_SECRET_ACCESS_KEY`, and `YMQ_KICK_URL` provided securely in the environment. Send the wake-up to the standard `registration-worker-kicks` queue, not to the FIFO. The deployment workflow already performs this step. Draining processes the queued operations; purging would discard them.
+
+The September 27 DLQ rollback leaves the two unattached queues `registration-commands-dlq.fifo` and `registration-worker-kicks-dlq` in the cloud but removes them from Terraform management. The failed rollout never attached their redrive policies. This avoids requiring `ymq.admin` on the runtime queue credentials solely to delete unused queues.
+
 **VK confirmation fails:** compare numeric group ID, callback secret, and confirmation string with the current egress Worker bindings. The response body and Function content type are plain text.
 
 **Runtime config returns 403:** confirm the Function uses the expected gateway/worker service account, its self-scoped `iam.serviceAccounts.tokenCreator` binding exists, and `YANDEX_OIDC_AUDIENCE` plus `YANDEX_SERVICE_ACCOUNT_IDS` match Terraform outputs. Never replace this with a long-lived shared authentication secret.

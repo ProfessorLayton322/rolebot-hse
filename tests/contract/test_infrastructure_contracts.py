@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from larp_bot.adapters.ymq.client import YmqFifoConsumer
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -58,6 +60,19 @@ def test_no_fifo_native_trigger() -> None:
     trigger = (ROOT / "infra/terraform/ymq.tf").read_text()
     assert "queue_id           = yandex_message_queue.worker_kicks.arn" in trigger
     assert "queue_id           = yandex_message_queue.registration_commands" not in trigger
+
+
+def test_worker_deadline_leaves_cleanup_time_before_function_and_queue_timeouts() -> None:
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    worker = functions.split('resource "yandex_function" "ordered_worker" {', 1)[1].split('\nresource "', 1)[0]
+    trigger = (ROOT / "infra/terraform/ymq.tf").read_text()
+    app_deadline = re.search(r'WORKER_MAX_SECONDS\s*=\s*"(\d+)"', worker)
+    function_timeout = re.search(r'execution_timeout\s*=\s*"(\d+)"', worker)
+    kick_visibility = re.search(r'visibility_timeout\s*=\s*"(\d+)"', trigger)
+    assert app_deadline and function_timeout and kick_visibility
+    assert int(app_deadline[1]) + 30 <= int(function_timeout[1])
+    assert int(function_timeout[1]) < YmqFifoConsumer(None, "fifo").visibility_timeout
+    assert int(function_timeout[1]) < int(kick_visibility[1])
 
 
 def test_scheduled_registration_notifications_use_an_isolated_timer_function() -> None:

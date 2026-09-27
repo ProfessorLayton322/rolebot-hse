@@ -19,7 +19,11 @@ async def _run(context: Any) -> dict[str, int]:
     elif iam_token is not None:
         _container.config.set_iam_token(iam_token)
         _container.disk_uploader.set_iam_token(iam_token)
-    return {"processed": await _container.worker.run()}
+    processed = await _container.worker.run()
+    # A bounded drain does not imply an empty queue. Do not acknowledge the
+    # current kick until a successor is durable when FIFO work remains.
+    await _container.publisher.continue_if_pending(processed=processed)
+    return {"processed": processed}
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, int]:

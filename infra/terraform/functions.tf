@@ -141,12 +141,14 @@ resource "yandex_function" "ordered_worker" {
   runtime            = "python312"
   entrypoint         = "ordered_worker.handler"
   memory             = 1024
-  execution_timeout  = "60"
+  execution_timeout  = "150"
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
   environment = merge(local.function_environment, {
     RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
-    WORKER_MAX_SECONDS         = "40"
+    # Statistics includes two Drive updates and a bounded profile fanout.
+    # The application deadline leaves 30 seconds for lease cleanup.
+    WORKER_MAX_SECONDS = "120"
   })
   tags      = ["production"]
   user_hash = local.function_package_hash

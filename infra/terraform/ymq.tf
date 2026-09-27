@@ -39,9 +39,10 @@ resource "yandex_function_trigger" "worker_kicks" {
   message_queue {
     queue_id           = yandex_message_queue.worker_kicks.arn
     service_account_id = yandex_iam_service_account.trigger.id
-    batch_size         = "1"
+    # Wake-ups carry no commands: one invocation can drain a whole burst.
+    batch_size         = "10"
     batch_cutoff       = "1"
-    visibility_timeout = "80"
+    visibility_timeout = "180"
   }
 
   depends_on = [
