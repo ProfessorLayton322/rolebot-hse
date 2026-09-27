@@ -42,6 +42,16 @@ output "ymq_kick_url" {
   description = "Standard queue used to wake the ordered FIFO worker."
 }
 
+output "ymq_registration_dlq_url" {
+  value       = yandex_message_queue.registration_command_failures.id
+  description = "FIFO quarantine for commands that failed repeatedly."
+}
+
+output "ymq_kick_dlq_url" {
+  value       = yandex_message_queue.worker_kick_failures.id
+  description = "Quarantine for disposable worker kicks that failed repeatedly."
+}
+
 output "ydb_database_path" {
   value = yandex_ydb_database_serverless.application.database_path
 }
