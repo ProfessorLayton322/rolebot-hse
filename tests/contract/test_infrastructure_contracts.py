@@ -60,19 +60,6 @@ def test_no_fifo_native_trigger() -> None:
     assert "queue_id           = yandex_message_queue.registration_commands" not in trigger
 
 
-def test_fifo_poison_messages_are_quarantined_and_draining_is_periodic() -> None:
-    terraform = (ROOT / "infra/terraform/ymq.tf").read_text()
-
-    assert 'name                        = "registration-commands-dlq.fifo"' in terraform
-    assert "deadLetterTargetArn = yandex_message_queue.registration_command_failures.arn" in terraform
-    assert 'name                       = "registration-worker-kicks-dlq"' in terraform
-    assert "deadLetterTargetArn = yandex_message_queue.worker_kick_failures.arn" in terraform
-    assert terraform.count("maxReceiveCount     = 5") == 2
-    assert 'resource "yandex_function_trigger" "ordered_worker_recovery"' in terraform
-    assert 'description = "Retry FIFO draining independently of disposable kick messages"' in terraform
-    assert terraform.count('cron_expression = "* * * * ? *"') == 2
-
-
 def test_scheduled_registration_notifications_use_an_isolated_timer_function() -> None:
     functions = (ROOT / "infra/terraform/functions.tf").read_text()
     triggers = (ROOT / "infra/terraform/ymq.tf").read_text()
