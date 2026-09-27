@@ -1820,8 +1820,24 @@ class YdbRegistrationRepository:
         registration = await self.get(event_id, participant_key)
         if registration is not None and registration.last_operation_id == operation_id:
             return False
+        queue_time = datetime.now(UTC)
+        if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
+            # Sifting uses created_at as a queue rank and can move it into the future.
+            # Event mutations run in FIFO order, so append strictly after its tail.
+            rows = await self.db.query(
+                """
+                DECLARE $event_id AS Utf8; DECLARE $cancelled_status AS Utf8;
+                SELECT MAX(created_at) AS latest FROM `registrations`
+                WHERE event_id = $event_id AND attendance_status != $cancelled_status;
+                """,
+                {"$event_id": event_id, "$cancelled_status": AttendanceStatus.CANCELLED.value},
+                read_only=True,
+            )
+            if rows and rows[0]["latest"] is not None:
+                queue_time = max(queue_time, _dt(rows[0]["latest"]) + timedelta(microseconds=1))
         if registration is None:
             registration = Registration(
+                created_at=queue_time,
                 event_id=event_id,
                 participant_key=participant_key,
                 display_name=display_name,
@@ -1842,7 +1858,7 @@ class YdbRegistrationRepository:
             registration.telegram_profile = telegram_profile
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
-                registration.created_at = datetime.now(UTC)
+                registration.created_at = queue_time
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(UTC)
         await self._save(registration)

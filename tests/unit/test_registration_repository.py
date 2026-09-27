@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from typing import Any
 
 import pytest
+from openpyxl import load_workbook
 
 from larp_bot.adapters.memory import MemoryRegistrationRepository
+from larp_bot.adapters.yandex_disk.repository import public_showcase_workbook_bytes, showcase_workbook_bytes
 from larp_bot.adapters.ydb.repositories import YdbRegistrationRepository
 from larp_bot.domain.models import AttendanceStatus, Registration
 
@@ -261,7 +264,7 @@ async def test_ydb_registration_history_lookup_is_parameterized() -> None:
 
 @pytest.mark.asyncio
 async def test_ydb_enlist_uses_composite_key_and_persists_showcase_fields() -> None:
-    executor = RecordingExecutor([[], []])
+    executor = RecordingExecutor([[], [{"latest": None}], []])
     repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
 
     await repository.enlist(
@@ -277,7 +280,7 @@ async def test_ydb_enlist_uses_composite_key_and_persists_showcase_fields() -> N
         telegram_profile="https://t.me/player",
     )
 
-    lookup, upsert = executor.queries
+    lookup, _, upsert = executor.queries
     assert "event_id = $event_id AND participant_key = $participant_key" in lookup[0]
     assert "UPSERT INTO `registrations`" in upsert[0]
     assert upsert[1]["$event_id"] == "event-a1"
@@ -333,7 +336,7 @@ async def test_ydb_reenlist_after_cancellation_resets_queue_position() -> None:
     )
     stored_row = cancelled.model_dump()
     stored_row["attendance_status"] = AttendanceStatus.CANCELLED.value
-    executor = RecordingExecutor([[stored_row], []])
+    executor = RecordingExecutor([[stored_row], [{"latest": None}], []])
     repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
 
     await repository.enlist(
@@ -344,7 +347,7 @@ async def test_ydb_reenlist_after_cancellation_resets_queue_position() -> None:
         wish_play="New wish",
     )
 
-    _, upsert = executor.queries
+    _, _, upsert = executor.queries
     assert upsert[1]["$attendance_status"] == AttendanceStatus.WAITING.value
     assert upsert[1]["$created_at"] > base
     assert upsert[1]["$character_wish"] == "Doctor"
@@ -522,3 +525,93 @@ async def test_ydb_registration_sift_moves_all_waiting_rows_with_one_update() ->
         "$waiting_status": AttendanceStatus.WAITING.value,
         "$shift": 1_000_001,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returning", [False, True])
+async def test_signups_after_sifting_preserve_main_and_reserve_order(returning: bool) -> None:
+    now = datetime.now(UTC)
+    players = [
+        Registration(
+            event_id="event-a1",
+            participant_key=key * 43,
+            display_name=name,
+            wish_play="Anyone",
+            created_at=created,
+            attendance_status=status,
+        )
+        for key, name, created, status in [
+            ("c", "Waiting First", now - timedelta(days=2), AttendanceStatus.WAITING),
+            ("d", "Waiting Second", now, AttendanceStatus.WAITING),
+            ("b", "Confirmed Player", now - timedelta(days=1), AttendanceStatus.CONFIRMED),
+            ("a", "Returning Player", now - timedelta(days=3), AttendanceStatus.CANCELLED),
+        ]
+    ]
+    repository = MemoryRegistrationRepository(players if returning else players[:-1])
+    await repository.sift_waiting_to_end("event-a1")
+    await repository.sift_waiting_to_end("event-a1")
+    before = [
+        row
+        for row in await repository.list_for_event("event-a1")
+        if row.attendance_status is not AttendanceStatus.CANCELLED
+    ]
+    assert before[-1].created_at > now
+
+    for key in ("a", "e"):
+        kwargs = dict(
+            operation_id=f"enlist-{key}", participant_key=key * 43, display_name=f"New {key}", wish_play="Anyone"
+        )
+        assert await repository.enlist("event-a1", **kwargs)
+        assert not await repository.enlist("event-a1", **kwargs)
+    rows = await repository.list_for_event("event-a1")
+    assert rows[:3] == before
+    assert [row.participant_key for row in rows] == [key * 43 for key in ("b", "c", "d", "a", "e")]
+    assert rows[3].created_at > rows[2].created_at
+    assert rows[4].created_at > rows[3].created_at
+
+    # Both exported tables must retain the two main players and append newcomers in reserve.
+    for render in (showcase_workbook_bytes, public_showcase_workbook_bytes):
+        workbook = load_workbook(BytesIO(render(rows, player_amount=2)))
+        sheet = workbook.active
+        assert [sheet.cell(index, 2).value for index in (2, 3, 5, 6, 7)] == [
+            "Confirmed Player",
+            "Waiting First",
+            "Waiting Second",
+            "New a",
+            "New e",
+        ]
+        assert sheet.cell(4, 1).value == "ЗАПАС"
+        workbook.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [None, AttendanceStatus.CANCELLED, AttendanceStatus.WAITING])
+async def test_ydb_signup_appends_after_future_queue_tail_only_when_joining(status: AttendanceStatus | None) -> None:
+    original = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Player",
+        wish_play="Anyone",
+        attendance_status=status or AttendanceStatus.WAITING,
+        created_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+    latest = datetime.now(UTC) + timedelta(days=10)
+    lookup = [] if status is None else [original.model_dump()]
+    responses = [lookup, []] if status is AttendanceStatus.WAITING else [lookup, [{"latest": latest}], []]
+    executor = RecordingExecutor(responses)
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+    await repository.enlist(
+        "event-a1",
+        operation_id="join",
+        participant_key=original.participant_key,
+        display_name="Player",
+        wish_play="Anyone",
+    )
+    saved = executor.queries[-1][1]
+    expected = original.created_at if status is AttendanceStatus.WAITING else latest + timedelta(microseconds=1)
+    assert saved["$created_at"] == expected
+    assert saved["$updated_at"] < latest
+    if status is not AttendanceStatus.WAITING:
+        query, params = executor.queries[1]
+        assert "event_id = $event_id AND attendance_status != $cancelled_status" in query
+        assert params == {"$event_id": "event-a1", "$cancelled_status": AttendanceStatus.CANCELLED.value}

@@ -576,8 +576,21 @@ class MemoryRegistrationRepository:
         registration = self.rows.get(key)
         if registration is not None and registration.last_operation_id == operation_id:
             return False
+        queue_time = datetime.now(UTC)
+        if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
+            latest = max(
+                (
+                    row.created_at
+                    for (stored_event_id, _), row in self.rows.items()
+                    if stored_event_id == event_id and row.attendance_status is not AttendanceStatus.CANCELLED
+                ),
+                default=None,
+            )
+            if latest is not None:
+                queue_time = max(queue_time, latest + timedelta(microseconds=1))
         if registration is None:
             registration = Registration(
+                created_at=queue_time,
                 event_id=event_id,
                 participant_key=participant_key,
                 display_name=display_name,
@@ -599,7 +612,7 @@ class MemoryRegistrationRepository:
             registration.telegram_profile = telegram_profile
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
-                registration.created_at = datetime.now(UTC)
+                registration.created_at = queue_time
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(UTC)
         return True
