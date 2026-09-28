@@ -118,6 +118,7 @@ NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 CHANGE_PLAYER_AMOUNT = "👥 Изменить количество игроков"
 ADD_POST_LINKS = "Добавить ссылки на посты"
+EDIT_GAME = "Изменить игру"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 MANAGE_NOTIFICATIONS = "Уведомления"
 MANAGE_SCHEDULED_EVENTS = "Запланированные события"
@@ -144,6 +145,7 @@ STATS_LINKS = "Ссылки на таблицы статистики"
 STATS_ADD_GAME = "Добавить игру в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
 EXPORT_ACHIEVEMENTS = "Выгрузить ачивки"
+GAME_FILES = "Файлы игры"
 CHANGE_GAME_DETAILS = "Изменить название и дату"
 GRANT_GAMEMASTER = "➕ Назначить модератора"
 GRANT_GAMEMASTER_VIEWER = "➕ Модератор-наблюдатель"
@@ -222,6 +224,8 @@ ADMIN_ACTIONS = frozenset(
         MANAGE_GAMES,
         ARCHIVED_GAMES,
         EVENT_TABLES,
+        GAME_FILES,
+        EDIT_GAME,
         CHANGE_GAME_DETAILS,
         CHANGE_STATUS,
         CHANGE_PLAYER_AMOUNT,
@@ -538,6 +542,14 @@ def game_management_button(event_id: str) -> Button:
     return Button(label=BACK, value=f"ag:manage:{event_id}")
 
 
+def edit_game_button(event_id: str) -> Button:
+    return Button(label=BACK, value=f"ag:edit:{event_id}")
+
+
+def game_files_button(event_id: str) -> Button:
+    return Button(label=BACK, value=f"ag:files:{event_id}")
+
+
 def player_management_button(event_id: str) -> Button:
     return Button(label=BACK, value=f"ag:players:{event_id}")
 
@@ -564,7 +576,7 @@ def _admin_status_response(
             "как игровая сессия уже собрана."
         ),
         buttons=[Button(label=label, value=value) for value, (label, _) in ADMIN_STATUS_CHOICES.items()]
-        + [game_management_button(event_id)],
+        + [edit_game_button(event_id)],
     )
 
 
@@ -576,7 +588,7 @@ def _confirmation_deadline_response(event_id: str, *, invalid: bool = False) -> 
         ),
         buttons=[
             Button(label=NEAREST_THURSDAY, value="admin:deadline:nearest-thursday"),
-            game_management_button(event_id),
+            edit_game_button(event_id),
         ],
     )
 
@@ -599,7 +611,7 @@ def _game_details_date_response(event_id: str, current_date: date | None, *, inv
         ),
         buttons=[
             Button(label=NEXT_SATURDAY, value="admin:details:next-saturday"),
-            game_management_button(event_id),
+            edit_game_button(event_id),
         ],
     )
 
@@ -901,7 +913,17 @@ class ConversationEngine:
                 if value in {MANAGE_MODERATORS, LEGACY_MANAGE_MODERATORS}
                 else await self._admin_menu(user)
             )
-        elif value.startswith(("ag:manage:", "ag:masters:", "ag:players:", "ag:notifications:", "ag:schedule")):
+        elif value.startswith(
+            (
+                "ag:manage:",
+                "ag:edit:",
+                "ag:files:",
+                "ag:masters:",
+                "ag:players:",
+                "ag:notifications:",
+                "ag:schedule",
+            )
+        ):
             await self._clear(user)
             response = await self._admin_game_action(user, message, value)
         elif user.dialog_state != "IDLE":
@@ -4025,12 +4047,12 @@ class ConversationEngine:
             if not clean_name:
                 return BotResponse(
                     text="Название игры не может быть пустым. Введите новое название:",
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 )
             if len(clean_name) > 200:
                 return BotResponse(
                     text="Название игры не должно превышать 200 символов. Введите новое название:",
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 )
             user.dialog_state = "ADMIN_UPDATE_GAME_DATE"
             user.dialog_context["new_event_name"] = clean_name
@@ -4063,23 +4085,29 @@ class ConversationEngine:
                 payload=EventDetailsPayload(name=new_name, game_date=game_date),
                 reply_context=ReplyContext(
                     text_success=(f"Название и дата игры изменены: {event_reference(new_name, game_date)}."),
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.UPDATE_EVENT_DETAILS.value}",
             )
             return BotResponse(
                 text="⏳ Изменение названия и даты принято в обработку.",
-                buttons=[game_management_button(event_id)],
+                buttons=[edit_game_button(event_id)],
                 deferred=True,
                 command_enqueued=True,
             )
         if user.dialog_state == "ADMIN_UPDATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
             if not raw_amount.isdecimal():
-                return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
+                return BotResponse(
+                    text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:",
+                    buttons=[edit_game_button(str(user.dialog_context["event_id"]))],
+                )
             player_amount = int(raw_amount)
             if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
-                return BotResponse(text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:")
+                return BotResponse(
+                    text=f"Введите целое количество игроков от 1 до {MAX_PLAYER_AMOUNT}:",
+                    buttons=[edit_game_button(str(user.dialog_context["event_id"]))],
+                )
             context = user.dialog_context.copy()
             await self._clear(user)
             await self.registrations.enqueue(
@@ -4092,13 +4120,13 @@ class ConversationEngine:
                     text_success=(
                         f"Количество игроков игры {_context_event_reference(context)} изменено: {player_amount}."
                     ),
-                    buttons=[game_management_button(str(context["event_id"]))],
+                    buttons=[edit_game_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.UPDATE_PLAYER_AMOUNT.value}",
             )
             return BotResponse(
                 text="⏳ Изменение количества игроков принято в обработку.",
-                buttons=[game_management_button(str(context["event_id"]))],
+                buttons=[edit_game_button(str(context["event_id"]))],
                 deferred=True,
                 command_enqueued=True,
             )
@@ -4107,34 +4135,34 @@ class ConversationEngine:
             if message.callback is not None:
                 return BotResponse(
                     text="Отправьте ссылку на пост об игре в Telegram обычным текстовым сообщением:",
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 )
             try:
                 telegram_post_url = normalize_telegram_post_url(value)
             except ValueError as exc:
                 return BotResponse(
                     text=f"❌ {exc}. Попробуйте ещё раз:",
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 )
             user.dialog_context["telegram_post_url"] = telegram_post_url
             user.dialog_state = "ADMIN_POST_LINK_VK"
             return BotResponse(
                 text="Теперь отправьте ссылку на пост об игре во VK:",
-                buttons=[game_management_button(event_id)],
+                buttons=[edit_game_button(event_id)],
             )
         if user.dialog_state == "ADMIN_POST_LINK_VK":
             event_id = str(user.dialog_context["event_id"])
             if message.callback is not None:
                 return BotResponse(
                     text="Отправьте ссылку на пост об игре во VK обычным текстовым сообщением:",
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 )
             try:
                 vk_post_url = normalize_vk_post_url(value)
             except ValueError as exc:
                 return BotResponse(
                     text=f"❌ {exc}. Попробуйте ещё раз:",
-                    buttons=[game_management_button(event_id)],
+                    buttons=[edit_game_button(event_id)],
                 )
             telegram_post_url = str(user.dialog_context["telegram_post_url"])
             await self.events.set_post_links(event_id, telegram_post_url, vk_post_url)
@@ -4150,7 +4178,7 @@ class ConversationEngine:
                     f"Telegram: {telegram_post_url}\n"
                     f"VK: {vk_post_url}"
                 ),
-                buttons=[game_management_button(event_id)],
+                buttons=[edit_game_button(event_id)],
             )
         if user.dialog_state == "ADMIN_STATUS_SELECT":
             choice = ADMIN_STATUS_CHOICES.get(value)
@@ -4179,13 +4207,13 @@ class ConversationEngine:
                 payload=EmptyPayload(),
                 reply_context=ReplyContext(
                     text_success=f"Статус игры {_context_event_reference(context)} изменён: {status_label}.",
-                    buttons=[game_management_button(str(context["event_id"]))],
+                    buttons=[edit_game_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{operation.value}",
             )
             return BotResponse(
                 text="⏳ Изменение Статуса принято в обработку.",
-                buttons=[game_management_button(str(context["event_id"]))],
+                buttons=[edit_game_button(str(context["event_id"]))],
                 deferred=True,
                 command_enqueued=True,
             )
@@ -4207,7 +4235,7 @@ class ConversationEngine:
                 payload=ConfirmationDeadlinePayload(deadline=deadline),
                 reply_context=ReplyContext(
                     text_success=(f"Статус игры {_context_event_reference(context)} изменён: {STATUS_CONFIRMATION}."),
-                    buttons=[game_management_button(str(context["event_id"]))],
+                    buttons=[edit_game_button(str(context["event_id"]))],
                 ),
                 idempotency_key=f"{message.update_id}:{Operation.OPEN_CONFIRMATION.value}",
             )
@@ -4216,7 +4244,7 @@ class ConversationEngine:
                     "⏳ Открытие подтверждения принято в обработку.\n\n"
                     f"Дедлайн: {format_confirmation_deadline(deadline)}"
                 ),
-                buttons=[game_management_button(str(context["event_id"]))],
+                buttons=[edit_game_button(str(context["event_id"]))],
                 deferred=True,
                 command_enqueued=True,
             )
@@ -4341,9 +4369,14 @@ class ConversationEngine:
             context = user.dialog_context.copy()
             expected = str(context["event_name"])
             if value.strip() != expected:
+                back = (
+                    game_management_button(str(user.dialog_context["event_id"]))
+                    if user.dialog_state == "ADMIN_DELETE_NAME"
+                    else edit_game_button(str(user.dialog_context["event_id"]))
+                )
                 return BotResponse(
                     text=f"Название не совпало. Введите точно:\n\n{expected}",
-                    buttons=[game_management_button(str(user.dialog_context["event_id"]))],
+                    buttons=[back],
                 )
             event_id = str(user.dialog_context["event_id"])
             delete_archived = (
@@ -4770,7 +4803,7 @@ class ConversationEngine:
                 buttons=_pagination_buttons(
                     previous=None,
                     following=None,
-                    cancel=f"ag:manage:{event.event_id}",
+                    cancel=f"ag:players:{event.event_id}",
                 ),
             )
 
@@ -4790,7 +4823,7 @@ class ConversationEngine:
             _pagination_buttons(
                 previous=f"admin:waiting:page:p:{page_token}" if page.has_previous else None,
                 following=f"admin:waiting:page:n:{page_token}" if page.has_next else None,
-                cancel=f"ag:manage:{event.event_id}",
+                cancel=f"ag:players:{event.event_id}",
             )
         )
         user.dialog_context.update(
@@ -4876,14 +4909,14 @@ class ConversationEngine:
                 text="Не удалось найти профиль этого пользователя.",
                 buttons=[
                     Button(label="⬅️ К списку", value=f"ag:waiting:{event_id}"),
-                    game_management_button(event_id),
+                    player_management_button(event_id),
                 ],
             )
         return BotResponse(
             text=self._waiting_player_profile_text(registration, participant),
             buttons=[
                 Button(label="⬅️ К списку", value=f"ag:waiting:{event_id}"),
-                game_management_button(event_id),
+                player_management_button(event_id),
             ],
         )
 
@@ -5470,10 +5503,8 @@ class ConversationEngine:
         if not is_leader and not is_admin:
             if can_view_unassigned:
                 view_actions = [
-                    (LIST_WAITING_PLAYERS, "waiting"),
-                    (EVENT_TABLES, "tables"),
-                    (EXPORT_ACHIEVEMENTS, "achievements"),
-                    (LIST_PLAYER_PROFILES, "profiles"),
+                    (MANAGE_PLAYERS, "players"),
+                    (GAME_FILES, "files"),
                 ]
                 buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in view_actions]
                 buttons.extend(
@@ -5488,18 +5519,12 @@ class ConversationEngine:
                 buttons=[Button(label=BACK, value=MANAGE_GAMES)],
             )
         actions = [
-            (CHANGE_STATUS, "status"),
+            (EDIT_GAME, "edit"),
             (MANAGE_SCHEDULED_EVENTS, "schedule"),
-            (CHANGE_GAME_DETAILS, "details"),
-            (CHANGE_PLAYER_AMOUNT, "player-amount"),
-            (ADD_POST_LINKS, "post-links"),
             (MANAGE_NOTIFICATIONS, "notifications"),
-            (LIST_WAITING_PLAYERS, "waiting"),
-            (EVENT_TABLES, "tables"),
-            (EXPORT_ACHIEVEMENTS, "achievements"),
             (MANAGE_PLAYERS, "players"),
+            (GAME_FILES, "files"),
             (MANAGE_MASTERS, "masters"),
-            (ARCHIVE_GAME, "archive"),
         ]
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
         if is_admin:
@@ -5612,8 +5637,36 @@ class ConversationEngine:
         )
 
     @staticmethod
+    def _edit_game_menu(event: Event) -> BotResponse:
+        return BotResponse(
+            text=f"Изменить игру {event_reference(event.name, event.game_date)}\n\nВыберите действие:",
+            buttons=[
+                Button(label=CHANGE_STATUS, value=f"ag:status:{event.event_id}"),
+                Button(label=CHANGE_GAME_DETAILS, value=f"ag:details:{event.event_id}"),
+                Button(label=CHANGE_PLAYER_AMOUNT, value=f"ag:player-amount:{event.event_id}"),
+                Button(label=ADD_POST_LINKS, value=f"ag:post-links:{event.event_id}"),
+                Button(label=ARCHIVE_GAME, value=f"ag:archive:{event.event_id}"),
+                game_management_button(event.event_id),
+            ],
+        )
+
+    @staticmethod
+    def _game_files_menu(event: Event) -> BotResponse:
+        return BotResponse(
+            text=f"Файлы игры {event_reference(event.name, event.game_date)}\n\nВыберите действие:",
+            buttons=[
+                Button(label=EVENT_TABLES, value=f"ag:tables:{event.event_id}"),
+                Button(label=EXPORT_ACHIEVEMENTS, value=f"ag:achievements:{event.event_id}"),
+                game_management_button(event.event_id),
+            ],
+        )
+
+    @staticmethod
     def _player_management(event: Event, *, can_manage: bool) -> BotResponse:
-        buttons = [Button(label=LIST_PLAYER_PROFILES, value=f"ag:profiles:{event.event_id}")]
+        buttons = [
+            Button(label=LIST_WAITING_PLAYERS, value=f"ag:waiting:{event.event_id}"),
+            Button(label=LIST_PLAYER_PROFILES, value=f"ag:profiles:{event.event_id}"),
+        ]
         if can_manage:
             buttons[:0] = [
                 Button(label=REMOVE_PLAYER, value=f"ag:remove:{event.event_id}"),
@@ -5710,7 +5763,7 @@ class ConversationEngine:
             self._can_view_unassigned_games(user),
         )
         can_manage = is_admin or is_leader
-        viewer_actions = {"waiting", "tables", "achievements", "players", "profiles", "masters"}
+        viewer_actions = {"files", "waiting", "tables", "achievements", "players", "profiles", "masters"}
         if not can_manage and (not can_view_unassigned or action not in viewer_actions):
             await self._clear(user)
             return BotResponse(
@@ -5724,6 +5777,10 @@ class ConversationEngine:
             "game_date": event.game_date.isoformat() if event.game_date is not None else None,
             "event_status": event.status.value,
         }
+        if action == "edit":
+            return self._edit_game_menu(event)
+        if action == "files":
+            return self._game_files_menu(event)
         if action == "schedule":
             user.dialog_state = "IDLE"
             return self._scheduled_events_menu(event)
@@ -5814,7 +5871,7 @@ class ConversationEngine:
             user.dialog_state = "ADMIN_UPDATE_GAME_NAME"
             return BotResponse(
                 text=f"Текущее название: {event.name}.\n\nВведите новое название игры:",
-                buttons=[game_management_button(event.event_id)],
+                buttons=[edit_game_button(event.event_id)],
             )
         if action == "player-amount":
             user.dialog_state = "ADMIN_UPDATE_PLAYER_AMOUNT"
@@ -5823,13 +5880,13 @@ class ConversationEngine:
                     f"Текущее количество игроков: {event.player_amount}.\n\n"
                     f"Введите новое количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):"
                 ),
-                buttons=[game_management_button(event.event_id)],
+                buttons=[edit_game_button(event.event_id)],
             )
         if action == "post-links":
             user.dialog_state = "ADMIN_POST_LINK_TELEGRAM"
             return BotResponse(
                 text="Отправьте ссылку на пост об игре в Telegram:",
-                buttons=[game_management_button(event.event_id)],
+                buttons=[edit_game_button(event.event_id)],
             )
         if action == "notifications":
             return self._notification_management(event)
@@ -5908,7 +5965,7 @@ class ConversationEngine:
             return self._player_management(event, can_manage=can_manage)
         if action == "tables":
             await self._clear(user)
-            pending_buttons = [game_management_button(event.event_id)]
+            pending_buttons = [game_files_button(event.event_id)]
             before_invoke = self._upload_pending_callback(
                 user,
                 message,
@@ -5950,16 +6007,16 @@ class ConversationEngine:
                     )
                 return BotResponse(
                     text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
-                    buttons=[game_management_button(event.event_id)],
+                    buttons=[game_files_button(event.event_id)],
                 )
             return BotResponse(
                 text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(refreshed)}"),
-                buttons=[game_management_button(event.event_id)],
+                buttons=[game_files_button(event.event_id)],
             )
         if action == "achievements":
             await self._clear(user)
             requester = self._identity(user)
-            pending_buttons = [game_management_button(event.event_id)]
+            pending_buttons = [game_files_button(event.event_id)]
             before_invoke = self._upload_pending_callback(
                 user,
                 message,
@@ -5988,7 +6045,7 @@ class ConversationEngine:
                 )
             return BotResponse(
                 text=(f"Ачивки игры {event_reference(event.name, event.game_date)}\n\n{export.public_url}"),
-                buttons=[game_management_button(event.event_id)],
+                buttons=[game_files_button(event.event_id)],
             )
         if action == "remove":
             return await self._show_removable_players(user, event)
@@ -6009,7 +6066,7 @@ class ConversationEngine:
                     "Таблицы, файл ачивок и все записи будут сохранены.\n\n"
                     f"Для подтверждения введите точное название:\n\n{event.name}"
                 ),
-                buttons=[game_management_button(event.event_id)],
+                buttons=[edit_game_button(event.event_id)],
             )
         return await self._game_management(user, event)
 
@@ -6082,6 +6139,8 @@ class ConversationEngine:
             user.dialog_context = {}
             return BotResponse(text="Введите название игры:")
         if value == MANAGE_GAMES or value in {
+            EDIT_GAME,
+            GAME_FILES,
             CHANGE_STATUS,
             CHANGE_PLAYER_AMOUNT,
             MANAGE_SCHEDULED_EVENTS,
@@ -6095,6 +6154,7 @@ class ConversationEngine:
             CREATE_PASS_TABLE,
             LIST_PASS_TABLES,
             EVENT_TABLES,
+            EXPORT_ACHIEVEMENTS,
             REMOVE_PLAYER,
             MANAGE_PLAYERS,
             LIST_PLAYER_PROFILES,
