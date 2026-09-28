@@ -99,7 +99,7 @@ from larp_bot.application.conversation import (
     WELCOME_TEXT,
     ConversationEngine,
 )
-from larp_bot.application.deadlines import MOSCOW_TIMEZONE
+from larp_bot.application.deadlines import MOSCOW_TIMEZONE, TUESDAY_BEFORE_GAME_18
 from larp_bot.application.services import (
     EventAdministrationService,
     RegistrationCatalog,
@@ -3214,11 +3214,15 @@ async def test_creator_can_schedule_confirmation_opening_and_deadline(
     assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
     opening_prompt = await engine.handle(inbound(8, "create:confirmation:yes", callback=True))
     assert "время открытия подтверждения" in opening_prompt.text
+    assert opening_prompt.buttons[0] == Button(
+        label=TUESDAY_BEFORE_GAME_18,
+        value="create:confirmation:tuesday",
+    )
     too_early = await engine.handle(inbound(9, "01.10.40 18:00"))
     assert "строго после регистрации" in too_early.text
-    deadline_prompt = await engine.handle(inbound(10, "01.11.40 18:00"))
+    deadline_prompt = await engine.handle(inbound(10, opening_prompt.buttons[0].value, callback=True))
     assert "дедлайн подтверждения" in deadline_prompt.text
-    invalid_deadline = await engine.handle(inbound(11, "01.11.40 18:00"))
+    invalid_deadline = await engine.handle(inbound(11, "13.11.40 18:00"))
     assert "строго позже открытия" in invalid_deadline.text
     response = await engine.handle(inbound(12, "14.11.40 19:00"))
 
@@ -3226,10 +3230,10 @@ async def test_creator_can_schedule_confirmation_opening_and_deadline(
         candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Игра с расписанием"
     )
     assert created.registration_open_at == datetime(2040, 10, 1, 18, tzinfo=MOSCOW_TIMEZONE)
-    assert created.confirmation_open_at == datetime(2040, 11, 1, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert created.confirmation_open_at == datetime(2040, 11, 13, 18, tzinfo=MOSCOW_TIMEZONE)
     assert created.confirmation_deadline == datetime(2040, 11, 14, 19, tzinfo=MOSCOW_TIMEZONE)
     assert created.scheduled_close_at == datetime(2040, 11, 16, 3, tzinfo=MOSCOW_TIMEZONE)
-    assert "Открытие подтверждения участия запланировано на 01.11.40 18:00 (МСК)" in response.text
+    assert "Открытие подтверждения участия запланировано на 13.11.40 18:00 (МСК)" in response.text
     assert "Дедлайн: 14.11.40 19:00 (МСК)" in response.text
 
 
@@ -3262,8 +3266,15 @@ async def test_master_can_manage_and_change_all_scheduled_events(
     registration = await engine.handle(inbound(4, "02.10.40 18:00"))
     assert "✅ Время открытия регистрации сохранено" in registration.text
 
-    await engine.handle(inbound(5, f"ag:schedule-confirmation:{scheduled.event_id}", callback=True))
-    await engine.handle(inbound(6, "02.11.40 18:00"))
+    confirmation_prompt = await engine.handle(
+        inbound(5, f"ag:schedule-confirmation:{scheduled.event_id}", callback=True)
+    )
+    tuesday_button = Button(
+        label=TUESDAY_BEFORE_GAME_18,
+        value=f"ag:schedule-confirmation-tuesday:{scheduled.event_id}",
+    )
+    assert tuesday_button in confirmation_prompt.buttons
+    await engine.handle(inbound(6, tuesday_button.value, callback=True))
     confirmation = await engine.handle(inbound(7, "14.11.40 20:00"))
     assert "✅ Время открытия подтверждения и дедлайн сохранены" in confirmation.text
 
@@ -3288,7 +3299,7 @@ async def test_master_can_manage_and_change_all_scheduled_events(
     stored = await engine.events.get(scheduled.event_id)
     assert stored is not None
     assert stored.registration_open_at == datetime(2040, 10, 2, 18, tzinfo=MOSCOW_TIMEZONE)
-    assert stored.confirmation_open_at == datetime(2040, 11, 2, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert stored.confirmation_open_at == datetime(2040, 11, 13, 18, tzinfo=MOSCOW_TIMEZONE)
     assert stored.confirmation_deadline == datetime(2040, 11, 14, 20, tzinfo=MOSCOW_TIMEZONE)
     assert stored.scheduled_close_at == datetime(2040, 11, 17, 4, 30, tzinfo=MOSCOW_TIMEZONE)
 

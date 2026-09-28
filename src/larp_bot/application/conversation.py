@@ -61,12 +61,14 @@ from .deadlines import (
     NEAREST_THURSDAY,
     NEXT_NIGHT_03,
     NEXT_SATURDAY,
+    TUESDAY_BEFORE_GAME_18,
     closest_friday_18,
     closest_thursday_19,
     format_confirmation_deadline,
     next_night_03,
     next_saturday_game_date,
     parse_confirmation_deadline,
+    tuesday_before_game_18,
 )
 from .identity import global_identities, global_users, local_identity
 from .navigation import ADMIN_MENU, MAIN_MENU, MAIN_MENU_LABEL, admin_menu_button, main_menu_button
@@ -681,15 +683,19 @@ def _scheduled_close_response(
 def _scheduled_confirmation_time_response(
     *,
     back: Button,
+    tuesday_value: str | None = None,
     invalid: str = "",
 ) -> BotResponse:
     prefix = f"{invalid}\n\n" if invalid else ""
+    shortcut = f" или нажмите «{TUESDAY_BEFORE_GAME_18}»" if tuesday_value is not None else ""
+    buttons = [] if tuesday_value is None else [Button(label=TUESDAY_BEFORE_GAME_18, value=tuesday_value)]
+    buttons.append(back)
     return BotResponse(
         text=(
-            f"{prefix}Введите время открытия подтверждения строго в формате DD.MM.YY HH:MM. "
+            f"{prefix}Введите время открытия подтверждения строго в формате DD.MM.YY HH:MM{shortcut}. "
             "Время указывается по Москве."
         ),
-        buttons=[back],
+        buttons=buttons,
     )
 
 
@@ -3068,19 +3074,24 @@ class ConversationEngine:
                 return self._creation_confirmation_schedule_question(user)
             user.dialog_state = "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME"
             return _scheduled_confirmation_time_response(
-                back=Button(label="Не хочу планировать открытие подтверждения", value="create:confirmation:no")
+                tuesday_value="create:confirmation:tuesday",
+                back=Button(label="Не хочу планировать открытие подтверждения", value="create:confirmation:no"),
             )
         if user.dialog_state == "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME":
-            try:
-                opens_at = parse_confirmation_deadline(value)
-            except ValueError:
-                return _scheduled_confirmation_time_response(
-                    back=Button(
-                        label="Не хочу планировать открытие подтверждения",
-                        value="create:confirmation:no",
-                    ),
-                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
-                )
+            if value == "create:confirmation:tuesday":
+                opens_at = tuesday_before_game_18(date.fromisoformat(str(context["game_date"])))
+            else:
+                try:
+                    opens_at = parse_confirmation_deadline(value)
+                except ValueError:
+                    return _scheduled_confirmation_time_response(
+                        back=Button(
+                            label="Не хочу планировать открытие подтверждения",
+                            value="create:confirmation:no",
+                        ),
+                        tuesday_value="create:confirmation:tuesday",
+                        invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                    )
             now = datetime.now(MOSCOW_TIMEZONE)
             registration_open_at = (
                 datetime.fromisoformat(str(context["registration_open_at"]))
@@ -3112,6 +3123,7 @@ class ConversationEngine:
                     label="Не хочу планировать открытие подтверждения",
                     value="create:confirmation:no",
                 ),
+                tuesday_value="create:confirmation:tuesday",
                 invalid=invalid,
             )
         try:
@@ -5600,7 +5612,13 @@ class ConversationEngine:
     @staticmethod
     def _confirmation_management_prompt(event: Event, *, invalid: str = "") -> BotResponse:
         back = Button(label=BACK, value=f"ag:schedule:{event.event_id}")
-        response = _scheduled_confirmation_time_response(back=back, invalid=invalid)
+        response = _scheduled_confirmation_time_response(
+            back=back,
+            tuesday_value=(
+                f"ag:schedule-confirmation-tuesday:{event.event_id}" if event.game_date is not None else None
+            ),
+            invalid=invalid,
+        )
         if event.confirmation_open_at is not None:
             response.buttons.insert(
                 0,
@@ -5787,6 +5805,7 @@ class ConversationEngine:
         if action in {
             "schedule-registration",
             "schedule-confirmation",
+            "schedule-confirmation-tuesday",
             "schedule-close",
             "schedule-clear-registration",
             "schedule-clear-confirmation",
@@ -5798,6 +5817,7 @@ class ConversationEngine:
                 in {
                     "schedule-registration",
                     "schedule-confirmation",
+                    "schedule-confirmation-tuesday",
                     "schedule-clear-registration",
                     "schedule-clear-confirmation",
                 }
@@ -5813,6 +5833,24 @@ class ConversationEngine:
             if action == "schedule-confirmation":
                 user.dialog_state = "ADMIN_SCHEDULE_CONFIRMATION_TIME"
                 return self._confirmation_management_prompt(event)
+            if action == "schedule-confirmation-tuesday":
+                if event.game_date is None:
+                    return self._scheduled_events_menu(event, notice="У игры не указана дата.\n\n")
+                opens_at = tuesday_before_game_18(event.game_date)
+                if opens_at <= datetime.now(MOSCOW_TIMEZONE):
+                    invalid = "Открытие подтверждения должно быть запланировано на будущее время."
+                elif event.registration_open_at is not None and opens_at <= event.registration_open_at:
+                    invalid = "Подтверждение должно открываться строго после регистрации."
+                elif event.scheduled_close_at is not None and opens_at >= event.scheduled_close_at:
+                    invalid = "Подтверждение должно открываться строго до закрытия игры."
+                else:
+                    user.dialog_context["confirmation_open_at"] = opens_at.isoformat()
+                    user.dialog_state = "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE"
+                    return _scheduled_confirmation_deadline_response(
+                        back=Button(label=BACK, value=f"ag:schedule:{event.event_id}")
+                    )
+                user.dialog_state = "ADMIN_SCHEDULE_CONFIRMATION_TIME"
+                return self._confirmation_management_prompt(event, invalid=invalid)
             if action == "schedule-close":
                 if event.scheduled_close_operation_id is not None:
                     return self._scheduled_events_menu(
