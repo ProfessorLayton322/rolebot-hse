@@ -59,10 +59,12 @@ from .deadlines import (
     MOSCOW_TIMEZONE,
     NEAREST_FRIDAY,
     NEAREST_THURSDAY,
+    NEXT_NIGHT_03,
     NEXT_SATURDAY,
     closest_friday_18,
     closest_thursday_19,
     format_confirmation_deadline,
+    next_night_03,
     next_saturday_game_date,
     parse_confirmation_deadline,
 )
@@ -157,6 +159,10 @@ CREATE_AS_MASTER = "Назначить себя"
 CREATE_WITH_OTHER_MASTER = "Выбрать другого мастера"
 CREATE_WITHOUT_MASTER = "Назначить позже"
 SCHEDULE_REGISTRATION_QUESTION = "Хотите ли вы запланировать отложенное открытие игры?"
+SCHEDULE_CLOSE_QUESTION = (
+    "Хотите ли вы запланировать закрытие игры? Игра будет закрыта для регистрации, добавлена в статистику "
+    "посещений и архивирована сама. Можете запланировать на ночь после игры, либо выбрать удобное вам время"
+)
 ARCHIVE_GAME = "📦 Архивировать игру"
 UNARCHIVE_GAME = "📤 Разархивировать игру"
 DELETE_GAME = "🗑 Удалить игру"
@@ -261,6 +267,7 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "CO_PLAYER_EDIT",
         "ADMIN_CREATE_NAME",
         "ADMIN_CREATE_DATE",
+        "ADMIN_CREATE_CLOSE_TIME",
         "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_CREATE_MASTER_CHOICE",
         "ADMIN_CREATE_MASTER_PICK",
@@ -601,6 +608,32 @@ def _registration_schedule_response(*, invalid: bool = False, past: bool = False
         buttons=[
             Button(label=NEAREST_FRIDAY, value="create:schedule:nearest-friday"),
             Button(label=CANCEL_DIALOG, value=CANCEL_DIALOG),
+        ],
+    )
+
+
+def _scheduled_close_response(
+    *,
+    invalid: bool = False,
+    not_after_game: bool = False,
+    past: bool = False,
+) -> BotResponse:
+    if not_after_game:
+        prefix = "Закрытие должно быть запланировано строго после даты игры.\n\n"
+    elif past:
+        prefix = "Закрытие должно быть запланировано на будущее время.\n\n"
+    elif invalid:
+        prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n"
+    else:
+        prefix = ""
+    return BotResponse(
+        text=(
+            f"{prefix}{SCHEDULE_CLOSE_QUESTION}\n\n"
+            "Введите время строго в формате DD.MM.YY HH:MM. Время указывается по Москве."
+        ),
+        buttons=[
+            Button(label=NEXT_NIGHT_03, value="create:close:next-night"),
+            Button(label=CANCEL_DIALOG, value="create:close:cancel"),
         ],
     )
 
@@ -2962,6 +2995,11 @@ class ConversationEngine:
             int(context["player_amount"]),
             [] if master_identity is None else [master_identity],
             registration_open_at,
+            (
+                datetime.fromisoformat(str(context["scheduled_close_at"]))
+                if context.get("scheduled_close_at") is not None
+                else None
+            ),
             requester=requester,
             reply_user_id=message.chat_id or message.peer_id or requester.platform_user_id,
             master_label=master_label,
@@ -3051,13 +3089,21 @@ class ConversationEngine:
                 f"{format_confirmation_deadline(event.registration_open_at)} (МСК). "
                 "До этого времени игра не будет видна игрокам."
             )
+        close_line = (
+            ""
+            if event.scheduled_close_at is None
+            else (
+                "\n\nАвтоматическое закрытие запланировано на "
+                f"{format_confirmation_deadline(event.scheduled_close_at)} (МСК)."
+            )
+        )
         return BotResponse(
             text=(
                 f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
                 f"Дата игры: {format_game_date(game_date)}\n\n"
                 f"Количество игроков: {event.player_amount}\n\n"
                 f"{master_line}"
-                f"{registration_line}\n\n"
+                f"{registration_line}{close_line}\n\n"
                 f"Telegram — начать запись:\n{telegram_start}\n\n"
                 f"VK — открыть чат с ботом:\n{vk_start}\n\n"
                 f"{event_table_links(event)}"
@@ -3577,8 +3623,29 @@ class ConversationEngine:
                     game_date = parse_game_date(value)
                 except ValueError:
                     return _game_date_response(invalid=True)
-            user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
+            user.dialog_state = "ADMIN_CREATE_CLOSE_TIME"
             user.dialog_context["game_date"] = game_date.isoformat()
+            return _scheduled_close_response()
+        if user.dialog_state == "ADMIN_CREATE_CLOSE_TIME":
+            game_date = date.fromisoformat(str(user.dialog_context["game_date"]))
+            if value == "create:close:cancel":
+                scheduled_close_at = None
+            elif value == "create:close:next-night":
+                scheduled_close_at = next_night_03(game_date)
+            else:
+                try:
+                    scheduled_close_at = parse_confirmation_deadline(value)
+                except ValueError:
+                    return _scheduled_close_response(invalid=True)
+            if scheduled_close_at is not None and scheduled_close_at.date() <= game_date:
+                return _scheduled_close_response(not_after_game=True)
+            if scheduled_close_at is not None and scheduled_close_at <= datetime.now(MOSCOW_TIMEZONE):
+                return _scheduled_close_response(past=True)
+            if scheduled_close_at is None:
+                user.dialog_context.pop("scheduled_close_at", None)
+            else:
+                user.dialog_context["scheduled_close_at"] = scheduled_close_at.isoformat()
+            user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
             return BotResponse(text=f"Введите количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):")
         if user.dialog_state == "ADMIN_CREATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
@@ -5035,6 +5102,8 @@ class ConversationEngine:
         if not event.registration_is_open():
             assert event.registration_open_at is not None
             text += f"\nОткрытие регистрации: {format_confirmation_deadline(event.registration_open_at)} (МСК)"
+        if event.scheduled_close_at is not None:
+            text += f"\nАвтоматическое закрытие: {format_confirmation_deadline(event.scheduled_close_at)} (МСК)"
         if event.confirmation_deadline is not None:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
         if not is_leader and not is_admin:

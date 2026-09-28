@@ -237,6 +237,84 @@ class MemoryEventRepository:
             event.registration_open_notification_completed_at = completed_at
             event.updated_at = completed_at
 
+    async def list_due_scheduled_closings(
+        self,
+        closed_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]:
+        values = [
+            event
+            for event in self.rows.values()
+            if event.scheduled_close_at is not None
+            and event.scheduled_close_at <= closed_by
+            and event.scheduled_close_completed_at is None
+            and (event.archived_at is None or event.scheduled_close_operation_id is not None)
+        ]
+        values.sort(key=lambda event: (event.scheduled_close_at or closed_by, event.event_id))
+        return deepcopy(values[:limit])
+
+    async def complete_scheduled_close_actions(
+        self,
+        event_id: str,
+        operation_id: str,
+        completed_at: datetime,
+    ) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        if event.scheduled_close_operation_id != operation_id:
+            return False
+        if event.archived_at is not None:
+            return True
+        event.status = EventStatus.CLOSED
+        event.archived_at = completed_at
+        event.updated_at = completed_at
+        return True
+
+    async def start_scheduled_close(
+        self,
+        event_id: str,
+        operation_id: str,
+        started_at: datetime,
+    ) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        if event.scheduled_close_operation_id == operation_id:
+            return True
+        if event.archived_at is not None or event.scheduled_close_operation_id is not None:
+            return False
+        event.status = EventStatus.CLOSED
+        event.scheduled_close_operation_id = operation_id
+        event.updated_at = started_at
+        return True
+
+    async def mark_scheduled_close_notification_delivered(
+        self,
+        event_id: str,
+        operation_id: str,
+        recipient: str,
+    ) -> None:
+        event = self.rows[event_id]
+        if (
+            event.scheduled_close_operation_id == operation_id
+            and recipient not in event.scheduled_close_notified_recipients
+        ):
+            event.scheduled_close_notified_recipients.append(recipient)
+            event.updated_at = datetime.now(event.updated_at.tzinfo)
+
+    async def complete_scheduled_close_notifications(
+        self,
+        event_id: str,
+        operation_id: str,
+        completed_at: datetime,
+    ) -> None:
+        event = self.rows[event_id]
+        if event.scheduled_close_operation_id == operation_id and event.scheduled_close_completed_at is None:
+            event.scheduled_close_completed_at = completed_at
+            event.updated_at = completed_at
+
     async def set_player_amount(self, event_id: str, player_amount: int) -> bool:
         event = self.rows.get(event_id)
         if event is None:

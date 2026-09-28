@@ -179,7 +179,7 @@ resource "yandex_function" "ordered_worker" {
 
 resource "yandex_function" "registration_notifier" {
   name               = "${var.project_name}-registration-notifier"
-  description        = "Notify admins and moderators after scheduled registration opens"
+  description        = "Dispatch scheduled game lifecycle jobs and registration notifications"
   folder_id          = var.yandex_folder_id
   runtime            = "python312"
   entrypoint         = "registration_notifier.handler"

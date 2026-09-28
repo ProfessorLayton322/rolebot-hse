@@ -137,7 +137,12 @@ class StatisticsService:
                 f"Участие мастеров — {MASTER_STATISTICS_FILE_NAME}:\n{master_link}"
             )
         assert payload.game_id is not None
-        event = await self.administration.events.get(payload.game_id)
+        return await self.add_game(payload.game_id, command.operation_id)
+
+    async def add_game(self, event_id: str, operation_id: str) -> str:
+        """Add one unarchived game after authorization has been established."""
+
+        event = await self.administration.events.get(event_id)
         if event is None:
             raise DomainError("Игра не найдена.")
         if event.archived_at is not None:
@@ -189,7 +194,7 @@ class StatisticsService:
         await self._grant_experience(
             event.event_id,
             {r.participant_key for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED},
-            command.operation_id,
+            operation_id,
         )
         if not player_changed and not master_changed:
             return f"Игра {event_reference(event.name, event.game_date)} уже есть в статистике. Таблицы не изменены."

@@ -106,6 +106,25 @@ def test_persisted_registration_open_notification_state_is_loaded() -> None:
     assert event.registration_open_notification_completed_at == completed_at
 
 
+def test_persisted_scheduled_close_state_is_loaded() -> None:
+    close_at = datetime(2026, 11, 15, tzinfo=UTC)
+    completed_at = datetime(2026, 11, 15, 0, 2, tzinfo=UTC)
+    event = YdbEventRepository._from_row(
+        event_row("CLOSED")
+        | {
+            "scheduled_close_at": close_at,
+            "scheduled_close_operation_id": "scheduled-operation",
+            "scheduled_close_notified_recipients_json": '["telegram:10","vk:20"]',
+            "scheduled_close_completed_at": completed_at,
+        }
+    )
+
+    assert event.scheduled_close_at == close_at
+    assert event.scheduled_close_operation_id == "scheduled-operation"
+    assert event.scheduled_close_notified_recipients == ["telegram:10", "vk:20"]
+    assert event.scheduled_close_completed_at == completed_at
+
+
 def test_persisted_signup_token_is_loaded() -> None:
     event = YdbEventRepository._from_row(event_row("CREATED") | {"signup_token": "Game_14_11_2026_A7z"})
 
@@ -304,6 +323,71 @@ async def test_event_creation_persists_scheduled_registration_time() -> None:
 
     assert "registration_open_at" in executor.query_text
     assert executor.params["$registration_open_at"] == opening
+
+
+@pytest.mark.asyncio
+async def test_event_creation_persists_scheduled_close_time() -> None:
+    closing = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+    event = YdbEventRepository._from_row(event_row("CREATED") | {"scheduled_close_at": closing})
+
+    await repository.create(event)
+
+    assert "scheduled_close_at" in executor.query_text
+    assert executor.params["$scheduled_close_at"] == closing
+
+
+@pytest.mark.asyncio
+async def test_due_scheduled_close_query_includes_retrying_archived_games() -> None:
+    closing = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor([event_row("CREATED") | {"scheduled_close_at": closing}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    events = await repository.list_due_scheduled_closings(closing, limit=25)
+
+    assert [event.event_id for event in events] == ["event-a1"]
+    assert "scheduled_close_at <= $closed_by" in executor.query_text
+    assert "scheduled_close_completed_at IS NULL" in executor.query_text
+    assert "archived_at IS NULL OR scheduled_close_operation_id IS NOT NULL" in executor.query_text
+    assert executor.params["$closed_by"] == closing
+    assert executor.params["$limit"] == 25
+
+
+@pytest.mark.asyncio
+async def test_scheduled_close_start_closes_registration_before_statistics() -> None:
+    closing = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor([event_row("CONFIRMATION_OPEN") | {"scheduled_close_at": closing}])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.start_scheduled_close("event-a1", "scheduled-operation", closing)
+
+    assert "SET status = $status" in executor.query_text
+    assert "scheduled_close_operation_id = $operation_id" in executor.query_text
+    assert "archived_at =" not in executor.query_text
+    assert executor.params["$status"] == EventStatus.CLOSED.value
+    assert executor.params["$operation_id"] == "scheduled-operation"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_close_completion_archives_only_the_started_operation() -> None:
+    closing = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor(
+        [
+            event_row("CLOSED")
+            | {
+                "scheduled_close_at": closing,
+                "scheduled_close_operation_id": "scheduled-operation",
+            }
+        ]
+    )
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert await repository.complete_scheduled_close_actions("event-a1", "scheduled-operation", closing)
+
+    assert "archived_at = $completed_at" in executor.query_text
+    assert "scheduled_close_operation_id = $operation_id" in executor.query_text
+    assert executor.params["$operation_id"] == "scheduled-operation"
 
 
 @pytest.mark.asyncio

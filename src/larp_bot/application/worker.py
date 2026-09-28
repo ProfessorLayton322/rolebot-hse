@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.domain.models import Button, Operation, Platform, UnreachableRecipient
 
+from .game_closings import ScheduledGameClosingService
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
 from .statistics import StatisticsService
@@ -26,6 +27,7 @@ class OrderedWorker:
         *,
         max_seconds: float = 40.0,
         statistics: StatisticsService | None = None,
+        scheduled_game_closing: ScheduledGameClosingService | None = None,
     ) -> None:
         self.consumer = consumer
         self.mutations = mutations
@@ -34,6 +36,7 @@ class OrderedWorker:
         self.notifications = notifications
         self.max_seconds = max_seconds
         self.statistics = statistics
+        self.scheduled_game_closing = scheduled_game_closing
 
     async def _deliver_once(self, envelope: QueueEnvelope, text: str, buttons: Sequence[Button]) -> None:
         command = envelope.command
@@ -130,6 +133,15 @@ class OrderedWorker:
                             if self.statistics is None:
                                 raise RuntimeError("statistics service is not configured")
                             default_text = await self.statistics.apply(command)
+                        elif command.operation in {
+                            Operation.SCHEDULED_CLOSE_EVENT,
+                            Operation.SCHEDULED_CLOSE_STATISTICS,
+                            Operation.SCHEDULED_CLOSE_FINALIZE,
+                        }:
+                            if self.scheduled_game_closing is None:
+                                raise RuntimeError("scheduled game closing service is not configured")
+                            default_text = await self.scheduled_game_closing.apply(command)
+                            notifications_enabled = False
                         else:
                             result = await self.mutations.apply(command)
                             default_text = result.text

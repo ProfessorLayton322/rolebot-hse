@@ -101,6 +101,41 @@ class EventRepository(Protocol):
         completed_at: datetime,
     ) -> None: ...
 
+    async def list_due_scheduled_closings(
+        self,
+        closed_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]: ...
+
+    async def start_scheduled_close(
+        self,
+        event_id: str,
+        operation_id: str,
+        started_at: datetime,
+    ) -> bool: ...
+
+    async def complete_scheduled_close_actions(
+        self,
+        event_id: str,
+        operation_id: str,
+        completed_at: datetime,
+    ) -> bool: ...
+
+    async def mark_scheduled_close_notification_delivered(
+        self,
+        event_id: str,
+        operation_id: str,
+        recipient: str,
+    ) -> None: ...
+
+    async def complete_scheduled_close_notifications(
+        self,
+        event_id: str,
+        operation_id: str,
+        completed_at: datetime,
+    ) -> None: ...
+
     async def set_player_amount(self, event_id: str, player_amount: int) -> bool: ...
 
     async def set_details(self, event_id: str, name: str, game_date: date) -> bool: ...

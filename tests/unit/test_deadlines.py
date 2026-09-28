@@ -9,6 +9,7 @@ from larp_bot.application.deadlines import (
     closest_friday_18,
     closest_thursday_19,
     format_confirmation_deadline,
+    next_night_03,
     next_saturday_game_date,
     parse_confirmation_deadline,
 )
@@ -53,3 +54,7 @@ def test_next_saturday_is_one_week_after_closest_saturday_in_moscow() -> None:
 
     assert next_saturday_game_date(friday_in_utc_but_saturday_in_moscow) == date(2026, 9, 19)
     assert next_saturday_game_date(sunday_in_moscow) == date(2026, 9, 26)
+
+
+def test_next_night_is_three_am_moscow_on_day_after_game() -> None:
+    assert next_night_03(date(2026, 11, 14)) == datetime(2026, 11, 15, 3, tzinfo=MOSCOW_TIMEZONE)

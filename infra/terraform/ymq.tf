@@ -53,7 +53,7 @@ resource "yandex_function_trigger" "worker_kicks" {
 
 resource "yandex_function_trigger" "scheduled_registration_notifications" {
   name        = "${var.project_name}-scheduled-registration-notifications"
-  description = "Check every minute for scheduled registrations that have opened"
+  description = "Check every minute for scheduled registration openings and game closings"
   folder_id   = var.yandex_folder_id
 
   function {
