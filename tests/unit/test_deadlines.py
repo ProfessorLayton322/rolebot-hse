@@ -12,6 +12,7 @@ from larp_bot.application.deadlines import (
     next_night_03,
     next_saturday_game_date,
     parse_confirmation_deadline,
+    tuesday_before_game_18,
 )
 
 
@@ -58,3 +59,17 @@ def test_next_saturday_is_one_week_after_closest_saturday_in_moscow() -> None:
 
 def test_next_night_is_three_am_moscow_on_day_after_game() -> None:
     assert next_night_03(date(2026, 11, 14)) == datetime(2026, 11, 15, 3, tzinfo=MOSCOW_TIMEZONE)
+
+
+@pytest.mark.parametrize(
+    ("game_date", "expected"),
+    [
+        (date(2026, 11, 14), datetime(2026, 11, 10, 18, tzinfo=MOSCOW_TIMEZONE)),
+        (date(2026, 11, 10), datetime(2026, 11, 3, 18, tzinfo=MOSCOW_TIMEZONE)),
+    ],
+)
+def test_tuesday_before_game_is_always_strictly_before_game(
+    game_date: date,
+    expected: datetime,
+) -> None:
+    assert tuesday_before_game_18(game_date) == expected

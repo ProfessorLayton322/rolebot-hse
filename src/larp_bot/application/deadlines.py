@@ -10,6 +10,7 @@ NEAREST_THURSDAY = "Ближайший четверг 19:00"
 NEAREST_FRIDAY = "Ближайшая пятница 18:00"
 NEXT_SATURDAY = "Следующая суббота"
 NEXT_NIGHT_03 = "03:00 ночи после игры"
+TUESDAY_BEFORE_GAME_18 = "Вторник перед игрой 18:00"
 _STRICT_DEADLINE = re.compile(r"\d{2}\.\d{2}\.\d{2} \d{2}:\d{2}")
 
 
@@ -56,3 +57,14 @@ def next_night_03(game_date: date) -> datetime:
     """Return 03:00 Moscow time on the calendar day after a game."""
 
     return datetime.combine(game_date + timedelta(days=1), time(hour=3), tzinfo=MOSCOW_TIMEZONE)
+
+
+def tuesday_before_game_18(game_date: date) -> datetime:
+    """Return 18:00 Moscow time on the Tuesday strictly before a game."""
+
+    days_since_tuesday = (game_date.weekday() - 1) % 7 or 7
+    return datetime.combine(
+        game_date - timedelta(days=days_since_tuesday),
+        time(hour=18),
+        tzinfo=MOSCOW_TIMEZONE,
+    )
