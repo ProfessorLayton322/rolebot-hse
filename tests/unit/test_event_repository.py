@@ -370,6 +370,34 @@ async def test_due_scheduled_close_query_includes_retrying_archived_games() -> N
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_scheduler_reads_all_due_actions_with_one_narrow_query() -> None:
+    due = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor(
+        [
+            event_row("CREATED")
+            | {
+                "registration_open_at": due,
+                "registration_open_notified_recipients_json": '["telegram:10"]',
+                "confirmation_open_at": due,
+                "confirmation_deadline": due,
+                "scheduled_close_at": due,
+            }
+        ]
+    )
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    events = await repository.list_due_lifecycle_events(due, limit=300)
+
+    assert [event.event_id for event in events] == ["event-a1"]
+    assert events[0].registration_open_notified_recipients == ["telegram:10"]
+    assert "registration_open_at <= $due_by" in executor.query_text
+    assert "confirmation_open_at <= $due_by" in executor.query_text
+    assert "scheduled_close_at <= $due_by" in executor.query_text
+    assert "disk_resource_path" not in executor.query_text
+    assert executor.params["$limit"] == 300
+
+
+@pytest.mark.asyncio
 async def test_scheduled_close_start_closes_registration_before_statistics() -> None:
     closing = datetime(2026, 11, 15, tzinfo=UTC)
     executor = RecordingExecutor([event_row("CONFIRMATION_OPEN") | {"scheduled_close_at": closing}])

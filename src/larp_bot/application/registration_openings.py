@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from larp_bot.domain.models import BotIdentity, Event, Platform, event_reference
+from larp_bot.domain.models import BotIdentity, Event, EventStatus, Platform, ScheduledLifecycleEvent, event_reference
 
 from .navigation import main_menu_button
 from .ports import AdminConfigProvider, DeferredTransport, EventRepository
@@ -37,10 +38,10 @@ class RegistrationOpeningNotificationService:
         return f"{identity.platform.value}:{identity.platform_user_id}"
 
     @staticmethod
-    def _request_id(event: Event, identity: BotIdentity) -> str:
+    def _request_id(event: Event | ScheduledLifecycleEvent, identity: BotIdentity) -> str:
         return f"registration-open:{event.event_id}:{identity.platform.value}:{identity.platform_user_id}"
 
-    async def _send(self, event: Event, identity: BotIdentity) -> str | None:
+    async def _send(self, event: Event | ScheduledLifecycleEvent, identity: BotIdentity) -> str | None:
         recipient = self._recipient_key(identity)
         try:
             await self.transport.send(
@@ -67,8 +68,27 @@ class RegistrationOpeningNotificationService:
         *,
         now: datetime | None = None,
         limit: int = 100,
+        due_events: Sequence[ScheduledLifecycleEvent] | None = None,
     ) -> RegistrationOpeningNotificationResult:
         opened_by = datetime.now(UTC) if now is None else now.astimezone(UTC)
+        if due_events is None:
+            due: Sequence[Event | ScheduledLifecycleEvent] = await self.events.list_due_registration_notifications(
+                opened_by,
+                limit=limit,
+            )
+        else:
+            due = [
+                event
+                for event in due_events
+                if event.registration_open_at is not None
+                and event.registration_open_at <= opened_by
+                and event.registration_open_notification_completed_at is None
+                and event.archived_at is None
+                and event.status is not EventStatus.CLOSED
+            ][:limit]
+        if not due:
+            return RegistrationOpeningNotificationResult(events_completed=0, notifications_delivered=0)
+
         admin_identities, moderator_identities = await asyncio.gather(
             self.admins.list_admins(),
             self.admins.list_gamemasters(),
@@ -82,7 +102,7 @@ class RegistrationOpeningNotificationService:
 
         delivered = 0
         completed = 0
-        for event in await self.events.list_due_registration_notifications(opened_by, limit=limit):
+        for event in due:
             notified = set(event.registration_open_notified_recipients)
             pending = [identity for identity in ordered_identities if self._recipient_key(identity) not in notified]
             results = await asyncio.gather(*(self._send(event, identity) for identity in pending))

@@ -22,6 +22,7 @@ from larp_bot.domain.models import (
     Platform,
     PrivilegedRole,
     Registration,
+    ScheduledLifecycleEvent,
     TelegramUser,
     User,
     VkUser,
@@ -1046,6 +1047,90 @@ class YdbEventRepository:
             },
         )
         return True
+
+    async def list_due_lifecycle_events(
+        self,
+        due_by: datetime,
+        *,
+        limit: int = 300,
+    ) -> Sequence[ScheduledLifecycleEvent]:
+        rows = await self.db.query(
+            """
+            DECLARE $due_by AS Timestamp; DECLARE $created_status AS Utf8;
+            DECLARE $closed_status AS Utf8; DECLARE $limit AS Uint64;
+            SELECT event_id, name, game_date, status,
+                   registration_open_at, registration_open_notified_recipients_json,
+                   registration_open_notification_completed_at,
+                   confirmation_open_at, confirmation_deadline,
+                   scheduled_close_at, scheduled_close_operation_id,
+                   scheduled_close_completed_at, archived_at
+            FROM `events`
+            WHERE (
+                registration_open_at IS NOT NULL
+                AND registration_open_at <= $due_by
+                AND registration_open_notification_completed_at IS NULL
+                AND archived_at IS NULL
+                AND status != $closed_status
+            ) OR (
+                confirmation_open_at IS NOT NULL
+                AND confirmation_open_at <= $due_by
+                AND confirmation_deadline IS NOT NULL
+                AND archived_at IS NULL
+                AND status = $created_status
+            ) OR (
+                scheduled_close_at IS NOT NULL
+                AND scheduled_close_at <= $due_by
+                AND scheduled_close_completed_at IS NULL
+                AND (archived_at IS NULL OR scheduled_close_operation_id IS NOT NULL)
+            )
+            ORDER BY event_id
+            LIMIT $limit;
+            """,
+            {
+                "$due_by": due_by.astimezone(UTC),
+                "$created_status": EventStatus.CREATED.value,
+                "$closed_status": EventStatus.CLOSED.value,
+                "$limit": limit,
+            },
+            read_only=True,
+        )
+        return [
+            ScheduledLifecycleEvent(
+                event_id=row["event_id"],
+                name=row["name"],
+                game_date=_date(row["game_date"]) if row.get("game_date") is not None else None,
+                status=EventStatus(str(row["status"])),
+                registration_open_at=(
+                    _dt(row["registration_open_at"]) if row.get("registration_open_at") is not None else None
+                ),
+                registration_open_notified_recipients=_string_list(
+                    row.get("registration_open_notified_recipients_json"),
+                    "registration_open_notified_recipients_json",
+                ),
+                registration_open_notification_completed_at=(
+                    _dt(row["registration_open_notification_completed_at"])
+                    if row.get("registration_open_notification_completed_at") is not None
+                    else None
+                ),
+                confirmation_open_at=(
+                    _dt(row["confirmation_open_at"]) if row.get("confirmation_open_at") is not None else None
+                ),
+                confirmation_deadline=(
+                    _dt(row["confirmation_deadline"]) if row.get("confirmation_deadline") is not None else None
+                ),
+                scheduled_close_at=(
+                    _dt(row["scheduled_close_at"]) if row.get("scheduled_close_at") is not None else None
+                ),
+                scheduled_close_operation_id=row.get("scheduled_close_operation_id"),
+                scheduled_close_completed_at=(
+                    _dt(row["scheduled_close_completed_at"])
+                    if row.get("scheduled_close_completed_at") is not None
+                    else None
+                ),
+                archived_at=_dt(row["archived_at"]) if row.get("archived_at") is not None else None,
+            )
+            for row in rows
+        ]
 
     async def list_due_registration_notifications(
         self,
