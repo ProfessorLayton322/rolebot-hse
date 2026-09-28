@@ -606,6 +606,7 @@ class YdbEventRepository:
         public_table_resource_path, public_table_public_url,
         status, registration_open_at, registration_open_notified_recipients_json,
         registration_open_notification_completed_at,
+        confirmation_open_at,
         scheduled_close_at, scheduled_close_operation_id,
         scheduled_close_notified_recipients_json, scheduled_close_completed_at,
         confirmation_deadline, registrations_migrated_at,
@@ -657,6 +658,9 @@ class YdbEventRepository:
                 _dt(row["registration_open_notification_completed_at"])
                 if row.get("registration_open_notification_completed_at") is not None
                 else None
+            ),
+            confirmation_open_at=(
+                _dt(row["confirmation_open_at"]) if row.get("confirmation_open_at") is not None else None
             ),
             scheduled_close_at=(_dt(row["scheduled_close_at"]) if row.get("scheduled_close_at") is not None else None),
             scheduled_close_operation_id=row.get("scheduled_close_operation_id"),
@@ -786,6 +790,7 @@ class YdbEventRepository:
             DECLARE $registration_open_at AS Optional<Timestamp>;
             DECLARE $registration_open_notified_recipients_json AS Utf8;
             DECLARE $registration_open_notification_completed_at AS Optional<Timestamp>;
+            DECLARE $confirmation_open_at AS Optional<Timestamp>;
             DECLARE $scheduled_close_at AS Optional<Timestamp>;
             DECLARE $scheduled_close_operation_id AS Optional<Utf8>;
             DECLARE $scheduled_close_notified_recipients_json AS Utf8;
@@ -816,6 +821,7 @@ class YdbEventRepository:
                 public_table_resource_path, public_table_public_url,
                 status, registration_open_at, registration_open_notified_recipients_json,
                 registration_open_notification_completed_at,
+                confirmation_open_at,
                 scheduled_close_at, scheduled_close_operation_id,
                 scheduled_close_notified_recipients_json, scheduled_close_completed_at,
                 confirmation_deadline, registrations_migrated_at,
@@ -836,6 +842,7 @@ class YdbEventRepository:
                 $public_table_resource_path, $public_table_public_url,
                 $status, $registration_open_at, $registration_open_notified_recipients_json,
                 $registration_open_notification_completed_at,
+                $confirmation_open_at,
                 $scheduled_close_at, $scheduled_close_operation_id,
                 $scheduled_close_notified_recipients_json, $scheduled_close_completed_at,
                 $confirmation_deadline, $registrations_migrated_at,
@@ -874,6 +881,7 @@ class YdbEventRepository:
                     separators=(",", ":"),
                 ),
                 "$registration_open_notification_completed_at": (event.registration_open_notification_completed_at),
+                "$confirmation_open_at": event.confirmation_open_at,
                 "$scheduled_close_at": event.scheduled_close_at,
                 "$scheduled_close_operation_id": event.scheduled_close_operation_id,
                 "$scheduled_close_notified_recipients_json": json.dumps(
@@ -1013,6 +1021,32 @@ class YdbEventRepository:
         )
         return True
 
+    async def set_registration_open_at(self, event_id: str, opens_at: datetime | None) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.registration_open_at == opens_at:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $opens_at AS Optional<Timestamp>;
+            DECLARE $notified_recipients_json AS Utf8;
+            DECLARE $completed_at AS Optional<Timestamp>; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET registration_open_at = $opens_at,
+                registration_open_notified_recipients_json = $notified_recipients_json,
+                registration_open_notification_completed_at = $completed_at,
+                updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$opens_at": None if opens_at is None else opens_at.astimezone(UTC),
+                "$notified_recipients_json": "[]",
+                "$completed_at": None,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def list_due_registration_notifications(
         self,
         opened_by: datetime,
@@ -1076,6 +1110,133 @@ class YdbEventRepository:
             """,
             {"$event_id": event_id, "$completed_at": completed_at.astimezone(UTC)},
         )
+
+    async def set_confirmation_schedule(
+        self,
+        event_id: str,
+        opens_at: datetime | None,
+        deadline: datetime | None,
+    ) -> bool:
+        if (opens_at is None) != (deadline is None):
+            raise ValueError("confirmation opening and deadline must be set together")
+        event = await self.get(event_id)
+        if event is None or (event.confirmation_open_at == opens_at and event.confirmation_deadline == deadline):
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $opens_at AS Optional<Timestamp>;
+            DECLARE $deadline AS Optional<Timestamp>; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET confirmation_open_at = $opens_at,
+                confirmation_deadline = $deadline,
+                updated_at = $updated_at
+            WHERE event_id = $event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$opens_at": None if opens_at is None else opens_at.astimezone(UTC),
+                "$deadline": None if deadline is None else deadline.astimezone(UTC),
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
+    async def list_due_confirmation_openings(
+        self,
+        opened_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]:
+        rows = await self.db.query(
+            f"""
+            DECLARE $opened_by AS Timestamp; DECLARE $created_status AS Utf8;
+            DECLARE $limit AS Uint64;
+            SELECT {self.COLUMNS}
+            FROM `events`
+            WHERE confirmation_open_at IS NOT NULL
+              AND confirmation_open_at <= $opened_by
+              AND confirmation_deadline IS NOT NULL
+              AND archived_at IS NULL
+              AND status = $created_status
+            ORDER BY confirmation_open_at, event_id
+            LIMIT $limit;
+            """,
+            {
+                "$opened_by": opened_by.astimezone(UTC),
+                "$created_status": EventStatus.CREATED.value,
+                "$limit": limit,
+            },
+            read_only=True,
+        )
+        return [self._from_row(row) for row in rows]
+
+    async def open_scheduled_confirmation(
+        self,
+        event_id: str,
+        opens_at: datetime,
+        deadline: datetime,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $created_status AS Utf8;
+            DECLARE $confirmation_status AS Utf8; DECLARE $opens_at AS Timestamp;
+            DECLARE $deadline AS Timestamp; DECLARE $cleared_open_at AS Optional<Timestamp>;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET status = $confirmation_status,
+                confirmation_open_at = $cleared_open_at,
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+              AND archived_at IS NULL
+              AND status = $created_status
+              AND confirmation_open_at = $opens_at
+              AND confirmation_deadline = $deadline;
+            """,
+            {
+                "$event_id": event_id,
+                "$created_status": EventStatus.CREATED.value,
+                "$confirmation_status": EventStatus.CONFIRMATION_OPEN.value,
+                "$opens_at": opens_at.astimezone(UTC),
+                "$deadline": deadline.astimezone(UTC),
+                "$cleared_open_at": None,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        refreshed = await self.get(event_id)
+        return (
+            refreshed is not None
+            and refreshed.status is EventStatus.CONFIRMATION_OPEN
+            and refreshed.confirmation_open_at is None
+            and refreshed.confirmation_deadline == deadline
+        )
+
+    async def set_scheduled_close_at(self, event_id: str, closes_at: datetime | None) -> bool:
+        event = await self.get(event_id)
+        if event is None or event.scheduled_close_operation_id is not None or event.scheduled_close_at == closes_at:
+            return False
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $closes_at AS Optional<Timestamp>;
+            DECLARE $operation_id AS Optional<Utf8>; DECLARE $recipients_json AS Utf8;
+            DECLARE $completed_at AS Optional<Timestamp>; DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET scheduled_close_at = $closes_at,
+                scheduled_close_operation_id = $operation_id,
+                scheduled_close_notified_recipients_json = $recipients_json,
+                scheduled_close_completed_at = $completed_at,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND scheduled_close_operation_id IS NULL;
+            """,
+            {
+                "$event_id": event_id,
+                "$closes_at": None if closes_at is None else closes_at.astimezone(UTC),
+                "$operation_id": None,
+                "$recipients_json": "[]",
+                "$completed_at": None,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
 
     async def list_due_scheduled_closings(
         self,
@@ -1372,14 +1533,19 @@ class YdbEventRepository:
         await self.db.query(
             """
             DECLARE $event_id AS Utf8; DECLARE $status AS Utf8;
+            DECLARE $confirmation_open_at AS Optional<Timestamp>;
             DECLARE $deadline AS Timestamp; DECLARE $updated_at AS Timestamp;
             UPDATE `events`
-            SET status = $status, confirmation_deadline = $deadline, updated_at = $updated_at
+            SET status = $status,
+                confirmation_open_at = $confirmation_open_at,
+                confirmation_deadline = $deadline,
+                updated_at = $updated_at
             WHERE event_id = $event_id;
             """,
             {
                 "$event_id": event_id,
                 "$status": EventStatus.CONFIRMATION_OPEN.value,
+                "$confirmation_open_at": None,
                 "$deadline": deadline.astimezone(UTC),
                 "$updated_at": datetime.now(UTC),
             },

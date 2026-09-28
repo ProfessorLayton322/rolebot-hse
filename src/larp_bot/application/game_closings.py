@@ -116,7 +116,9 @@ class ScheduledGameClosingService:
             ),
         }.get(command.operation)
         if expected_id is None or command.operation_id != expected_id:
-            raise ValueError("scheduled close command does not match its stage")
+            # A master may have changed or removed the schedule after this
+            # command was queued. It is stale, not retryable.
+            raise DomainError("Запланированное закрытие было изменено или отменено")
         return event, operation_id
 
     async def _schedule_next(self, event_id: str, operation_id: str, operation: Operation) -> None:

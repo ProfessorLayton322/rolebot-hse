@@ -8,6 +8,7 @@ import pytest
 
 from larp_bot.adapters.memory import MemoryCommandPublisher, MemoryDeferredTransport, MemoryEventRepository
 from larp_bot.application.game_closings import ScheduledGameClosingDispatcher, ScheduledGameClosingService
+from larp_bot.application.services import DomainError
 from larp_bot.domain.models import (
     BotIdentity,
     Button,
@@ -89,6 +90,25 @@ async def test_due_closing_dispatch_uses_one_deterministic_per_game_command() ->
     assert command.operation.value == "SCHEDULED_CLOSE_EVENT"
     assert command.platform is Platform.SYSTEM
     assert command.operation_id == dispatcher.operation_id(due.event_id, due.scheduled_close_at)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_changed_closing_schedule_makes_an_earlier_command_non_retryable() -> None:
+    closing = datetime(2026, 11, 15, tzinfo=UTC)
+    event = scheduled_event("event-changed", closing)
+    events = MemoryEventRepository([event])
+    publisher = MemoryCommandPublisher()
+    await ScheduledGameClosingDispatcher(events, publisher).dispatch_due(now=closing)
+    await events.set_scheduled_close_at(event.event_id, closing + timedelta(hours=1))
+    service = ScheduledGameClosingService(
+        events,
+        AsyncMock(),
+        MemoryDeferredTransport(),
+        publisher,
+    )
+
+    with pytest.raises(DomainError, match="изменено или отменено"):
+        await service.apply(publisher.commands[0])
 
 
 @pytest.mark.asyncio

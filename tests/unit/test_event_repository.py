@@ -92,6 +92,21 @@ def test_persisted_registration_opening_time_is_loaded() -> None:
     assert event.registration_open_at == opening
 
 
+def test_persisted_confirmation_opening_time_is_loaded() -> None:
+    opening = datetime(2026, 11, 10, 15, tzinfo=UTC)
+    deadline = datetime(2026, 11, 12, 16, tzinfo=UTC)
+    event = YdbEventRepository._from_row(
+        event_row("CREATED")
+        | {
+            "confirmation_open_at": opening,
+            "confirmation_deadline": deadline,
+        }
+    )
+
+    assert event.confirmation_open_at == opening
+    assert event.confirmation_deadline == deadline
+
+
 def test_persisted_registration_open_notification_state_is_loaded() -> None:
     completed_at = datetime(2026, 9, 18, 15, 1, tzinfo=UTC)
     event = YdbEventRepository._from_row(

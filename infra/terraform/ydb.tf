@@ -214,6 +214,10 @@ resource "yandex_ydb_table" "events" {
     type = "Timestamp"
   }
   column {
+    name = "confirmation_open_at"
+    type = "Timestamp"
+  }
+  column {
     name = "confirmation_deadline"
     type = "Timestamp"
   }

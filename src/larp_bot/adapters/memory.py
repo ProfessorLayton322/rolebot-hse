@@ -207,6 +207,16 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 
+    async def set_registration_open_at(self, event_id: str, opens_at: datetime | None) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.registration_open_at == opens_at:
+            return False
+        event.registration_open_at = opens_at
+        event.registration_open_notified_recipients = []
+        event.registration_open_notification_completed_at = None
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
+
     async def list_due_registration_notifications(
         self,
         opened_by: datetime,
@@ -236,6 +246,72 @@ class MemoryEventRepository:
         if event.registration_open_notification_completed_at is None:
             event.registration_open_notification_completed_at = completed_at
             event.updated_at = completed_at
+
+    async def set_confirmation_schedule(
+        self,
+        event_id: str,
+        opens_at: datetime | None,
+        deadline: datetime | None,
+    ) -> bool:
+        if (opens_at is None) != (deadline is None):
+            raise ValueError("confirmation opening and deadline must be set together")
+        event = self.rows.get(event_id)
+        if event is None or (event.confirmation_open_at == opens_at and event.confirmation_deadline == deadline):
+            return False
+        event.confirmation_open_at = opens_at
+        event.confirmation_deadline = deadline
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
+
+    async def list_due_confirmation_openings(
+        self,
+        opened_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]:
+        values = [
+            event
+            for event in self.rows.values()
+            if event.confirmation_open_at is not None
+            and event.confirmation_open_at <= opened_by
+            and event.confirmation_deadline is not None
+            and event.archived_at is None
+            and event.status is EventStatus.CREATED
+        ]
+        values.sort(key=lambda event: (event.confirmation_open_at or opened_by, event.event_id))
+        return deepcopy(values[:limit])
+
+    async def open_scheduled_confirmation(
+        self,
+        event_id: str,
+        opens_at: datetime,
+        deadline: datetime,
+    ) -> bool:
+        event = self.rows.get(event_id)
+        if (
+            event is None
+            or event.archived_at is not None
+            or event.status is not EventStatus.CREATED
+            or event.confirmation_open_at != opens_at
+            or event.confirmation_deadline != deadline
+        ):
+            return False
+        event.status = EventStatus.CONFIRMATION_OPEN
+        event.confirmation_open_at = None
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
+
+    async def set_scheduled_close_at(self, event_id: str, closes_at: datetime | None) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.scheduled_close_operation_id is not None:
+            return False
+        if event.scheduled_close_at == closes_at:
+            return False
+        event.scheduled_close_at = closes_at
+        event.scheduled_close_notified_recipients = []
+        event.scheduled_close_completed_at = None
+        event.updated_at = datetime.now(event.updated_at.tzinfo)
+        return True
 
     async def list_due_scheduled_closings(
         self,
@@ -372,6 +448,7 @@ class MemoryEventRepository:
             return False
         changed = event.status is not EventStatus.CONFIRMATION_OPEN or event.confirmation_deadline != deadline
         event.status = EventStatus.CONFIRMATION_OPEN
+        event.confirmation_open_at = None
         event.confirmation_deadline = deadline
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
