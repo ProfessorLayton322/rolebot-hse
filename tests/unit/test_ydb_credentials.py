@@ -61,6 +61,38 @@ async def test_parameterized_query_is_prepared_before_execution() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_only_query_uses_snapshot_transaction() -> None:
+    executor = YdbExecutor.__new__(YdbExecutor)
+    executor.pool = MagicMock()
+    session = MagicMock()
+    transaction = session.transaction.return_value
+    session.prepare.return_value = object()
+    transaction.execute.return_value = []
+    executor.pool.retry_operation_sync.side_effect = lambda operation: operation(session)
+
+    await executor.query("SELECT 1;", read_only=True)
+
+    mode = session.transaction.call_args.args[0]
+    assert mode.name == "snapshot_read_only"
+
+
+@pytest.mark.asyncio
+async def test_mutating_query_keeps_serializable_transaction() -> None:
+    executor = YdbExecutor.__new__(YdbExecutor)
+    executor.pool = MagicMock()
+    session = MagicMock()
+    transaction = session.transaction.return_value
+    session.prepare.return_value = object()
+    transaction.execute.return_value = []
+    executor.pool.retry_operation_sync.side_effect = lambda operation: operation(session)
+
+    await executor.query("UPDATE `events` SET name = 'new';")
+
+    mode = session.transaction.call_args.args[0]
+    assert mode.name == "serializable_read_write"
+
+
+@pytest.mark.asyncio
 async def test_delivery_claim_prepares_both_transaction_queries() -> None:
     executor = YdbExecutor.__new__(YdbExecutor)
     executor.pool = MagicMock()

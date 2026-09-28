@@ -57,16 +57,12 @@ class YdbExecutor:
         *,
         read_only: bool = False,
     ) -> list[dict[str, Any]]:
-        del read_only
-
         def operation(session: Any) -> list[dict[str, Any]]:
-            # The dialog FSM, update deduplication and event transitions all need
-            # strong reads. Serializable transactions deliberately trade a little
-            # latency for deterministic behavior across warm Function instances.
             # The table SDK silently ignores parameters bound to raw YQL text;
             # binding is supported only for a prepared DataQuery.
             prepared = session.prepare(yql)
-            result = session.transaction(ydb.SerializableReadWrite()).execute(
+            transaction_mode = ydb.SnapshotReadOnly() if read_only else ydb.SerializableReadWrite()
+            result = session.transaction(transaction_mode).execute(
                 prepared,
                 params or {},
                 commit_tx=True,
