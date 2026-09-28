@@ -186,6 +186,7 @@ class Operation(StrEnum):
     CANCEL = "CANCEL"
     OPEN_REGISTRATION = "OPEN_REGISTRATION"
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
+    SCHEDULED_OPEN_CONFIRMATION = "SCHEDULED_OPEN_CONFIRMATION"
     SEND_CONFIRMATION_REMINDER = "SEND_CONFIRMATION_REMINDER"
     SEND_CONFIRMED_NOTIFICATION = "SEND_CONFIRMED_NOTIFICATION"
     SEND_ALL_PLAYERS_NOTIFICATION = "SEND_ALL_PLAYERS_NOTIFICATION"
@@ -488,6 +489,10 @@ class Event(StrictModel):
     # timestamp gate so notification delivery can never delay registration.
     registration_open_notified_recipients: list[str] = Field(default_factory=list)
     registration_open_notification_completed_at: datetime | None = None
+    # The confirmation deadline is collected together with this timestamp.
+    # Once the timer opens confirmation, this field is cleared while the
+    # deadline remains available to players.
+    confirmation_open_at: datetime | None = None
     # A scheduled close is executed by the per-game FIFO worker. The operation
     # marker and delivery state make statistics, archival, and master
     # notifications retry-safe across separate worker invocations.
@@ -529,11 +534,11 @@ class Event(StrictModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    @field_validator("registration_open_at")
+    @field_validator("registration_open_at", "confirmation_open_at")
     @classmethod
-    def registration_opening_has_timezone(cls, value: datetime | None) -> datetime | None:
+    def scheduled_opening_has_timezone(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-            raise ValueError("registration opening must include a timezone")
+            raise ValueError("scheduled opening must include a timezone")
         return value
 
     @field_validator("scheduled_close_at", "scheduled_close_completed_at")
@@ -791,8 +796,10 @@ class OrderedRegistrationCommand(StrictModel):
             raise ValueError(f"{self.operation} requires CharacterWishPayload")
         if self.operation is Operation.UPDATE_CO_PLAYER_WISH and not isinstance(self.payload, CoPlayerWishPayload):
             raise ValueError("UPDATE_CO_PLAYER_WISH requires CoPlayerWishPayload")
-        if self.operation is Operation.OPEN_CONFIRMATION and not isinstance(self.payload, ConfirmationDeadlinePayload):
-            raise ValueError("OPEN_CONFIRMATION requires ConfirmationDeadlinePayload")
+        if self.operation in {Operation.OPEN_CONFIRMATION, Operation.SCHEDULED_OPEN_CONFIRMATION} and not isinstance(
+            self.payload, ConfirmationDeadlinePayload
+        ):
+            raise ValueError(f"{self.operation} requires ConfirmationDeadlinePayload")
         notification_operations = {
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.SEND_ALL_PLAYERS_NOTIFICATION,

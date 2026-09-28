@@ -159,6 +159,15 @@ class UploadCompletionService:
                 f"{format_confirmation_deadline(event.registration_open_at)} (МСК). "
                 "До этого времени игра не будет видна игрокам."
             )
+        confirmation_line = (
+            ""
+            if event.confirmation_open_at is None or event.confirmation_deadline is None
+            else (
+                "\n\nОткрытие подтверждения участия запланировано на "
+                f"{format_confirmation_deadline(event.confirmation_open_at)} (МСК). "
+                f"Дедлайн: {format_confirmation_deadline(event.confirmation_deadline)} (МСК)."
+            )
+        )
         close_line = (
             ""
             if event.scheduled_close_at is None
@@ -171,7 +180,7 @@ class UploadCompletionService:
             f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
             f"Дата игры: {format_game_date(event.game_date)}\n\n"
             f"Количество игроков: {event.player_amount}\n\n"
-            f"{master_line}{registration_line}{close_line}\n\n"
+            f"{master_line}{registration_line}{confirmation_line}{close_line}\n\n"
             f"Telegram — начать запись:\nhttps://t.me/{telegram_username}?start={event.signup_token}\n\n"
             f"VK — открыть чат с ботом:\nhttps://vk.me/club{vk_group_id}\n\n"
             f"{event_table_links(event)}"

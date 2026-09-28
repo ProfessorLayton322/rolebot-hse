@@ -44,6 +44,7 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 
+from .confirmation_openings import ScheduledConfirmationOpeningDispatcher
 from .deadlines import MOSCOW_TIMEZONE, format_confirmation_deadline
 from .identity import global_users, identities_for_local_user
 from .navigation import confirmation_button, main_menu_button
@@ -971,6 +972,8 @@ class EventAdministrationService:
         player_amount: int,
         leaders: Sequence[BotIdentity],
         registration_open_at: datetime | None = None,
+        confirmation_open_at: datetime | None = None,
+        confirmation_deadline: datetime | None = None,
         scheduled_close_at: datetime | None = None,
         *,
         requester: BotIdentity | None = None,
@@ -984,6 +987,21 @@ class EventAdministrationService:
             raise ValueError("Название игры не может быть пустым")
         if not 1 <= player_amount <= MAX_PLAYER_AMOUNT:
             raise ValueError(f"Количество игроков должно быть от 1 до {MAX_PLAYER_AMOUNT}")
+        if (confirmation_open_at is None) != (confirmation_deadline is None):
+            raise ValueError("Открытие подтверждения и дедлайн должны быть заданы вместе")
+        if (
+            registration_open_at is not None
+            and scheduled_close_at is not None
+            and registration_open_at >= scheduled_close_at
+        ):
+            raise ValueError("Регистрация должна открываться раньше закрытия игры")
+        if confirmation_open_at is not None and confirmation_deadline is not None:
+            if confirmation_deadline <= confirmation_open_at:
+                raise ValueError("Дедлайн подтверждения должен быть позже его открытия")
+            if registration_open_at is not None and confirmation_open_at <= registration_open_at:
+                raise ValueError("Подтверждение должно открываться после регистрации")
+            if scheduled_close_at is not None and confirmation_deadline >= scheduled_close_at:
+                raise ValueError("Дедлайн подтверждения должен быть раньше закрытия игры")
         signup_token: str | None = None
         for _ in range(20):
             candidate = game_signup_token(clean_name, game_date)
@@ -1012,6 +1030,8 @@ class EventAdministrationService:
                 "public_table_resource_path": public_path,
                 "pass_table_resource_path": pass_path,
                 "registration_open_at": registration_open_at.isoformat() if registration_open_at else None,
+                "confirmation_open_at": confirmation_open_at.isoformat() if confirmation_open_at else None,
+                "confirmation_deadline": confirmation_deadline.isoformat() if confirmation_deadline else None,
                 "scheduled_close_at": scheduled_close_at.isoformat() if scheduled_close_at else None,
                 "signup_token": signup_token,
             },
@@ -1048,6 +1068,8 @@ class EventAdministrationService:
             pass_table_resource_path=pass_path,
             pass_table_public_url=urls["pass"],
             registration_open_at=registration_open_at,
+            confirmation_open_at=confirmation_open_at,
+            confirmation_deadline=confirmation_deadline,
             scheduled_close_at=scheduled_close_at,
             signup_token=signup_token,
         )
@@ -1614,6 +1636,7 @@ class ConfirmationNotificationService:
     NOTIFICATION_OPERATIONS = frozenset(
         {
             Operation.OPEN_CONFIRMATION,
+            Operation.SCHEDULED_OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.SEND_ALL_PLAYERS_NOTIFICATION,
@@ -1732,7 +1755,7 @@ class ConfirmationNotificationService:
                 raise OperationNotAllowed("Для игры не задан дедлайн подтверждения")
             deadline = format_confirmation_deadline(event.confirmation_deadline)
             reference = event_reference(event.name, event.game_date)
-            if command.operation is Operation.OPEN_CONFIRMATION:
+            if command.operation in {Operation.OPEN_CONFIRMATION, Operation.SCHEDULED_OPEN_CONFIRMATION}:
                 text = f"Подтверждение участия в игре {reference} открыто! Подтвердите участие до {deadline} (мск)."
             else:
                 text = f"Напоминаем: подтвердите участие в игре {reference} до {deadline} (мск)."
@@ -2504,6 +2527,43 @@ class OrderedMutationService:
             if command.operation in {Operation.ARCHIVE_EVENT, Operation.DELETE_EVENT}:
                 return MutationResult("Игра уже отсутствует в постоянном списке")
             raise EventNotFound("Игра уже удалена или не существует")
+
+        if command.operation is Operation.SCHEDULED_OPEN_CONFIRMATION:
+            if command.platform is not Platform.SYSTEM:
+                raise OperationNotAllowed("Запланированное открытие подтверждения выполняется только таймером")
+            if (
+                event.archived_at is not None
+                or event.status is not EventStatus.CREATED
+                or event.confirmation_open_at is None
+                or event.confirmation_deadline is None
+            ):
+                return MutationResult(
+                    "Запланированное открытие подтверждения уже отменено или выполнено",
+                    notifications_enabled=False,
+                )
+            expected_id = ScheduledConfirmationOpeningDispatcher.operation_id(
+                event.event_id,
+                event.confirmation_open_at,
+            )
+            assert isinstance(command.payload, ConfirmationDeadlinePayload)
+            if command.operation_id != expected_id or command.payload.deadline != event.confirmation_deadline:
+                return MutationResult(
+                    "Расписание открытия подтверждения было изменено",
+                    notifications_enabled=False,
+                )
+            if not await self.events.open_scheduled_confirmation(
+                event.event_id,
+                event.confirmation_open_at,
+                command.payload.deadline,
+            ):
+                return MutationResult(
+                    "Расписание открытия подтверждения было изменено",
+                    notifications_enabled=False,
+                )
+            return MutationResult(
+                "Установлен Статус «Подтверждение» по расписанию",
+                notifications_enabled=True,
+            )
 
         if command.operation is Operation.UNARCHIVE_EVENT:
             await self._require_admin(command)

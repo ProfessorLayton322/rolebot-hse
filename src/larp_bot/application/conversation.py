@@ -120,6 +120,7 @@ CHANGE_PLAYER_AMOUNT = "👥 Изменить количество игроко�
 ADD_POST_LINKS = "Добавить ссылки на посты"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 MANAGE_NOTIFICATIONS = "Уведомления"
+MANAGE_SCHEDULED_EVENTS = "Запланированные события"
 SEND_CONFIRMED_LINK = "Отправить подтвержденным ссылку на чат"
 SEND_CONFIRMED_NOTIFICATION = "Отправить подтвержденным сообщение"
 SEND_ALL_PLAYERS_NOTIFICATION = "Уведомить всех игроков"
@@ -159,10 +160,12 @@ CREATE_AS_MASTER = "Назначить себя"
 CREATE_WITH_OTHER_MASTER = "Выбрать другого мастера"
 CREATE_WITHOUT_MASTER = "Назначить позже"
 SCHEDULE_REGISTRATION_QUESTION = "Хотите ли вы запланировать отложенное открытие игры?"
+SCHEDULE_CONFIRMATION_QUESTION = "Хотите ли вы запланировать открытие подтверждения участия?"
 SCHEDULE_CLOSE_QUESTION = (
     "Хотите ли вы запланировать закрытие игры? Игра будет закрыта для регистрации, добавлена в статистику "
     "посещений и архивирована сама. Можете запланировать на ночь после игры, либо выбрать удобное вам время"
 )
+DECLINE_SCHEDULED_CLOSE = "Не хочу планировать закрытие"
 ARCHIVE_GAME = "📦 Архивировать игру"
 UNARCHIVE_GAME = "📤 Разархивировать игру"
 DELETE_GAME = "🗑 Удалить игру"
@@ -223,6 +226,7 @@ ADMIN_ACTIONS = frozenset(
         CHANGE_STATUS,
         CHANGE_PLAYER_AMOUNT,
         MANAGE_NOTIFICATIONS,
+        MANAGE_SCHEDULED_EVENTS,
         SEND_CONFIRMATION_REMINDER,
         SEND_CONFIRMED_LINK,
         SEND_CONFIRMED_NOTIFICATION,
@@ -276,6 +280,13 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
         "ADMIN_CREATE_SCHEDULE_CHOICE",
         "ADMIN_CREATE_SCHEDULE_TIME",
+        "ADMIN_CREATE_CONFIRMATION_SCHEDULE_CHOICE",
+        "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME",
+        "ADMIN_CREATE_CONFIRMATION_DEADLINE",
+        "ADMIN_SCHEDULE_REGISTRATION_TIME",
+        "ADMIN_SCHEDULE_CONFIRMATION_TIME",
+        "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE",
+        "ADMIN_SCHEDULE_CLOSE_TIME",
         "ADMIN_UPDATE_PLAYER_AMOUNT",
         "ADMIN_UPDATE_GAME_NAME",
         "ADMIN_UPDATE_GAME_DATE",
@@ -593,8 +604,15 @@ def _game_details_date_response(event_id: str, current_date: date | None, *, inv
     )
 
 
-def _registration_schedule_response(*, invalid: bool = False, past: bool = False) -> BotResponse:
-    if past:
+def _registration_schedule_response(
+    *,
+    invalid: bool = False,
+    past: bool = False,
+    after_close: bool = False,
+) -> BotResponse:
+    if after_close:
+        prefix = "Регистрация должна открываться строго до закрытия игры.\n\n"
+    elif past:
         prefix = "Время открытия должно быть строго позже текущего московского времени.\n\n"
     elif invalid:
         prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n"
@@ -617,8 +635,17 @@ def _scheduled_close_response(
     invalid: bool = False,
     not_after_game: bool = False,
     past: bool = False,
+    confirmation_conflict: bool = False,
+    registration_conflict: bool = False,
+    next_night_value: str = "create:close:next-night",
+    cancel_value: str = "create:close:cancel",
+    back: Button | None = None,
 ) -> BotResponse:
-    if not_after_game:
+    if registration_conflict:
+        prefix = "Закрытие должно быть позже открытия регистрации.\n\n"
+    elif confirmation_conflict:
+        prefix = "Закрытие должно быть позже дедлайна подтверждения.\n\n"
+    elif not_after_game:
         prefix = "Закрытие должно быть запланировано строго после даты игры.\n\n"
     elif past:
         prefix = "Закрытие должно быть запланировано на будущее время.\n\n"
@@ -632,9 +659,40 @@ def _scheduled_close_response(
             "Введите время строго в формате DD.MM.YY HH:MM. Время указывается по Москве."
         ),
         buttons=[
-            Button(label=NEXT_NIGHT_03, value="create:close:next-night"),
-            Button(label=CANCEL_DIALOG, value="create:close:cancel"),
+            Button(label=NEXT_NIGHT_03, value=next_night_value),
+            Button(label=DECLINE_SCHEDULED_CLOSE, value=cancel_value),
+            *([] if back is None else [back]),
         ],
+    )
+
+
+def _scheduled_confirmation_time_response(
+    *,
+    back: Button,
+    invalid: str = "",
+) -> BotResponse:
+    prefix = f"{invalid}\n\n" if invalid else ""
+    return BotResponse(
+        text=(
+            f"{prefix}Введите время открытия подтверждения строго в формате DD.MM.YY HH:MM. "
+            "Время указывается по Москве."
+        ),
+        buttons=[back],
+    )
+
+
+def _scheduled_confirmation_deadline_response(
+    *,
+    back: Button,
+    invalid: str = "",
+) -> BotResponse:
+    prefix = f"{invalid}\n\n" if invalid else ""
+    return BotResponse(
+        text=(
+            f"{prefix}Введите дедлайн подтверждения строго в формате DD.MM.YY HH:MM. "
+            "Он должен быть позже открытия подтверждения. Время указывается по Москве."
+        ),
+        buttons=[back],
     )
 
 
@@ -843,7 +901,7 @@ class ConversationEngine:
                 if value in {MANAGE_MODERATORS, LEGACY_MANAGE_MODERATORS}
                 else await self._admin_menu(user)
             )
-        elif value.startswith(("ag:manage:", "ag:masters:", "ag:players:", "ag:notifications:")):
+        elif value.startswith(("ag:manage:", "ag:masters:", "ag:players:", "ag:notifications:", "ag:schedule")):
             await self._clear(user)
             response = await self._admin_game_action(user, message, value)
         elif user.dialog_state != "IDLE":
@@ -2704,6 +2762,20 @@ class ConversationEngine:
             ],
         )
 
+    @staticmethod
+    def _creation_confirmation_schedule_question(user: User) -> BotResponse:
+        user.dialog_state = "ADMIN_CREATE_CONFIRMATION_SCHEDULE_CHOICE"
+        return BotResponse(
+            text=SCHEDULE_CONFIRMATION_QUESTION,
+            buttons=[
+                Button(label="Да", value="create:confirmation:yes"),
+                Button(
+                    label="Не хочу планировать открытие подтверждения",
+                    value="create:confirmation:no",
+                ),
+            ],
+        )
+
     async def _show_creation_master_candidates(self, user: User, *, offset: int = 0, notice: str = "") -> BotResponse:
         creator = self._identity(user)
         candidates = [profile for profile in await self._master_candidates() if self._identity(profile) != creator]
@@ -2934,7 +3006,8 @@ class ConversationEngine:
                 user.dialog_state = "ADMIN_CREATE_SCHEDULE_TIME"
                 return _registration_schedule_response()
             if value == "create:schedule:no":
-                return await self._create_game(user, message, registration_open_at=None)
+                user.dialog_context.pop("registration_open_at", None)
+                return self._creation_confirmation_schedule_question(user)
             return self._creation_schedule_question(user)
         if value == "create:schedule:nearest-friday":
             registration_open_at = closest_friday_18()
@@ -2945,7 +3018,110 @@ class ConversationEngine:
                 return _registration_schedule_response(invalid=True)
             if registration_open_at <= datetime.now(MOSCOW_TIMEZONE):
                 return _registration_schedule_response(past=True)
-        return await self._create_game(user, message, registration_open_at=registration_open_at)
+        scheduled_close_at = (
+            datetime.fromisoformat(str(user.dialog_context["scheduled_close_at"]))
+            if user.dialog_context.get("scheduled_close_at") is not None
+            else None
+        )
+        if scheduled_close_at is not None and registration_open_at >= scheduled_close_at:
+            return _registration_schedule_response(after_close=True)
+        user.dialog_context["registration_open_at"] = registration_open_at.isoformat()
+        return self._creation_confirmation_schedule_question(user)
+
+    async def _creation_confirmation_schedule_step(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        context = user.dialog_context
+        if "created_event_id" in context:
+            return await self._finish_game_creation(user)
+        if value == "create:confirmation:no":
+            context.pop("confirmation_open_at", None)
+            context.pop("confirmation_deadline", None)
+            return await self._create_game(user, message)
+        if user.dialog_state == "ADMIN_CREATE_CONFIRMATION_SCHEDULE_CHOICE":
+            if value != "create:confirmation:yes":
+                return self._creation_confirmation_schedule_question(user)
+            user.dialog_state = "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME"
+            return _scheduled_confirmation_time_response(
+                back=Button(label="Не хочу планировать открытие подтверждения", value="create:confirmation:no")
+            )
+        if user.dialog_state == "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME":
+            try:
+                opens_at = parse_confirmation_deadline(value)
+            except ValueError:
+                return _scheduled_confirmation_time_response(
+                    back=Button(
+                        label="Не хочу планировать открытие подтверждения",
+                        value="create:confirmation:no",
+                    ),
+                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                )
+            now = datetime.now(MOSCOW_TIMEZONE)
+            registration_open_at = (
+                datetime.fromisoformat(str(context["registration_open_at"]))
+                if context.get("registration_open_at") is not None
+                else None
+            )
+            scheduled_close_at = (
+                datetime.fromisoformat(str(context["scheduled_close_at"]))
+                if context.get("scheduled_close_at") is not None
+                else None
+            )
+            if opens_at <= now:
+                invalid = "Открытие подтверждения должно быть запланировано на будущее время."
+            elif registration_open_at is not None and opens_at <= registration_open_at:
+                invalid = "Подтверждение должно открываться строго после регистрации."
+            elif scheduled_close_at is not None and opens_at >= scheduled_close_at:
+                invalid = "Подтверждение должно открываться строго до закрытия игры."
+            else:
+                context["confirmation_open_at"] = opens_at.isoformat()
+                user.dialog_state = "ADMIN_CREATE_CONFIRMATION_DEADLINE"
+                return _scheduled_confirmation_deadline_response(
+                    back=Button(
+                        label="Не хочу планировать открытие подтверждения",
+                        value="create:confirmation:no",
+                    )
+                )
+            return _scheduled_confirmation_time_response(
+                back=Button(
+                    label="Не хочу планировать открытие подтверждения",
+                    value="create:confirmation:no",
+                ),
+                invalid=invalid,
+            )
+        try:
+            deadline = parse_confirmation_deadline(value)
+        except ValueError:
+            return _scheduled_confirmation_deadline_response(
+                back=Button(
+                    label="Не хочу планировать открытие подтверждения",
+                    value="create:confirmation:no",
+                ),
+                invalid="Некорректная дата и время. Попробуйте ещё раз.",
+            )
+        opens_at = datetime.fromisoformat(str(context["confirmation_open_at"]))
+        scheduled_close_at = (
+            datetime.fromisoformat(str(context["scheduled_close_at"]))
+            if context.get("scheduled_close_at") is not None
+            else None
+        )
+        if deadline <= opens_at:
+            invalid = "Дедлайн должен быть строго позже открытия подтверждения."
+        elif scheduled_close_at is not None and deadline >= scheduled_close_at:
+            invalid = "Дедлайн подтверждения должен быть строго раньше закрытия игры."
+        else:
+            context["confirmation_deadline"] = deadline.isoformat()
+            return await self._create_game(user, message)
+        return _scheduled_confirmation_deadline_response(
+            back=Button(
+                label="Не хочу планировать открытие подтверждения",
+                value="create:confirmation:no",
+            ),
+            invalid=invalid,
+        )
 
     async def _creation_master(self, user: User) -> User | None:
         context = user.dialog_context
@@ -2963,8 +3139,6 @@ class ConversationEngine:
         self,
         user: User,
         message: InboundMessage,
-        *,
-        registration_open_at: datetime | None,
     ) -> BotResponse:
         context = user.dialog_context
         game_date = date.fromisoformat(str(context["game_date"]))
@@ -2994,8 +3168,22 @@ class ConversationEngine:
             game_date,
             int(context["player_amount"]),
             [] if master_identity is None else [master_identity],
-            registration_open_at,
-            (
+            registration_open_at=(
+                datetime.fromisoformat(str(context["registration_open_at"]))
+                if context.get("registration_open_at") is not None
+                else None
+            ),
+            confirmation_open_at=(
+                datetime.fromisoformat(str(context["confirmation_open_at"]))
+                if context.get("confirmation_open_at") is not None
+                else None
+            ),
+            confirmation_deadline=(
+                datetime.fromisoformat(str(context["confirmation_deadline"]))
+                if context.get("confirmation_deadline") is not None
+                else None
+            ),
+            scheduled_close_at=(
                 datetime.fromisoformat(str(context["scheduled_close_at"]))
                 if context.get("scheduled_close_at") is not None
                 else None
@@ -3097,13 +3285,22 @@ class ConversationEngine:
                 f"{format_confirmation_deadline(event.scheduled_close_at)} (МСК)."
             )
         )
+        confirmation_line = (
+            ""
+            if event.confirmation_open_at is None or event.confirmation_deadline is None
+            else (
+                "\n\nОткрытие подтверждения участия запланировано на "
+                f"{format_confirmation_deadline(event.confirmation_open_at)} (МСК). "
+                f"Дедлайн: {format_confirmation_deadline(event.confirmation_deadline)} (МСК)."
+            )
+        )
         return BotResponse(
             text=(
                 f"✅ Игра создана.\n\nНазвание:\n{event.name}\n\n"
                 f"Дата игры: {format_game_date(game_date)}\n\n"
                 f"Количество игроков: {event.player_amount}\n\n"
                 f"{master_line}"
-                f"{registration_line}{close_line}\n\n"
+                f"{registration_line}{confirmation_line}{close_line}\n\n"
                 f"Telegram — начать запись:\n{telegram_start}\n\n"
                 f"VK — открыть чат с ботом:\n{vk_start}\n\n"
                 f"{event_table_links(event)}"
@@ -3456,6 +3653,10 @@ class ConversationEngine:
             "ADMIN_POST_LINK_TELEGRAM",
             "ADMIN_POST_LINK_VK",
             "ADMIN_CONFIRMATION_DEADLINE",
+            "ADMIN_SCHEDULE_REGISTRATION_TIME",
+            "ADMIN_SCHEDULE_CONFIRMATION_TIME",
+            "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE",
+            "ADMIN_SCHEDULE_CLOSE_TIME",
             "ADMIN_NOTIFICATION_LINK_TEXT",
             "ADMIN_NOTIFICATION_MESSAGE_TEXT",
             "ADMIN_NOTIFICATION_CONFIRM",
@@ -3606,6 +3807,12 @@ class ConversationEngine:
             return await self._creation_master_step(user, message, value)
         if user.dialog_state in {"ADMIN_CREATE_SCHEDULE_CHOICE", "ADMIN_CREATE_SCHEDULE_TIME"}:
             return await self._creation_schedule_step(user, message, value)
+        if user.dialog_state in {
+            "ADMIN_CREATE_CONFIRMATION_SCHEDULE_CHOICE",
+            "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME",
+            "ADMIN_CREATE_CONFIRMATION_DEADLINE",
+        }:
+            return await self._creation_confirmation_schedule_step(user, message, value)
         if user.dialog_state == "ADMIN_CREATE_NAME":
             clean_name = value.strip()
             if not clean_name:
@@ -3658,6 +3865,160 @@ class ConversationEngine:
             if await self._is_admin(user):
                 return self._creation_master_question(user)
             return self._creation_schedule_question(user, user)
+        if user.dialog_state == "ADMIN_SCHEDULE_REGISTRATION_TIME":
+            event_id = str(user.dialog_context["event_id"])
+            event = await self.events.get(event_id)
+            if event is None:
+                await self._clear(user)
+                return BotResponse(text="Игра не найдена.")
+            try:
+                opens_at = parse_confirmation_deadline(value)
+            except ValueError:
+                return self._registration_management_prompt(
+                    event,
+                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                )
+            if opens_at <= datetime.now(MOSCOW_TIMEZONE):
+                return self._registration_management_prompt(
+                    event,
+                    invalid="Открытие регистрации должно быть запланировано на будущее время.",
+                )
+            if event.confirmation_open_at is not None and opens_at >= event.confirmation_open_at:
+                return self._registration_management_prompt(
+                    event,
+                    invalid="Регистрация должна открываться строго раньше подтверждения.",
+                )
+            if event.scheduled_close_at is not None and opens_at >= event.scheduled_close_at:
+                return self._registration_management_prompt(
+                    event,
+                    invalid="Регистрация должна открываться строго до закрытия игры.",
+                )
+            if event.status is not EventStatus.CREATED:
+                await self._clear(user)
+                return self._scheduled_events_menu(
+                    event,
+                    notice="Регистрация или подтверждение уже открыты; это расписание изменить нельзя.\n\n",
+                )
+            await self.events.set_registration_open_at(event_id, opens_at)
+            refreshed = await self.events.get(event_id)
+            await self._clear(user)
+            if refreshed is None:
+                return BotResponse(text="Игра не найдена.")
+            return self._scheduled_events_menu(refreshed, notice="✅ Время открытия регистрации сохранено.\n\n")
+        if user.dialog_state == "ADMIN_SCHEDULE_CONFIRMATION_TIME":
+            event_id = str(user.dialog_context["event_id"])
+            event = await self.events.get(event_id)
+            if event is None:
+                await self._clear(user)
+                return BotResponse(text="Игра не найдена.")
+            try:
+                opens_at = parse_confirmation_deadline(value)
+            except ValueError:
+                return self._confirmation_management_prompt(
+                    event,
+                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                )
+            if opens_at <= datetime.now(MOSCOW_TIMEZONE):
+                return self._confirmation_management_prompt(
+                    event,
+                    invalid="Открытие подтверждения должно быть запланировано на будущее время.",
+                )
+            if event.registration_open_at is not None and opens_at <= event.registration_open_at:
+                return self._confirmation_management_prompt(
+                    event,
+                    invalid="Подтверждение должно открываться строго после регистрации.",
+                )
+            if event.scheduled_close_at is not None and opens_at >= event.scheduled_close_at:
+                return self._confirmation_management_prompt(
+                    event,
+                    invalid="Подтверждение должно открываться строго до закрытия игры.",
+                )
+            if event.status is not EventStatus.CREATED:
+                await self._clear(user)
+                return self._scheduled_events_menu(
+                    event,
+                    notice="Подтверждение уже открыто; расписание изменить нельзя.\n\n",
+                )
+            user.dialog_context["confirmation_open_at"] = opens_at.isoformat()
+            user.dialog_state = "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE"
+            return _scheduled_confirmation_deadline_response(back=Button(label=BACK, value=f"ag:schedule:{event_id}"))
+        if user.dialog_state == "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE":
+            event_id = str(user.dialog_context["event_id"])
+            event = await self.events.get(event_id)
+            if event is None:
+                await self._clear(user)
+                return BotResponse(text="Игра не найдена.")
+            try:
+                deadline = parse_confirmation_deadline(value)
+            except ValueError:
+                return _scheduled_confirmation_deadline_response(
+                    back=Button(label=BACK, value=f"ag:schedule:{event_id}"),
+                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                )
+            opens_at = datetime.fromisoformat(str(user.dialog_context["confirmation_open_at"]))
+            if deadline <= opens_at:
+                return _scheduled_confirmation_deadline_response(
+                    back=Button(label=BACK, value=f"ag:schedule:{event_id}"),
+                    invalid="Дедлайн должен быть строго позже открытия подтверждения.",
+                )
+            if event.scheduled_close_at is not None and deadline >= event.scheduled_close_at:
+                return _scheduled_confirmation_deadline_response(
+                    back=Button(label=BACK, value=f"ag:schedule:{event_id}"),
+                    invalid="Дедлайн подтверждения должен быть строго раньше закрытия игры.",
+                )
+            if event.status is not EventStatus.CREATED:
+                await self._clear(user)
+                return self._scheduled_events_menu(
+                    event,
+                    notice="Подтверждение уже открыто; расписание изменить нельзя.\n\n",
+                )
+            await self.events.set_confirmation_schedule(event_id, opens_at, deadline)
+            refreshed = await self.events.get(event_id)
+            await self._clear(user)
+            if refreshed is None:
+                return BotResponse(text="Игра не найдена.")
+            return self._scheduled_events_menu(
+                refreshed,
+                notice="✅ Время открытия подтверждения и дедлайн сохранены.\n\n",
+            )
+        if user.dialog_state == "ADMIN_SCHEDULE_CLOSE_TIME":
+            event_id = str(user.dialog_context["event_id"])
+            event = await self.events.get(event_id)
+            if event is None:
+                await self._clear(user)
+                return BotResponse(text="Игра не найдена.")
+            try:
+                closes_at = parse_confirmation_deadline(value)
+            except ValueError:
+                return _scheduled_close_response(
+                    invalid=True,
+                    next_night_value=f"ag:schedule-close-next-night:{event_id}",
+                    cancel_value=f"ag:schedule-clear-close:{event_id}",
+                    back=Button(label=BACK, value=f"ag:schedule:{event_id}"),
+                )
+            error = self._scheduled_close_validation(event, closes_at)
+            if error is not None:
+                return _scheduled_close_response(
+                    past=error == "past",
+                    not_after_game=error == "game",
+                    confirmation_conflict=error == "confirmation",
+                    registration_conflict=error == "registration",
+                    next_night_value=f"ag:schedule-close-next-night:{event_id}",
+                    cancel_value=f"ag:schedule-clear-close:{event_id}",
+                    back=Button(label=BACK, value=f"ag:schedule:{event_id}"),
+                )
+            if event.scheduled_close_operation_id is not None:
+                await self._clear(user)
+                return self._scheduled_events_menu(
+                    event,
+                    notice="Автоматическое закрытие уже началось; изменить его время нельзя.\n\n",
+                )
+            await self.events.set_scheduled_close_at(event_id, closes_at)
+            refreshed = await self.events.get(event_id)
+            await self._clear(user)
+            if refreshed is None:
+                return BotResponse(text="Игра не найдена.")
+            return self._scheduled_events_menu(refreshed, notice="✅ Время закрытия сохранено.\n\n")
         if user.dialog_state == "ADMIN_UPDATE_GAME_NAME":
             clean_name = value.strip()
             event_id = str(user.dialog_context["event_id"])
@@ -5128,6 +5489,7 @@ class ConversationEngine:
             )
         actions = [
             (CHANGE_STATUS, "status"),
+            (MANAGE_SCHEDULED_EVENTS, "schedule"),
             (CHANGE_GAME_DETAILS, "details"),
             (CHANGE_PLAYER_AMOUNT, "player-amount"),
             (ADD_POST_LINKS, "post-links"),
@@ -5144,6 +5506,97 @@ class ConversationEngine:
             buttons.append(Button(label=STATS_ADD_GAME, value=f"stats:game:{event.event_id}"))
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))
         return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
+
+    @staticmethod
+    def _scheduled_events_menu(event: Event, *, notice: str = "") -> BotResponse:
+        now = datetime.now(UTC)
+        if event.registration_open_at is None or event.registration_open_at <= now:
+            registration = "регистрация уже открыта"
+        else:
+            registration = f"{format_confirmation_deadline(event.registration_open_at)} (МСК)"
+        if event.confirmation_open_at is None or event.confirmation_deadline is None:
+            confirmation = (
+                "подтверждение уже открыто" if event.status is EventStatus.CONFIRMATION_OPEN else "не запланировано"
+            )
+        else:
+            confirmation = (
+                f"{format_confirmation_deadline(event.confirmation_open_at)} (МСК); "
+                f"дедлайн {format_confirmation_deadline(event.confirmation_deadline)} (МСК)"
+            )
+        closing = (
+            "не запланировано"
+            if event.scheduled_close_at is None
+            else f"{format_confirmation_deadline(event.scheduled_close_at)} (МСК)"
+        )
+        buttons: list[Button] = []
+        if event.status is EventStatus.CREATED:
+            buttons.extend(
+                [
+                    Button(label="Открытие регистрации", value=f"ag:schedule-registration:{event.event_id}"),
+                    Button(
+                        label="Открытие подтверждения",
+                        value=f"ag:schedule-confirmation:{event.event_id}",
+                    ),
+                ]
+            )
+        if event.scheduled_close_operation_id is None:
+            buttons.append(Button(label="Закрытие игры", value=f"ag:schedule-close:{event.event_id}"))
+        buttons.append(game_management_button(event.event_id))
+        return BotResponse(
+            text=(
+                f"{notice}Запланированные события игры {event_reference(event.name, event.game_date)}\n\n"
+                f"Открытие регистрации: {registration}.\n"
+                f"Открытие подтверждения: {confirmation}.\n"
+                f"Закрытие игры: {closing}."
+            ),
+            buttons=buttons,
+        )
+
+    @staticmethod
+    def _registration_management_prompt(event: Event, *, invalid: str = "") -> BotResponse:
+        prefix = f"{invalid}\n\n" if invalid else ""
+        buttons = []
+        if event.registration_open_at is not None:
+            buttons.append(
+                Button(
+                    label="Отменить расписание и открыть регистрацию",
+                    value=f"ag:schedule-clear-registration:{event.event_id}",
+                )
+            )
+        buttons.append(Button(label=BACK, value=f"ag:schedule:{event.event_id}"))
+        return BotResponse(
+            text=(
+                f"{prefix}Введите новое время открытия регистрации строго в формате DD.MM.YY HH:MM. "
+                "Время указывается по Москве."
+            ),
+            buttons=buttons,
+        )
+
+    @staticmethod
+    def _confirmation_management_prompt(event: Event, *, invalid: str = "") -> BotResponse:
+        back = Button(label=BACK, value=f"ag:schedule:{event.event_id}")
+        response = _scheduled_confirmation_time_response(back=back, invalid=invalid)
+        if event.confirmation_open_at is not None:
+            response.buttons.insert(
+                0,
+                Button(
+                    label="Отменить открытие подтверждения",
+                    value=f"ag:schedule-clear-confirmation:{event.event_id}",
+                ),
+            )
+        return response
+
+    @staticmethod
+    def _scheduled_close_validation(event: Event, closes_at: datetime) -> str | None:
+        if event.game_date is not None and closes_at.date() <= event.game_date:
+            return "game"
+        if closes_at <= datetime.now(MOSCOW_TIMEZONE):
+            return "past"
+        if event.registration_open_at is not None and closes_at <= event.registration_open_at:
+            return "registration"
+        if event.confirmation_deadline is not None and closes_at <= event.confirmation_deadline:
+            return "confirmation"
+        return None
 
     @staticmethod
     def _notification_management(event: Event) -> BotResponse:
@@ -5271,6 +5724,89 @@ class ConversationEngine:
             "game_date": event.game_date.isoformat() if event.game_date is not None else None,
             "event_status": event.status.value,
         }
+        if action == "schedule":
+            user.dialog_state = "IDLE"
+            return self._scheduled_events_menu(event)
+        if action in {
+            "schedule-registration",
+            "schedule-confirmation",
+            "schedule-close",
+            "schedule-clear-registration",
+            "schedule-clear-confirmation",
+            "schedule-clear-close",
+            "schedule-close-next-night",
+        }:
+            if (
+                action
+                in {
+                    "schedule-registration",
+                    "schedule-confirmation",
+                    "schedule-clear-registration",
+                    "schedule-clear-confirmation",
+                }
+                and event.status is not EventStatus.CREATED
+            ):
+                return self._scheduled_events_menu(
+                    event,
+                    notice="Регистрация или подтверждение уже открыты; это расписание изменить нельзя.\n\n",
+                )
+            if action == "schedule-registration":
+                user.dialog_state = "ADMIN_SCHEDULE_REGISTRATION_TIME"
+                return self._registration_management_prompt(event)
+            if action == "schedule-confirmation":
+                user.dialog_state = "ADMIN_SCHEDULE_CONFIRMATION_TIME"
+                return self._confirmation_management_prompt(event)
+            if action == "schedule-close":
+                if event.scheduled_close_operation_id is not None:
+                    return self._scheduled_events_menu(
+                        event,
+                        notice="Автоматическое закрытие уже началось; изменить его время нельзя.\n\n",
+                    )
+                user.dialog_state = "ADMIN_SCHEDULE_CLOSE_TIME"
+                return _scheduled_close_response(
+                    next_night_value=f"ag:schedule-close-next-night:{event.event_id}",
+                    cancel_value=f"ag:schedule-clear-close:{event.event_id}",
+                    back=Button(label=BACK, value=f"ag:schedule:{event.event_id}"),
+                )
+            if action == "schedule-close-next-night":
+                if event.game_date is None:
+                    return self._scheduled_events_menu(event, notice="У игры не указана дата.\n\n")
+                closes_at = next_night_03(event.game_date)
+                error = self._scheduled_close_validation(event, closes_at)
+                if error is not None:
+                    user.dialog_state = "ADMIN_SCHEDULE_CLOSE_TIME"
+                    return _scheduled_close_response(
+                        past=error == "past",
+                        not_after_game=error == "game",
+                        confirmation_conflict=error == "confirmation",
+                        registration_conflict=error == "registration",
+                        next_night_value=f"ag:schedule-close-next-night:{event.event_id}",
+                        cancel_value=f"ag:schedule-clear-close:{event.event_id}",
+                        back=Button(label=BACK, value=f"ag:schedule:{event.event_id}"),
+                    )
+                await self.events.set_scheduled_close_at(event.event_id, closes_at)
+                refreshed = await self.events.get(event.event_id)
+                if refreshed is None:
+                    return BotResponse(text="Игра не найдена.")
+                return self._scheduled_events_menu(refreshed, notice="✅ Время закрытия сохранено.\n\n")
+            if action == "schedule-clear-registration":
+                await self.events.set_registration_open_at(event.event_id, None)
+                notice = "✅ Расписание отменено; регистрация открыта.\n\n"
+            elif action == "schedule-clear-confirmation":
+                await self.events.set_confirmation_schedule(event.event_id, None, None)
+                notice = "✅ Запланированное открытие подтверждения отменено.\n\n"
+            else:
+                if event.scheduled_close_operation_id is not None:
+                    return self._scheduled_events_menu(
+                        event,
+                        notice="Автоматическое закрытие уже началось; отменить его нельзя.\n\n",
+                    )
+                await self.events.set_scheduled_close_at(event.event_id, None)
+                notice = "✅ Запланированное закрытие отменено.\n\n"
+            refreshed = await self.events.get(event.event_id)
+            if refreshed is None:
+                return BotResponse(text="Игра не найдена.")
+            return self._scheduled_events_menu(refreshed, notice=notice)
         if action == "status":
             user.dialog_state = "ADMIN_STATUS_SELECT"
             return _admin_status_response(event.name, event.status, event.event_id, event.game_date)
@@ -5548,6 +6084,7 @@ class ConversationEngine:
         if value == MANAGE_GAMES or value in {
             CHANGE_STATUS,
             CHANGE_PLAYER_AMOUNT,
+            MANAGE_SCHEDULED_EVENTS,
             MANAGE_NOTIFICATIONS,
             SEND_CONFIRMATION_REMINDER,
             SEND_CONFIRMED_LINK,

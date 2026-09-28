@@ -82,6 +82,8 @@ class EventRepository(Protocol):
 
     async def set_status(self, event_id: str, status: EventStatus) -> bool: ...
 
+    async def set_registration_open_at(self, event_id: str, opens_at: datetime | None) -> bool: ...
+
     async def list_due_registration_notifications(
         self,
         opened_by: datetime,
@@ -100,6 +102,29 @@ class EventRepository(Protocol):
         event_id: str,
         completed_at: datetime,
     ) -> None: ...
+
+    async def set_confirmation_schedule(
+        self,
+        event_id: str,
+        opens_at: datetime | None,
+        deadline: datetime | None,
+    ) -> bool: ...
+
+    async def list_due_confirmation_openings(
+        self,
+        opened_by: datetime,
+        *,
+        limit: int = 100,
+    ) -> Sequence[Event]: ...
+
+    async def open_scheduled_confirmation(
+        self,
+        event_id: str,
+        opens_at: datetime,
+        deadline: datetime,
+    ) -> bool: ...
+
+    async def set_scheduled_close_at(self, event_id: str, closes_at: datetime | None) -> bool: ...
 
     async def list_due_scheduled_closings(
         self,

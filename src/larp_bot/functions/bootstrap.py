@@ -20,6 +20,7 @@ from larp_bot.adapters.yandex_disk.uploader import StagedYandexDiskUploader
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.chat_management import TelegramChatManagementService
+from larp_bot.application.confirmation_openings import ScheduledConfirmationOpeningDispatcher
 from larp_bot.application.conversation import ConversationEngine
 from larp_bot.application.game_closings import ScheduledGameClosingDispatcher, ScheduledGameClosingService
 from larp_bot.application.registration_openings import RegistrationOpeningNotificationService
@@ -52,6 +53,7 @@ class AppContainer:
     conversation: ConversationEngine
     worker: OrderedWorker
     registration_opening_notifications: RegistrationOpeningNotificationService
+    scheduled_confirmation_opening_dispatcher: ScheduledConfirmationOpeningDispatcher
     scheduled_game_closing_dispatcher: ScheduledGameClosingDispatcher
     upload_completion: UploadCompletionService
 
@@ -168,6 +170,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         registration_service,
     )
     scheduled_game_closing_dispatcher = ScheduledGameClosingDispatcher(events, publisher)
+    scheduled_confirmation_opening_dispatcher = ScheduledConfirmationOpeningDispatcher(events, publisher)
     scheduled_game_closing = ScheduledGameClosingService(events, statistics, transport, publisher)
     upload_completion = UploadCompletionService(events, users, config, transport)
     worker = OrderedWorker(
@@ -194,6 +197,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         conversation=conversation,
         worker=worker,
         registration_opening_notifications=registration_opening_notifications,
+        scheduled_confirmation_opening_dispatcher=scheduled_confirmation_opening_dispatcher,
         scheduled_game_closing_dispatcher=scheduled_game_closing_dispatcher,
         upload_completion=upload_completion,
     )

@@ -15,6 +15,7 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     ydb = (ROOT / "infra/terraform/ydb.tf").read_text()
     assert 'primary_key = ["event_id", "participant_key"]' in ydb
     assert 'name = "confirmation_deadline"' in ydb
+    assert 'name = "confirmation_open_at"' in ydb
     assert 'name = "registration_open_at"' in ydb
     assert 'name = "registration_open_notified_recipients_json"' in ydb
     assert 'name = "registration_open_notification_completed_at"' in ydb
@@ -90,6 +91,10 @@ def test_scheduled_registration_notifications_use_an_isolated_timer_function() -
     assert "registration_notifier.py" in build
     assert (
         "scheduled_game_closing_dispatcher.dispatch_due()"
+        in (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
+    )
+    assert (
+        "scheduled_confirmation_opening_dispatcher.dispatch_due()"
         in (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
     )
 

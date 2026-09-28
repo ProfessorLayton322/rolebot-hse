@@ -81,6 +81,7 @@ from larp_bot.application.conversation import (
     REMOVE_PLAYER,
     REMOVE_WAITING_PLAYERS,
     REVOKE_GAMEMASTER,
+    SCHEDULE_CONFIRMATION_QUESTION,
     SCHEDULE_REGISTRATION_QUESTION,
     SEND_ALL_PLAYERS_NOTIFICATION,
     SEND_CONFIRMATION_REMINDER,
@@ -3039,7 +3040,7 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert close_prompt.text.startswith("Хотите ли вы запланировать закрытие игры?")
     assert close_prompt.buttons == [
         Button(label="03:00 ночи после игры", value="create:close:next-night"),
-        Button(label="Отмена", value="create:close:cancel"),
+        Button(label="Не хочу планировать закрытие", value="create:close:cancel"),
     ]
     amount_prompt = await engine.handle(inbound(40, "create:close:cancel", callback=True))
     assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
@@ -3059,7 +3060,9 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
         Button(label="Да", value="create:schedule:yes"),
         Button(label="Нет", value="create:schedule:no"),
     ]
-    response = await engine.handle(inbound(8, "create:schedule:no", callback=True))
+    confirmation_question = await engine.handle(inbound(8, "create:schedule:no", callback=True))
+    assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
+    response = await engine.handle(inbound(80, "create:confirmation:no", callback=True))
 
     created_events = await engine.events.list_page(limit=10)
     created = next(candidate for candidate in created_events if candidate.name == "Бал в зимнем дворце")
@@ -3171,11 +3174,123 @@ async def test_creator_can_schedule_automatic_closing_after_the_game_date(
     assert amount.text == "Введите количество игроков (от 1 до 10000):"
     await engine.handle(inbound(7, "20"))
     await engine.handle(inbound(8, "create:schedule:no", callback=True))
+    await engine.handle(inbound(80, "create:confirmation:no", callback=True))
 
     created = next(
         candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Игра с автозакрытием"
     )
     assert created.scheduled_close_at == expected
+
+
+@pytest.mark.asyncio
+async def test_creator_can_schedule_confirmation_opening_and_deadline(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, _, _, _ = await engine_setup(disk_store, event, gamemaster=True)
+
+    await engine.handle(inbound(1, "➕ Создать игру"))
+    await engine.handle(inbound(2, "Игра с расписанием"))
+    await engine.handle(inbound(3, "15.11.40"))
+    await engine.handle(inbound(4, "create:close:next-night", callback=True))
+    await engine.handle(inbound(5, "20"))
+    await engine.handle(inbound(6, "create:schedule:yes", callback=True))
+    confirmation_question = await engine.handle(inbound(7, "01.10.40 18:00"))
+
+    assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
+    opening_prompt = await engine.handle(inbound(8, "create:confirmation:yes", callback=True))
+    assert "время открытия подтверждения" in opening_prompt.text
+    too_early = await engine.handle(inbound(9, "01.10.40 18:00"))
+    assert "строго после регистрации" in too_early.text
+    deadline_prompt = await engine.handle(inbound(10, "01.11.40 18:00"))
+    assert "дедлайн подтверждения" in deadline_prompt.text
+    invalid_deadline = await engine.handle(inbound(11, "01.11.40 18:00"))
+    assert "строго позже открытия" in invalid_deadline.text
+    response = await engine.handle(inbound(12, "14.11.40 19:00"))
+
+    created = next(
+        candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Игра с расписанием"
+    )
+    assert created.registration_open_at == datetime(2040, 10, 1, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert created.confirmation_open_at == datetime(2040, 11, 1, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert created.confirmation_deadline == datetime(2040, 11, 14, 19, tzinfo=MOSCOW_TIMEZONE)
+    assert created.scheduled_close_at == datetime(2040, 11, 16, 3, tzinfo=MOSCOW_TIMEZONE)
+    assert "Открытие подтверждения участия запланировано на 01.11.40 18:00 (МСК)" in response.text
+    assert "Дедлайн: 14.11.40 19:00 (МСК)" in response.text
+
+
+@pytest.mark.asyncio
+async def test_master_can_manage_and_change_all_scheduled_events(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    scheduled = event.model_copy(
+        update={
+            "status": EventStatus.CREATED,
+            "game_date": date(2040, 11, 15),
+            "registration_open_at": datetime(2040, 10, 1, 18, tzinfo=MOSCOW_TIMEZONE),
+            "confirmation_open_at": datetime(2040, 11, 1, 18, tzinfo=MOSCOW_TIMEZONE),
+            "confirmation_deadline": datetime(2040, 11, 14, 19, tzinfo=MOSCOW_TIMEZONE),
+            "scheduled_close_at": datetime(2040, 11, 16, 3, tzinfo=MOSCOW_TIMEZONE),
+        }
+    )
+    engine, _, _, _ = await engine_setup(disk_store, scheduled, admin=True)
+
+    management = await engine.handle(inbound(1, f"ag:manage:{scheduled.event_id}", callback=True))
+    schedule_button = next(button for button in management.buttons if button.label == "Запланированные события")
+    menu = await engine.handle(inbound(2, schedule_button.value, callback=True))
+
+    assert "Открытие регистрации: 01.10.40 18:00 (МСК)" in menu.text
+    assert "Открытие подтверждения: 01.11.40 18:00 (МСК); дедлайн 14.11.40 19:00 (МСК)" in menu.text
+    assert "Закрытие игры: 16.11.40 03:00 (МСК)" in menu.text
+
+    await engine.handle(inbound(3, f"ag:schedule-registration:{scheduled.event_id}", callback=True))
+    registration = await engine.handle(inbound(4, "02.10.40 18:00"))
+    assert "✅ Время открытия регистрации сохранено" in registration.text
+
+    await engine.handle(inbound(5, f"ag:schedule-confirmation:{scheduled.event_id}", callback=True))
+    await engine.handle(inbound(6, "02.11.40 18:00"))
+    confirmation = await engine.handle(inbound(7, "14.11.40 20:00"))
+    assert "✅ Время открытия подтверждения и дедлайн сохранены" in confirmation.text
+
+    close_prompt = await engine.handle(inbound(8, f"ag:schedule-close:{scheduled.event_id}", callback=True))
+    assert (
+        Button(
+            label="03:00 ночи после игры",
+            value=f"ag:schedule-close-next-night:{scheduled.event_id}",
+        )
+        in close_prompt.buttons
+    )
+    assert (
+        Button(
+            label="Не хочу планировать закрытие",
+            value=f"ag:schedule-clear-close:{scheduled.event_id}",
+        )
+        in close_prompt.buttons
+    )
+    closing = await engine.handle(inbound(9, "17.11.40 04:30"))
+    assert "✅ Время закрытия сохранено" in closing.text
+
+    stored = await engine.events.get(scheduled.event_id)
+    assert stored is not None
+    assert stored.registration_open_at == datetime(2040, 10, 2, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert stored.confirmation_open_at == datetime(2040, 11, 2, 18, tzinfo=MOSCOW_TIMEZONE)
+    assert stored.confirmation_deadline == datetime(2040, 11, 14, 20, tzinfo=MOSCOW_TIMEZONE)
+    assert stored.scheduled_close_at == datetime(2040, 11, 17, 4, 30, tzinfo=MOSCOW_TIMEZONE)
+
+    cleared = await engine.handle(inbound(10, f"ag:schedule-clear-close:{scheduled.event_id}", callback=True))
+    assert "✅ Запланированное закрытие отменено" in cleared.text
+    await engine.handle(inbound(11, f"ag:schedule-clear-confirmation:{scheduled.event_id}", callback=True))
+    registration_cleared = await engine.handle(
+        inbound(12, f"ag:schedule-clear-registration:{scheduled.event_id}", callback=True)
+    )
+    assert "✅ Расписание отменено; регистрация открыта" in registration_cleared.text
+    stored = await engine.events.get(scheduled.event_id)
+    assert stored is not None
+    assert stored.registration_open_at is None
+    assert stored.confirmation_open_at is None
+    assert stored.confirmation_deadline is None
+    assert stored.scheduled_close_at is None
 
 
 @pytest.mark.asyncio
@@ -3214,7 +3329,9 @@ async def test_privileged_user_can_schedule_registration_with_strict_moscow_time
     assert "строго позже текущего московского времени" in past.text
     assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]
 
-    created_response = await engine.handle(inbound(9, "31.12.40 18:00"))
+    confirmation_question = await engine.handle(inbound(9, "31.12.40 18:00"))
+    assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
+    created_response = await engine.handle(inbound(90, "create:confirmation:no", callback=True))
     created = next(
         candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Отложенная игра"
     )
@@ -3250,7 +3367,9 @@ async def test_nearest_friday_button_schedules_registration_and_cancel_aborts_cr
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:schedule:yes", callback=True))
-    response = await engine.handle(inbound(6, "create:schedule:nearest-friday", callback=True))
+    confirmation_question = await engine.handle(inbound(6, "create:schedule:nearest-friday", callback=True))
+    assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
+    response = await engine.handle(inbound(60, "create:confirmation:no", callback=True))
 
     created = next(
         candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Пятничная игра"
@@ -3286,7 +3405,9 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
     question = await engine.handle(inbound(4, "20"))
     assert question.text == SCHEDULE_REGISTRATION_QUESTION
-    response = await engine.handle(inbound(5, "create:schedule:no", callback=True))
+    confirmation_question = await engine.handle(inbound(5, "create:schedule:no", callback=True))
+    assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
+    response = await engine.handle(inbound(50, "create:confirmation:no", callback=True))
 
     assert response.text.startswith("✅ Игра создана.")
     assert response.text.count("https://disk.example/public/") == 3
@@ -3307,7 +3428,8 @@ async def test_game_creation_returns_pending_while_production_upload_runs_asynch
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
     await engine.handle(inbound(4, "20"))
-    response = await engine.handle(inbound(5, "create:schedule:no", callback=True))
+    await engine.handle(inbound(5, "create:schedule:no", callback=True))
+    response = await engine.handle(inbound(50, "create:confirmation:no", callback=True))
 
     assert response.deferred and response.silent and response.text == ""
     assert not any(candidate.name == "Новая асинхронная игра" for candidate in await engine.events.list_page(limit=10))
@@ -3343,7 +3465,8 @@ async def test_admin_creates_game_without_masters_and_assigns_one_later(
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
     master_question = await engine.handle(inbound(4, "20"))
     schedule_question = await engine.handle(inbound(5, "create:master-later", callback=True))
-    response = await engine.handle(inbound(6, "create:schedule:no", callback=True))
+    await engine.handle(inbound(6, "create:schedule:no", callback=True))
+    response = await engine.handle(inbound(60, "create:confirmation:no", callback=True))
 
     assert Button(label=CREATE_WITHOUT_MASTER, value="create:master-later") in master_question.buttons
     assert schedule_question.text == SCHEDULE_REGISTRATION_QUESTION
@@ -3411,7 +3534,8 @@ async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_fir
 
     schedule_question = await engine.handle(inbound(7, "create:master:t:20", callback=True))
     assert schedule_question.text == SCHEDULE_REGISTRATION_QUESTION
-    response = await engine.handle(inbound(8, "create:schedule:no", callback=True))
+    await engine.handle(inbound(8, "create:schedule:no", callback=True))
+    response = await engine.handle(inbound(80, "create:confirmation:no", callback=True))
 
     created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
     assert await engine.events.list_leaders(created.event_id) == [
@@ -3426,7 +3550,7 @@ async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_fir
         (
             Platform.TELEGRAM,
             20,
-            f"leader-grant:{created.event_id}:telegram:20:8",
+            f"leader-grant:{created.event_id}:telegram:20:80",
             "Вы добавлены мастером игры «Новая игра» (15.11.26).",
             (Button(label="Управление игрой", value=f"ag:manage:{created.event_id}"),),
         )
@@ -3458,7 +3582,8 @@ async def test_admin_created_game_master_notification_retry_does_not_create_a_se
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:master-pick", callback=True))
     await engine.handle(inbound(6, "create:master:t:2", callback=True))
-    create = inbound(7, "create:schedule:no", callback=True)
+    await engine.handle(inbound(7, "create:schedule:no", callback=True))
+    create = inbound(70, "create:confirmation:no", callback=True)
 
     with pytest.raises(RuntimeError, match="temporary transport failure"):
         await engine.handle(create)
@@ -3471,7 +3596,7 @@ async def test_admin_created_game_master_notification_retry_does_not_create_a_se
     ]
     assert response.text.startswith("✅ Игра создана.")
     assert isinstance(engine.transport, FailOnceTransport)
-    assert [sent[2] for sent in engine.transport.sent] == [f"leader-grant:{created[0].event_id}:telegram:2:7"]
+    assert [sent[2] for sent in engine.transport.sent] == [f"leader-grant:{created[0].event_id}:telegram:2:70"]
 
 
 @pytest.mark.asyncio
@@ -3529,14 +3654,15 @@ async def test_admin_can_promote_profile_link_while_selecting_the_first_master(
         )
     ]
 
-    response = await engine.handle(inbound(10, "create:schedule:no", callback=True))
+    await engine.handle(inbound(10, "create:schedule:no", callback=True))
+    response = await engine.handle(inbound(100, "create:confirmation:no", callback=True))
     created = next(candidate for candidate in await engine.events.list_page(limit=10) if candidate.name == "Новая игра")
 
     assert response.text.startswith("✅ Игра создана.")
     assert await engine.events.list_leaders(created.event_id) == [
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=2)
     ]
-    assert engine.transport.sent[-1][2] == f"leader-grant:{created.event_id}:telegram:2:10"
+    assert engine.transport.sent[-1][2] == f"leader-grant:{created.event_id}:telegram:2:100"
 
 
 @pytest.mark.asyncio
