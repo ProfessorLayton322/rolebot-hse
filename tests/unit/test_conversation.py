@@ -40,12 +40,14 @@ from larp_bot.application.conversation import (
     CREATION_MASTER_QUESTION,
     CYRILLIC_FULL_NAME_PROMPT,
     DELETE_GAME,
+    EDIT_GAME,
     EDIT_PROFILE,
     EMAIL_PROMPT,
     ENLIST,
     EVENT_TABLES,
     EXPORT_ACHIEVEMENTS,
     FREE_TEXT_DIALOG_STATES,
+    GAME_FILES,
     GAME_WISHES,
     GAMEMASTER_NOTIFICATION,
     GAMEMASTER_REVOKED_NOTIFICATION,
@@ -2061,7 +2063,9 @@ async def test_admin_archive_requires_exact_case_but_trims_whitespace(
     assert MANAGE_GAMES in [button.value for button in menu.buttons]
     await engine.handle(inbound(2, MANAGE_GAMES, callback=True))
     management = await engine.handle(inbound(3, f"ag:manage:{event.event_id}", callback=True))
-    assert ARCHIVE_GAME in [button.label for button in management.buttons]
+    assert EDIT_GAME in [button.label for button in management.buttons]
+    edit_menu = await engine.handle(inbound(30, f"ag:edit:{event.event_id}", callback=True))
+    assert ARCHIVE_GAME in [button.label for button in edit_menu.buttons]
     await engine.handle(inbound(4, f"ag:archive:{event.event_id}", callback=True))
     wrong = await engine.handle(inbound(5, event.name.casefold()))
     assert "не совпало" in wrong.text
@@ -2164,15 +2168,21 @@ async def test_viewer_roles_can_inspect_and_export_but_not_administer_an_unled_g
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
     labels = {button.label for button in management.buttons}
+    assert {MANAGE_PLAYERS, GAME_FILES, LIST_EVENT_LEADERS} <= labels
     assert {
         LIST_WAITING_PLAYERS,
         EVENT_TABLES,
         EXPORT_ACHIEVEMENTS,
         LIST_PLAYER_PROFILES,
-        LIST_EVENT_LEADERS,
-    } <= labels
+    }.isdisjoint(labels)
     assert CHANGE_STATUS not in labels
     assert REMOVE_PLAYER not in labels
+
+    files = await engine.handle(inbound(20, f"ag:files:{event.event_id}", callback=True))
+    assert {EVENT_TABLES, EXPORT_ACHIEVEMENTS} <= {button.label for button in files.buttons}
+    players = await engine.handle(inbound(21, f"ag:players:{event.event_id}", callback=True))
+    assert {LIST_WAITING_PLAYERS, LIST_PLAYER_PROFILES} <= {button.label for button in players.buttons}
+    assert REMOVE_PLAYER not in {button.label for button in players.buttons}
 
     achievements = await engine.handle(inbound(2, f"ag:achievements:{event.event_id}", callback=True))
     assert achievements.text.endswith("https://disk.example/public/2")
@@ -2274,7 +2284,9 @@ async def test_event_leader_pages_waiting_players_and_shows_signup_profiles(
     )
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    assert LIST_WAITING_PLAYERS in [button.label for button in management.buttons]
+    assert MANAGE_PLAYERS in [button.label for button in management.buttons]
+    players = await engine.handle(inbound(10, f"ag:players:{event.event_id}", callback=True))
+    assert LIST_WAITING_PLAYERS in [button.label for button in players.buttons]
 
     first = await engine.handle(inbound(2, f"ag:waiting:{event.event_id}", callback=True))
     first_players = [button for button in first.buttons if button.value.startswith("admin:waiting:pick:")]
@@ -3108,7 +3120,9 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     assert "Дата игры: 14.11.26" in response.text
     management = await engine.handle(inbound(9, response.buttons[0].value, callback=True))
     assert "Управление игрой «Бал в зимнем дворце» (14.11.26)" in management.text
-    assert EVENT_TABLES in [button.label for button in management.buttons]
+    assert GAME_FILES in [button.label for button in management.buttons]
+    files = await engine.handle(inbound(90, f"ag:files:{created.event_id}", callback=True))
+    assert EVENT_TABLES in [button.label for button in files.buttons]
     tables = await engine.handle(inbound(10, f"ag:tables:{created.event_id}", callback=True))
     assert tables.text.count("https://disk.example/public/") == 3
     assert MASTER_TABLE_DISCLAIMER in tables.text
@@ -3753,8 +3767,9 @@ async def test_admin_controls_existing_game_without_becoming_its_master(
     assert event.name in next(button.label for button in games.buttons if button.value.startswith("ag:manage:"))
     assert f"Управление игрой «{event.name}»" in selected.text
     assert f"Количество игроков: {event.player_amount}" in selected.text
-    assert CHANGE_STATUS in {button.label for button in selected.buttons}
-    assert CHANGE_GAME_DETAILS in {button.label for button in selected.buttons}
+    assert EDIT_GAME in {button.label for button in selected.buttons}
+    edit_menu = await engine.handle(inbound(20, f"ag:edit:{event.event_id}", callback=True))
+    assert {CHANGE_STATUS, CHANGE_GAME_DETAILS} <= {button.label for button in edit_menu.buttons}
     assert await engine.events.list_leaders(event.event_id) == []
 
 
@@ -3767,7 +3782,9 @@ async def test_game_master_can_change_player_amount(disk_store: MemoryDiskStore,
     )
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    amount_button = next(button for button in management.buttons if button.label == CHANGE_PLAYER_AMOUNT)
+    edit_menu_button = next(button for button in management.buttons if button.label == EDIT_GAME)
+    edit_menu = await engine.handle(inbound(10, edit_menu_button.value, callback=True))
+    amount_button = next(button for button in edit_menu.buttons if button.label == CHANGE_PLAYER_AMOUNT)
     prompt = await engine.handle(inbound(2, amount_button.value, callback=True))
     invalid = await engine.handle(inbound(3, "0"))
     accepted = await engine.handle(inbound(4, "24"))
@@ -3795,7 +3812,9 @@ async def test_game_master_can_change_game_name_and_date(disk_store: MemoryDiskS
     )
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    details_button = next(button for button in management.buttons if button.label == CHANGE_GAME_DETAILS)
+    edit_menu_button = next(button for button in management.buttons if button.label == EDIT_GAME)
+    edit_menu = await engine.handle(inbound(10, edit_menu_button.value, callback=True))
+    details_button = next(button for button in edit_menu.buttons if button.label == CHANGE_GAME_DETAILS)
     name_prompt = await engine.handle(inbound(2, details_button.value, callback=True))
     empty_name = await engine.handle(inbound(3, " "))
     date_prompt = await engine.handle(inbound(4, "  Новый предел  "))
@@ -3815,7 +3834,7 @@ async def test_game_master_can_change_game_name_and_date(disk_store: MemoryDiskS
     assert queued.participant_key is None
     assert queued.payload == EventDetailsPayload(name="Новый предел", game_date=date(2026, 11, 21))
     assert queued.reply_context.text_success == "Название и дата игры изменены: «Новый предел» (21.11.26)."
-    assert queued.reply_context.buttons == [Button(label=BACK, value=f"ag:manage:{event.event_id}")]
+    assert queued.reply_context.buttons == [Button(label=BACK, value=f"ag:edit:{event.event_id}")]
 
 
 @pytest.mark.asyncio
@@ -3847,7 +3866,7 @@ async def test_admin_can_join_and_leave_game_masters_without_losing_control_or_p
         initial.close()
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    assert CHANGE_STATUS in {button.label for button in management.buttons}
+    assert EDIT_GAME in {button.label for button in management.buttons}
     masters = await engine.handle(inbound(2, f"ag:masters:{event.event_id}", callback=True))
     self_add = next(button for button in masters.buttons if button.label == ADD_SELF_EVENT_LEADER)
     added = await engine.handle(inbound(3, self_add.value, callback=True))
@@ -3877,7 +3896,7 @@ async def test_admin_can_join_and_leave_game_masters_without_losing_control_or_p
         left.close()
 
     still_admin = await engine.handle(inbound(8, f"ag:manage:{event.event_id}", callback=True))
-    assert CHANGE_STATUS in {button.label for button in still_admin.buttons}
+    assert EDIT_GAME in {button.label for button in still_admin.buttons}
 
 
 @pytest.mark.asyncio
@@ -4366,7 +4385,8 @@ async def test_game_master_adds_telegram_then_vk_announcement_post_links(
     )
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    links_button = next(button for button in management.buttons if button.label == ADD_POST_LINKS)
+    edit_menu = await engine.handle(inbound(10, f"ag:edit:{event.event_id}", callback=True))
+    links_button = next(button for button in edit_menu.buttons if button.label == ADD_POST_LINKS)
     telegram_prompt = await engine.handle(inbound(2, links_button.value, callback=True))
     invalid_telegram = await engine.handle(inbound(3, "https://example.com/post/42"))
     vk_prompt = await engine.handle(inbound(4, "t.me/rolebot_news/42"))
@@ -4403,7 +4423,9 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
     games = await engine.handle(inbound(2, MANAGE_GAMES, callback=True))
     assert any(button.value == f"ag:manage:{event.event_id}" for button in games.buttons)
     management = await engine.handle(inbound(3, f"ag:manage:{event.event_id}", callback=True))
-    assert CHANGE_STATUS in [button.label for button in management.buttons]
+    assert EDIT_GAME in [button.label for button in management.buttons]
+    edit_menu = await engine.handle(inbound(30, f"ag:edit:{event.event_id}", callback=True))
+    assert CHANGE_STATUS in [button.label for button in edit_menu.buttons]
     status_prompt = await engine.handle(inbound(4, f"ag:status:{event.event_id}", callback=True))
     assert "Текущий Статус: Регистрация" in status_prompt.text
     assert "могут записываться, но ещё не могут подтверждать" in status_prompt.text
@@ -4437,7 +4459,7 @@ async def test_admin_can_choose_any_of_three_explained_statuses(disk_store: Memo
             update += 1
         assert queued.deferred
         assert publisher.commands[-1].operation is operation
-        assert queued.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{event.event_id}")]
+        assert queued.buttons == [Button(label="⬅️ Назад", value=f"ag:edit:{event.event_id}")]
         if operation is Operation.OPEN_CONFIRMATION:
             payload = publisher.commands[-1].payload
             assert isinstance(payload, ConfirmationDeadlinePayload)
@@ -4688,7 +4710,9 @@ async def test_event_tables_action_returns_all_three_permanent_links(disk_store:
     engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    assert EVENT_TABLES in [button.label for button in management.buttons]
+    assert GAME_FILES in [button.label for button in management.buttons]
+    files = await engine.handle(inbound(10, f"ag:files:{event.event_id}", callback=True))
+    assert EVENT_TABLES in [button.label for button in files.buttons]
 
     tables = await engine.handle(inbound(2, f"ag:tables:{event.event_id}", callback=True))
     assert tables.text.count("https://disk.example/") == 3
@@ -4696,7 +4720,7 @@ async def test_event_tables_action_returns_all_three_permanent_links(disk_store:
     assert "Административная таблица" in tables.text
     assert "Таблица пропусков" in tables.text
     assert MASTER_TABLE_DISCLAIMER in tables.text
-    assert tables.buttons == [Button(label="⬅️ Назад", value=f"ag:manage:{event.event_id}")]
+    assert tables.buttons == [Button(label="⬅️ Назад", value=f"ag:files:{event.event_id}")]
 
     repeated = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
     assert repeated.text == tables.text
@@ -4716,7 +4740,9 @@ async def test_game_management_exports_achievements_once_and_reuses_the_link(
     )
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
-    assert EXPORT_ACHIEVEMENTS in [button.label for button in management.buttons]
+    assert GAME_FILES in [button.label for button in management.buttons]
+    files = await engine.handle(inbound(10, f"ag:files:{event.event_id}", callback=True))
+    assert EXPORT_ACHIEVEMENTS in [button.label for button in files.buttons]
 
     first = await engine.handle(inbound(2, f"ag:achievements:{event.event_id}", callback=True))
     achievement_path = f"disk:/larp-bot/achievements/{event.event_id}.pptx"
