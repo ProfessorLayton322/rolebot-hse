@@ -43,6 +43,16 @@ from larp_bot.domain.security import participant_key
 from tests.conftest import MemoryDiskStore
 
 
+class CountingRegistrationRepository(MemoryRegistrationRepository):
+    def __init__(self, rows: list[Registration] | None = None) -> None:
+        super().__init__(rows or [])
+        self.list_reads = 0
+
+    async def list_for_event(self, event_id: str) -> list[Registration]:
+        self.list_reads += 1
+        return list(await super().list_for_event(event_id))
+
+
 def command(
     event: Event,
     operation: Operation,
@@ -534,6 +544,22 @@ async def test_enlist_persists_both_profiles_in_showcase(disk_store: MemoryDiskS
         assert workbook.active["D2"].value == "https://t.me/player"
     finally:
         workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_enlist_reuses_public_table_roster_for_queue_position(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    tables = CountingRegistrationRepository()
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path)
+    events = MemoryEventRepository([event])
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+
+    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="Player", wish_play="A")))
+
+    assert tables.list_reads == 1
 
 
 @pytest.mark.asyncio

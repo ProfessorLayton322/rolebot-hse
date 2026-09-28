@@ -311,10 +311,16 @@ class RegistrationCatalog:
         raise EventNotFound("Игра была удалена во время создания публичной таблицы")
 
     async def refresh(self, event: Event) -> Event:
+        event, _ = await self.refresh_with_rows(event)
+        return event
+
+    async def refresh_with_rows(self, event: Event) -> tuple[Event, list[Registration]]:
+        """Refresh the public workbook and return the roster already read for it."""
+
         rows = list(await self.registrations.list_for_event(event.event_id))
         event = await self.ensure_public_table(event, rows)
         await self.showcase.replace(event, rows)
-        return event
+        return event, rows
 
     async def archive(self, event: Event) -> None:
         await self.events.archive(event.event_id, datetime.now(UTC))
@@ -340,15 +346,23 @@ async def _event_pass_profiles(
     registrations: RegistrationRepository,
     users: UserRepository,
     participant_secret: str,
+    registration_rows: Sequence[Registration] | None = None,
 ) -> list[PassDetails]:
-    registration_rows, user_rows, leader_rows = await asyncio.gather(
-        registrations.list_for_event(event.event_id),
-        users.list_all(),
-        events.list_leaders(event.event_id),
-    )
+    if registration_rows is None:
+        fetched_registration_rows, user_rows, leader_rows = await asyncio.gather(
+            registrations.list_for_event(event.event_id),
+            users.list_all(),
+            events.list_leaders(event.event_id),
+        )
+    else:
+        fetched_registration_rows = registration_rows
+        user_rows, leader_rows = await asyncio.gather(
+            users.list_all(),
+            events.list_leaders(event.event_id),
+        )
     confirmed_keys = {
         registration.participant_key
-        for registration in registration_rows
+        for registration in fetched_registration_rows
         if registration.attendance_status is AttendanceStatus.CONFIRMED
     }
     leader_keys = {(leader.platform, leader.platform_user_id) for leader in leader_rows}
@@ -663,8 +677,10 @@ class RegistrationService:
     ) -> EventPage:
         """Page the non-archived games the user plays in or leads as a master."""
 
+        identities = await self._identities(platform, user_id)
+
         async def participates(event: Event) -> bool:
-            return await self._participation(event, platform, user_id) is not None
+            return await self._participation(event, platform, user_id, identities=identities) is not None
 
         return await self._event_page(
             participates,
@@ -696,8 +712,15 @@ class RegistrationService:
         )
         return GameOverview(participation=participation, in_main_roster=in_main_roster, chat_links=chat_links)
 
-    async def _participation(self, event: Event, platform: Platform, user_id: int) -> GameParticipation | None:
-        identities = await self._identities(platform, user_id)
+    async def _participation(
+        self,
+        event: Event,
+        platform: Platform,
+        user_id: int,
+        *,
+        identities: Sequence[BotIdentity] | None = None,
+    ) -> GameParticipation | None:
+        identities = identities or await self._identities(platform, user_id)
         registrations, leaders = await asyncio.gather(
             self._registrations(event, identities),
             self.events.list_leaders(event.event_id),
@@ -875,6 +898,7 @@ class RegistrationService:
             Operation.UNARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }
+        identities: tuple[BotIdentity, ...] | None = None
         if operation is Operation.REMOVE_PARTICIPANT:
             if target_participant_key is None:
                 raise ValueError("REMOVE_PARTICIPANT requires a target participant")
@@ -892,11 +916,13 @@ class RegistrationService:
                 )
         else:
             participant = None
-        identities = await self._identities(platform, user_id)
-        identity_group = ":".join(
-            f"{identity.platform.value}:{identity.platform_user_id}"
-            for identity in sorted(identities, key=lambda item: (item.platform.value, item.platform_user_id))
-        )
+        identity_group = None
+        if operation is Operation.CONFIRM:
+            identities = identities or await self._identities(platform, user_id)
+            identity_group = ":".join(
+                f"{identity.platform.value}:{identity.platform_user_id}"
+                for identity in sorted(identities, key=lambda item: (item.platform.value, item.platform_user_id))
+            )
         command = OrderedRegistrationCommand(
             operation_id=(
                 str(uuid5(NAMESPACE_URL, f"larp-bot:{platform}:{user_id}:{idempotency_key}"))
@@ -908,7 +934,7 @@ class RegistrationService:
             platform=platform,
             platform_user_id=user_id,
             participant_key=participant,
-            identity_group=identity_group if operation is Operation.CONFIRM else None,
+            identity_group=identity_group,
             payload=payload,
             reply_context=reply_context,
         )
@@ -2453,7 +2479,11 @@ class OrderedMutationService:
         )
         return identities, [registration for registration in registrations if registration is not None]
 
-    async def _refresh_pass_table(self, event: Event) -> None:
+    async def _refresh_pass_table(
+        self,
+        event: Event,
+        registration_rows: Sequence[Registration] | None = None,
+    ) -> None:
         if event.pass_table_resource_path is None:
             return
         if self.users is None or self.participant_secret is None:
@@ -2464,6 +2494,7 @@ class OrderedMutationService:
             self.catalog.registrations,
             self.users,
             self.participant_secret,
+            registration_rows,
         )
         await self.catalog.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
 
@@ -2472,17 +2503,12 @@ class OrderedMutationService:
         event: Event,
         command: OrderedRegistrationCommand,
         registration: Registration | None,
+        active: Sequence[Registration],
     ) -> None:
         if event.last_reserve_promotion_operation_id == command.operation_id:
             return
         promoted_key: str | None = None
         if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
-            active = [
-                row
-                for row in await self.catalog.registrations.list_for_event(event.event_id)
-                if row.attendance_status is not AttendanceStatus.CANCELLED
-            ]
-            active.sort(key=lambda row: (row.created_at, row.participant_key))
             target_index = next(
                 (index for index, row in enumerate(active) if row.participant_key == registration.participant_key),
                 None,
@@ -2498,17 +2524,12 @@ class OrderedMutationService:
         event: Event,
         command: OrderedRegistrationCommand,
         registration: Registration | None,
+        active: Sequence[Registration],
     ) -> None:
         if event.last_confirmed_link_promotion_operation_id == command.operation_id:
             return
         promoted_key: str | None = None
         if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
-            active = [
-                row
-                for row in await self.catalog.registrations.list_for_event(event.event_id)
-                if row.attendance_status is not AttendanceStatus.CANCELLED
-            ]
-            active.sort(key=lambda row: (row.created_at, row.participant_key))
             target_index = next(
                 (index for index, row in enumerate(active) if row.participant_key == registration.participant_key),
                 None,
@@ -2520,6 +2541,30 @@ class OrderedMutationService:
         await self.events.set_confirmed_link_promotion(event.event_id, command.operation_id, promoted_key)
         event.last_confirmed_link_promotion_operation_id = command.operation_id
         event.last_confirmed_link_promotion_participant_key = promoted_key
+
+    async def _record_promotions(
+        self,
+        event: Event,
+        command: OrderedRegistrationCommand,
+        registration: Registration | None,
+    ) -> None:
+        active: list[Registration] = []
+        if (
+            registration is not None
+            and registration.attendance_status is not AttendanceStatus.CANCELLED
+            and (
+                event.last_reserve_promotion_operation_id != command.operation_id
+                or event.last_confirmed_link_promotion_operation_id != command.operation_id
+            )
+        ):
+            active = [
+                row
+                for row in await self.catalog.registrations.list_for_event(event.event_id)
+                if row.attendance_status is not AttendanceStatus.CANCELLED
+            ]
+            active.sort(key=lambda row: (row.created_at, row.participant_key))
+        await self._record_reserve_promotion(event, command, registration, active)
+        await self._record_confirmed_link_promotion(event, command, registration, active)
 
     async def apply(self, command: OrderedRegistrationCommand) -> MutationResult:
         event = await self.events.get(command.event_id)
@@ -2732,11 +2777,11 @@ class OrderedMutationService:
                 await self.catalog.registrations.sift_waiting_to_end(event.event_id)
             elif event.last_participant_removal_operation_id != command.operation_id:
                 await self.events.set_participant_removal(event.event_id, command.operation_id, [])
-            await self.catalog.refresh(event)
+            event, registration_rows = await self.catalog.refresh_with_rows(event)
             stored_event = await self.events.get(event.event_id)
             current_entries = _current_sift_entries(
                 stored_event.participant_removal_keys if stored_event is not None else [],
-                await self.catalog.registrations.list_for_event(event.event_id),
+                registration_rows,
                 event.player_amount,
             )
             promoted_count = sum(entry.startswith(SIFT_PROMOTED_PREFIX) for entry in current_entries)
@@ -2777,6 +2822,7 @@ class OrderedMutationService:
                 vk_profile = f"https://vk.com/id{user.vk_id}"
                 telegram_handle = user.telegram_handle
             telegram_profile = None if telegram_handle is None else f"https://t.me/{telegram_handle.removeprefix('@')}"
+            refreshed_rows: Sequence[Registration] | None
             if registration is not None:
                 await self.catalog.registrations.update_profile(
                     event.event_id,
@@ -2789,8 +2835,10 @@ class OrderedMutationService:
                     vk_profile=vk_profile,
                     telegram_profile=telegram_profile,
                 )
-                await self.catalog.refresh(event)
-            await self._refresh_pass_table(event)
+                event, refreshed_rows = await self.catalog.refresh_with_rows(event)
+            else:
+                refreshed_rows = None
+            await self._refresh_pass_table(event, refreshed_rows)
             return MutationResult("Профиль игрока обновлён", notifications_enabled=False)
         if command.operation is Operation.ENLIST:
             if event.status is EventStatus.CLOSED:
@@ -2837,12 +2885,8 @@ class OrderedMutationService:
                 vk_profile=vk_profile,
                 telegram_profile=telegram_profile,
             )
-            event = await self.catalog.refresh(event)
-            active = [
-                row
-                for row in await self.catalog.registrations.list_for_event(event.event_id)
-                if row.attendance_status is not AttendanceStatus.CANCELLED
-            ]
+            event, registration_rows = await self.catalog.refresh_with_rows(event)
+            active = [row for row in registration_rows if row.attendance_status is not AttendanceStatus.CANCELLED]
             active.sort(key=lambda row: (row.created_at, row.participant_key))
             queue_position = next(
                 index for index, row in enumerate(active, start=1) if row.participant_key == command.participant_key
@@ -2904,8 +2948,7 @@ class OrderedMutationService:
                     command.operation_id,
                     [command.participant_key] if registration is not None else [],
                 )
-            await self._record_reserve_promotion(event, command, registration)
-            await self._record_confirmed_link_promotion(event, command, registration)
+            await self._record_promotions(event, command, registration)
             if registration is not None:
                 await self.catalog.registrations.remove(
                     event.event_id,
@@ -2913,8 +2956,8 @@ class OrderedMutationService:
                 )
             # Refresh even when the row is already absent. The first attempt may
             # have deleted it before a transient workbook or pass-table failure.
-            await self.catalog.refresh(event)
-            await self._refresh_pass_table(event)
+            event, registration_rows = await self.catalog.refresh_with_rows(event)
+            await self._refresh_pass_table(event, registration_rows)
             return MutationResult("Игрок удалён" if registration is not None else "Игрок уже удалён")
         if command.participant_key not in identity_keys:
             raise OperationNotAllowed("Некорректная запись участника")
@@ -2998,8 +3041,7 @@ class OrderedMutationService:
             elif command.payload.replaced_event_id is not None:
                 raise OperationNotAllowed("Для этой игры не задана дата")
             if replaced_event is not None:
-                await self._record_reserve_promotion(replaced_event, command, replaced_registration)
-                await self._record_confirmed_link_promotion(replaced_event, command, replaced_registration)
+                await self._record_promotions(replaced_event, command, replaced_registration)
             if linked:
                 await self.catalog.registrations.confirm_linked(
                     event.event_id,
@@ -3019,14 +3061,14 @@ class OrderedMutationService:
                     replaced_participant_key=replaced_participant_key,
                 )
             if replaced_event is not None:
-                await self.catalog.refresh(replaced_event)
-                await self._refresh_pass_table(replaced_event)
-            event = await self.catalog.refresh(event)
-            await self._refresh_pass_table(event)
+                replaced_event, replaced_rows = await self.catalog.refresh_with_rows(replaced_event)
+                await self._refresh_pass_table(replaced_event, replaced_rows)
+            event, registration_rows = await self.catalog.refresh_with_rows(event)
+            await self._refresh_pass_table(event, registration_rows)
             main_roster_keys = {
                 row.participant_key
                 for row in _active_main_roster(
-                    list(await self.catalog.registrations.list_for_event(event.event_id)),
+                    registration_rows,
                     event.player_amount,
                 )
             }
@@ -3092,8 +3134,7 @@ class OrderedMutationService:
                     if registration.attendance_status is AttendanceStatus.CANCELLED
                     else [_cancellation_snapshot_entry(registration)],
                 )
-            await self._record_reserve_promotion(event, command, registration)
-            await self._record_confirmed_link_promotion(event, command, registration)
+            await self._record_promotions(event, command, registration)
             if linked:
                 await self.catalog.registrations.cancel_linked(
                     event.event_id,
@@ -3106,7 +3147,7 @@ class OrderedMutationService:
                     operation_id=command.operation_id,
                     participant_key=command.participant_key,
                 )
-            await self.catalog.refresh(event)
-            await self._refresh_pass_table(event)
+            event, registration_rows = await self.catalog.refresh_with_rows(event)
+            await self._refresh_pass_table(event, registration_rows)
             return MutationResult("Участие отменено")
         raise AssertionError(f"unhandled operation: {command.operation}")

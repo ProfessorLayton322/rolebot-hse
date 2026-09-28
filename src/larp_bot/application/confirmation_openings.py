@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from larp_bot.domain.models import (
     ConfirmationDeadlinePayload,
+    Event,
     EventStatus,
     Operation,
     OrderedRegistrationCommand,
@@ -43,7 +44,10 @@ class ScheduledConfirmationOpeningDispatcher:
     ) -> ScheduledConfirmationDispatchResult:
         opened_by = datetime.now(UTC) if now is None else now.astimezone(UTC)
         if due_events is None:
-            due = await self.events.list_due_confirmation_openings(opened_by, limit=limit)
+            due: Sequence[Event | ScheduledLifecycleEvent] = await self.events.list_due_confirmation_openings(
+                opened_by,
+                limit=limit,
+            )
         else:
             due = [
                 event

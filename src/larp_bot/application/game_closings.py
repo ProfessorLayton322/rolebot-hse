@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
@@ -55,7 +56,10 @@ class ScheduledGameClosingDispatcher:
     ) -> ScheduledClosingDispatchResult:
         closed_by = datetime.now(UTC) if now is None else now.astimezone(UTC)
         if due_events is None:
-            due = await self.events.list_due_scheduled_closings(closed_by, limit=limit)
+            due: Sequence[Event | ScheduledLifecycleEvent] = await self.events.list_due_scheduled_closings(
+                closed_by,
+                limit=limit,
+            )
         else:
             due = [
                 event
