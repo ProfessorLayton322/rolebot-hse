@@ -18,6 +18,10 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'name = "registration_open_at"' in ydb
     assert 'name = "registration_open_notified_recipients_json"' in ydb
     assert 'name = "registration_open_notification_completed_at"' in ydb
+    assert 'name = "scheduled_close_at"' in ydb
+    assert 'name = "scheduled_close_operation_id"' in ydb
+    assert 'name = "scheduled_close_notified_recipients_json"' in ydb
+    assert 'name = "scheduled_close_completed_at"' in ydb
     assert 'name = "signup_token"' in ydb
     assert 'name = "telegram_post_url"' in ydb
     assert 'name = "telegram_chat_id"' in ydb
@@ -84,6 +88,10 @@ def test_scheduled_registration_notifications_use_an_isolated_timer_function() -
     assert 'cron_expression = "* * * * ? *"' in triggers
     assert "yandex_function.registration_notifier.id" in triggers
     assert "registration_notifier.py" in build
+    assert (
+        "scheduled_game_closing_dispatcher.dispatch_due()"
+        in (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
+    )
 
 
 def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() -> None:

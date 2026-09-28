@@ -44,7 +44,7 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 
-from .deadlines import format_confirmation_deadline
+from .deadlines import MOSCOW_TIMEZONE, format_confirmation_deadline
 from .identity import global_users, identities_for_local_user
 from .navigation import confirmation_button, main_menu_button
 from .ports import (
@@ -971,6 +971,7 @@ class EventAdministrationService:
         player_amount: int,
         leaders: Sequence[BotIdentity],
         registration_open_at: datetime | None = None,
+        scheduled_close_at: datetime | None = None,
         *,
         requester: BotIdentity | None = None,
         reply_user_id: int | None = None,
@@ -1011,6 +1012,7 @@ class EventAdministrationService:
                 "public_table_resource_path": public_path,
                 "pass_table_resource_path": pass_path,
                 "registration_open_at": registration_open_at.isoformat() if registration_open_at else None,
+                "scheduled_close_at": scheduled_close_at.isoformat() if scheduled_close_at else None,
                 "signup_token": signup_token,
             },
             "leaders": [leader.model_dump(mode="json") for leader in leaders],
@@ -1046,6 +1048,7 @@ class EventAdministrationService:
             pass_table_resource_path=pass_path,
             pass_table_public_url=urls["pass"],
             registration_open_at=registration_open_at,
+            scheduled_close_at=scheduled_close_at,
             signup_token=signup_token,
         )
         await self.events.create(event, leaders)
@@ -2576,6 +2579,13 @@ class OrderedMutationService:
             return MutationResult("Уведомление всем игрокам отправлено")
         if command.operation is Operation.UPDATE_EVENT_DETAILS:
             assert isinstance(command.payload, EventDetailsPayload)
+            if (
+                event.scheduled_close_at is not None
+                and event.scheduled_close_at.astimezone(MOSCOW_TIMEZONE).date() <= command.payload.game_date
+            ):
+                raise OperationNotAllowed(
+                    "Новая дата игры должна быть раньше запланированного автоматического закрытия"
+                )
             await self.events.set_details(
                 event.event_id,
                 command.payload.name,

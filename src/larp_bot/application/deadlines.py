@@ -9,6 +9,7 @@ MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
 NEAREST_THURSDAY = "Ближайший четверг 19:00"
 NEAREST_FRIDAY = "Ближайшая пятница 18:00"
 NEXT_SATURDAY = "Следующая суббота"
+NEXT_NIGHT_03 = "03:00 ночи после игры"
 _STRICT_DEADLINE = re.compile(r"\d{2}\.\d{2}\.\d{2} \d{2}:\d{2}")
 
 
@@ -49,3 +50,9 @@ def next_saturday_game_date(now: datetime | None = None) -> date:
     local_now = datetime.now(MOSCOW_TIMEZONE) if now is None else now.astimezone(MOSCOW_TIMEZONE)
     days_until_closest_saturday = (5 - local_now.weekday()) % 7
     return local_now.date() + timedelta(days=days_until_closest_saturday + 7)
+
+
+def next_night_03(game_date: date) -> datetime:
+    """Return 03:00 Moscow time on the calendar day after a game."""
+
+    return datetime.combine(game_date + timedelta(days=1), time(hour=3), tzinfo=MOSCOW_TIMEZONE)

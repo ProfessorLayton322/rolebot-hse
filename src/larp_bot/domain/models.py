@@ -195,6 +195,9 @@ class Operation(StrEnum):
     REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
     CLOSE_EVENT = "CLOSE_EVENT"
     ARCHIVE_EVENT = "ARCHIVE_EVENT"
+    SCHEDULED_CLOSE_EVENT = "SCHEDULED_CLOSE_EVENT"
+    SCHEDULED_CLOSE_STATISTICS = "SCHEDULED_CLOSE_STATISTICS"
+    SCHEDULED_CLOSE_FINALIZE = "SCHEDULED_CLOSE_FINALIZE"
     UNARCHIVE_EVENT = "UNARCHIVE_EVENT"
     DELETE_EVENT = "DELETE_EVENT"
 
@@ -485,6 +488,13 @@ class Event(StrictModel):
     # timestamp gate so notification delivery can never delay registration.
     registration_open_notified_recipients: list[str] = Field(default_factory=list)
     registration_open_notification_completed_at: datetime | None = None
+    # A scheduled close is executed by the per-game FIFO worker. The operation
+    # marker and delivery state make statistics, archival, and master
+    # notifications retry-safe across separate worker invocations.
+    scheduled_close_at: datetime | None = None
+    scheduled_close_operation_id: str | None = None
+    scheduled_close_notified_recipients: list[str] = Field(default_factory=list)
+    scheduled_close_completed_at: datetime | None = None
     # Legacy games predate deep-link signup tokens. Every newly created game
     # receives one whose alphabet and length fit Telegram start parameters.
     signup_token: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
@@ -524,6 +534,13 @@ class Event(StrictModel):
     def registration_opening_has_timezone(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("registration opening must include a timezone")
+        return value
+
+    @field_validator("scheduled_close_at", "scheduled_close_completed_at")
+    @classmethod
+    def scheduled_close_times_have_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("scheduled close time must include a timezone")
         return value
 
     @field_validator("registration_open_notification_completed_at")
@@ -742,6 +759,8 @@ class OrderedRegistrationCommand(StrictModel):
         if self.operation is Operation.CONFIRM:
             group = self.identity_group or f"{self.platform.value}:{self.platform_user_id}"
             return f"confirmation:{group}"
+        if self.operation is Operation.SCHEDULED_CLOSE_STATISTICS:
+            return "statistics"
         return self.event_id
 
     @model_validator(mode="after")
@@ -793,6 +812,9 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.CLOSE_EVENT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
             Operation.ARCHIVE_EVENT,
+            Operation.SCHEDULED_CLOSE_EVENT,
+            Operation.SCHEDULED_CLOSE_STATISTICS,
+            Operation.SCHEDULED_CLOSE_FINALIZE,
             Operation.UNARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }

@@ -17,10 +17,14 @@ async def _run(context: Any) -> dict[str, int]:
     elif iam_token is not None:
         _container.config.set_iam_token(iam_token)
         _container.disk_uploader.set_iam_token(iam_token)
-    result = await _container.registration_opening_notifications.notify_due()
+    result, closings = await asyncio.gather(
+        _container.registration_opening_notifications.notify_due(),
+        _container.scheduled_game_closing_dispatcher.dispatch_due(),
+    )
     return {
         "events_completed": result.events_completed,
         "notifications_delivered": result.notifications_delivered,
+        "closing_commands_enqueued": closings.commands_enqueued,
     }
 
 

@@ -198,6 +198,22 @@ resource "yandex_ydb_table" "events" {
     type = "Timestamp"
   }
   column {
+    name = "scheduled_close_at"
+    type = "Timestamp"
+  }
+  column {
+    name = "scheduled_close_operation_id"
+    type = "Utf8"
+  }
+  column {
+    name = "scheduled_close_notified_recipients_json"
+    type = "Utf8"
+  }
+  column {
+    name = "scheduled_close_completed_at"
+    type = "Timestamp"
+  }
+  column {
     name = "confirmation_deadline"
     type = "Timestamp"
   }
