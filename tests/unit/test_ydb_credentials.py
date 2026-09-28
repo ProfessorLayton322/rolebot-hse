@@ -372,12 +372,13 @@ async def test_event_repository_removes_leader_without_renaming_ydb_table() -> N
     repository = YdbEventRepository(executor)
     identity = BotIdentity(platform=Platform.VK, platform_user_id=84)
 
-    with patch.object(repository, "get", AsyncMock(return_value=object())):
-        removed = await repository.remove_leader("event-a1", identity)
+    removed = await repository.remove_leader("event-a1", identity)
 
     assert removed
     delete_query, delete_params = executor.query.await_args.args
     assert "DELETE FROM `event_leaders`" in delete_query
+    assert "RETURNING event_id" in delete_query
+    executor.query.assert_awaited_once()
     assert delete_params == {
         "$event_id": "event-a1",
         "$platform": "vk",

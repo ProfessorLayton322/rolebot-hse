@@ -28,6 +28,7 @@ def event_row(status: str) -> dict[str, Any]:
 class RecordingExecutor:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
+        self.query_count = 0
         self.query_text = ""
         self.params: dict[str, Any] = {}
         self.insert_params: dict[str, Any] = {}
@@ -40,6 +41,7 @@ class RecordingExecutor:
         read_only: bool = False,
     ) -> list[dict[str, Any]]:
         del read_only
+        self.query_count += 1
         self.query_text = yql
         self.params = params or {}
         return self.rows
@@ -267,6 +269,20 @@ async def test_event_name_and_date_are_updated_together() -> None:
     assert executor.params["$event_id"] == "event-a1"
     assert executor.params["$name"] == "Renamed Game"
     assert executor.params["$game_date"] == date(2026, 11, 21)
+    assert "RETURNING event_id" in executor.query_text
+    assert executor.query_count == 1
+
+
+@pytest.mark.asyncio
+async def test_conditional_event_update_reports_no_change_without_a_prefetch() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert not await repository.set_status("missing-event", EventStatus.CLOSED)
+
+    assert "status != $status" in executor.query_text
+    assert "RETURNING event_id" in executor.query_text
+    assert executor.query_count == 1
 
 
 @pytest.mark.asyncio
@@ -692,7 +708,9 @@ async def test_delete_removes_event_and_its_leaders() -> None:
 
     assert "DELETE FROM `event_leaders` WHERE event_id = $event_id" in executor.query_text
     assert "DELETE FROM `events` WHERE event_id = $event_id" in executor.query_text
+    assert "RETURNING event_id" in executor.query_text
     assert executor.params == {"$event_id": "event-a1"}
+    assert executor.query_count == 1
 
 
 @pytest.mark.asyncio
