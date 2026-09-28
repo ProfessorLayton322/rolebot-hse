@@ -86,17 +86,13 @@ def test_scheduled_registration_notifications_use_an_isolated_timer_function() -
     build = (ROOT / "scripts/build_function.sh").read_text()
 
     assert 'entrypoint         = "registration_notifier.handler"' in functions
-    assert 'cron_expression = "* * * * ? *"' in triggers
+    assert 'cron_expression = "*/5 * * * ? *"' in triggers
     assert "yandex_function.registration_notifier.id" in triggers
     assert "registration_notifier.py" in build
-    assert (
-        "scheduled_game_closing_dispatcher.dispatch_due()"
-        in (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
-    )
-    assert (
-        "scheduled_confirmation_opening_dispatcher.dispatch_due()"
-        in (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
-    )
+    handler = (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
+    assert "events.list_due_lifecycle_events(now)" in handler
+    assert "scheduled_game_closing_dispatcher.dispatch_due(" in handler
+    assert "scheduled_confirmation_opening_dispatcher.dispatch_due(" in handler
 
 
 def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() -> None:

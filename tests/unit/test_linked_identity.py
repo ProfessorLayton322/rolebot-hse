@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -192,6 +193,25 @@ async def test_games_registrations_and_event_leadership_are_visible_from_both_in
 
 
 @pytest.mark.asyncio
+async def test_participating_game_scan_resolves_linked_identity_once(
+    disk_store: MemoryDiskStore,
+) -> None:
+    users = MemoryUserRepository()
+    telegram, _ = await save_linked(users)
+    events = MemoryEventRepository([game("event-one"), game("event-two"), game("event-three")])
+    _, service = engine_for(users, events, MemoryRegistrationRepository(), disk_store)
+    get = AsyncMock(wraps=users.get)
+    find_linked = AsyncMock(wraps=users.find_linked)
+    users.get = get  # type: ignore[method-assign]
+    users.find_linked = find_linked  # type: ignore[method-assign]
+
+    await service.participating_games_page(Platform.TELEGRAM, telegram.tg_id)
+
+    assert get.await_count == 1
+    assert find_linked.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_one_sided_link_does_not_share_games_or_privileges(disk_store: MemoryDiskStore) -> None:
     users = MemoryUserRepository()
     telegram, vk = linked_profiles(telegram_privileged=True)
@@ -269,6 +289,10 @@ async def test_linked_registration_commands_use_existing_row_and_one_confirmatio
     publisher = MemoryCommandPublisher()
     showcase = YandexDiskShowcaseRepository(disk_store)
     service = RegistrationService(events, RegistrationCatalog(events, tables, showcase), publisher, SECRET, users)
+    get = AsyncMock(wraps=users.get)
+    find_linked = AsyncMock(wraps=users.find_linked)
+    users.get = get  # type: ignore[method-assign]
+    users.find_linked = find_linked  # type: ignore[method-assign]
 
     from_vk = await service.enqueue(
         operation=Operation.CONFIRM,
@@ -292,6 +316,8 @@ async def test_linked_registration_commands_use_existing_row_and_one_confirmatio
     assert from_vk.participant_key == existing.participant_key
     assert from_telegram.participant_key == existing.participant_key
     assert from_vk.queue_group_id == from_telegram.queue_group_id
+    assert get.await_count == 2
+    assert find_linked.await_count == 2
 
 
 @pytest.mark.asyncio

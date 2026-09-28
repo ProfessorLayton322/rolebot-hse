@@ -16,6 +16,7 @@ from larp_bot.domain.models import (
     Platform,
     PrivilegedRole,
     Registration,
+    ScheduledLifecycleEvent,
     TelegramUser,
     User,
     VkUser,
@@ -83,6 +84,13 @@ class EventRepository(Protocol):
     async def set_status(self, event_id: str, status: EventStatus) -> bool: ...
 
     async def set_registration_open_at(self, event_id: str, opens_at: datetime | None) -> bool: ...
+
+    async def list_due_lifecycle_events(
+        self,
+        due_by: datetime,
+        *,
+        limit: int = 300,
+    ) -> Sequence[ScheduledLifecycleEvent]: ...
 
     async def list_due_registration_notifications(
         self,

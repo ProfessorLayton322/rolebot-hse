@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 from larp_bot.functions.bootstrap import AppContainer, build_container, iam_token_from_context
@@ -17,10 +18,12 @@ async def _run(context: Any) -> dict[str, int]:
     elif iam_token is not None:
         _container.config.set_iam_token(iam_token)
         _container.disk_uploader.set_iam_token(iam_token)
+    now = datetime.now(UTC)
+    due_events = await _container.events.list_due_lifecycle_events(now)
     result, confirmations, closings = await asyncio.gather(
-        _container.registration_opening_notifications.notify_due(),
-        _container.scheduled_confirmation_opening_dispatcher.dispatch_due(),
-        _container.scheduled_game_closing_dispatcher.dispatch_due(),
+        _container.registration_opening_notifications.notify_due(now=now, due_events=due_events),
+        _container.scheduled_confirmation_opening_dispatcher.dispatch_due(now=now, due_events=due_events),
+        _container.scheduled_game_closing_dispatcher.dispatch_due(now=now, due_events=due_events),
     )
     return {
         "events_completed": result.events_completed,

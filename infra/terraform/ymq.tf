@@ -53,7 +53,7 @@ resource "yandex_function_trigger" "worker_kicks" {
 
 resource "yandex_function_trigger" "scheduled_registration_notifications" {
   name        = "${var.project_name}-scheduled-registration-notifications"
-  description = "Check every minute for scheduled registration openings and game closings"
+  description = "Check every five minutes for scheduled event lifecycle actions"
   folder_id   = var.yandex_folder_id
 
   function {
@@ -62,7 +62,7 @@ resource "yandex_function_trigger" "scheduled_registration_notifications" {
   }
 
   timer {
-    cron_expression = "* * * * ? *"
+    cron_expression = "*/5 * * * ? *"
   }
 
   depends_on = [yandex_function_iam_member.registration_notifier_from_trigger]

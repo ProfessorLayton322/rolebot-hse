@@ -15,6 +15,7 @@ from larp_bot.domain.models import (
     Platform,
     PrivilegedRole,
     Registration,
+    ScheduledLifecycleEvent,
     TelegramUser,
     User,
 )
@@ -216,6 +217,56 @@ class MemoryEventRepository:
         event.registration_open_notification_completed_at = None
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return True
+
+    async def list_due_lifecycle_events(
+        self,
+        due_by: datetime,
+        *,
+        limit: int = 300,
+    ) -> Sequence[ScheduledLifecycleEvent]:
+        values = [
+            event
+            for event in self.rows.values()
+            if (
+                event.registration_open_at is not None
+                and event.registration_open_at <= due_by
+                and event.registration_open_notification_completed_at is None
+                and event.archived_at is None
+                and event.status is not EventStatus.CLOSED
+            )
+            or (
+                event.confirmation_open_at is not None
+                and event.confirmation_open_at <= due_by
+                and event.confirmation_deadline is not None
+                and event.archived_at is None
+                and event.status is EventStatus.CREATED
+            )
+            or (
+                event.scheduled_close_at is not None
+                and event.scheduled_close_at <= due_by
+                and event.scheduled_close_completed_at is None
+                and (event.archived_at is None or event.scheduled_close_operation_id is not None)
+            )
+        ]
+        values.sort(key=lambda event: event.event_id)
+        return [
+            ScheduledLifecycleEvent(
+                event_id=event.event_id,
+                name=event.name,
+                game_date=event.game_date,
+                status=event.status,
+                registration_open_at=event.registration_open_at,
+                registration_open_notified_recipients=event.registration_open_notified_recipients,
+                registration_open_notification_completed_at=event.registration_open_notification_completed_at,
+                confirmation_open_at=event.confirmation_open_at,
+                confirmation_deadline=event.confirmation_deadline,
+                scheduled_close_at=event.scheduled_close_at,
+                scheduled_close_operation_id=event.scheduled_close_operation_id,
+                scheduled_close_completed_at=event.scheduled_close_completed_at,
+                archived_at=event.archived_at,
+            )
+            for event in values[:limit]
+        ]
 
     async def list_due_registration_notifications(
         self,

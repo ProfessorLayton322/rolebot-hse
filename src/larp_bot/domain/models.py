@@ -594,6 +594,24 @@ class Event(StrictModel):
         return self.registration_open_at is None or self.registration_open_at <= current
 
 
+class ScheduledLifecycleEvent(StrictModel):
+    """Narrow event projection used by the periodic lifecycle scheduler."""
+
+    event_id: str
+    name: str
+    game_date: date | None = None
+    status: EventStatus
+    registration_open_at: datetime | None = None
+    registration_open_notified_recipients: list[str] = Field(default_factory=list)
+    registration_open_notification_completed_at: datetime | None = None
+    confirmation_open_at: datetime | None = None
+    confirmation_deadline: datetime | None = None
+    scheduled_close_at: datetime | None = None
+    scheduled_close_operation_id: str | None = None
+    scheduled_close_completed_at: datetime | None = None
+    archived_at: datetime | None = None
+
+
 class Registration(StrictModel):
     event_id: str
     participant_key: str = Field(min_length=43, max_length=64)

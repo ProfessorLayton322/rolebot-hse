@@ -28,6 +28,7 @@ def event_row(status: str) -> dict[str, Any]:
 class RecordingExecutor:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
+        self.query_count = 0
         self.query_text = ""
         self.params: dict[str, Any] = {}
         self.insert_params: dict[str, Any] = {}
@@ -40,6 +41,7 @@ class RecordingExecutor:
         read_only: bool = False,
     ) -> list[dict[str, Any]]:
         del read_only
+        self.query_count += 1
         self.query_text = yql
         self.params = params or {}
         return self.rows
@@ -267,6 +269,20 @@ async def test_event_name_and_date_are_updated_together() -> None:
     assert executor.params["$event_id"] == "event-a1"
     assert executor.params["$name"] == "Renamed Game"
     assert executor.params["$game_date"] == date(2026, 11, 21)
+    assert "RETURNING event_id" in executor.query_text
+    assert executor.query_count == 1
+
+
+@pytest.mark.asyncio
+async def test_conditional_event_update_reports_no_change_without_a_prefetch() -> None:
+    executor = RecordingExecutor([])
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    assert not await repository.set_status("missing-event", EventStatus.CLOSED)
+
+    assert "status != $status" in executor.query_text
+    assert "RETURNING event_id" in executor.query_text
+    assert executor.query_count == 1
 
 
 @pytest.mark.asyncio
@@ -367,6 +383,44 @@ async def test_due_scheduled_close_query_includes_retrying_archived_games() -> N
     assert "archived_at IS NULL OR scheduled_close_operation_id IS NOT NULL" in executor.query_text
     assert executor.params["$closed_by"] == closing
     assert executor.params["$limit"] == 25
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_scheduler_reads_all_due_actions_with_one_narrow_query() -> None:
+    due = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor(
+        [
+            event_row("CREATED")
+            | {
+                "registration_open_at": due,
+                "registration_open_notified_recipients_json": '["telegram:10"]',
+                "confirmation_open_at": due,
+                "confirmation_deadline": due,
+                "scheduled_close_at": due,
+            }
+        ]
+    )
+    repository = YdbEventRepository(executor)  # type: ignore[arg-type]
+
+    events = await repository.list_due_lifecycle_events(due, limit=300)
+
+    assert [event.event_id for event in events] == ["event-a1"]
+    assert events[0].registration_open_notified_recipients == ["telegram:10"]
+    assert "registration_open_at <= $due_by" in executor.query_text
+    assert "confirmation_open_at <= $due_by" in executor.query_text
+    assert "scheduled_close_at <= $due_by" in executor.query_text
+    assert "disk_resource_path" not in executor.query_text
+    assert executor.params["$limit"] == 300
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_scheduler_accepts_legacy_open_status() -> None:
+    due = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor([event_row("OPEN") | {"scheduled_close_at": due}])
+
+    events = await YdbEventRepository(executor).list_due_lifecycle_events(due)  # type: ignore[arg-type]
+
+    assert events[0].status is EventStatus.CONFIRMATION_OPEN
 
 
 @pytest.mark.asyncio
@@ -664,7 +718,9 @@ async def test_delete_removes_event_and_its_leaders() -> None:
 
     assert "DELETE FROM `event_leaders` WHERE event_id = $event_id" in executor.query_text
     assert "DELETE FROM `events` WHERE event_id = $event_id" in executor.query_text
+    assert "RETURNING event_id" in executor.query_text
     assert executor.params == {"$event_id": "event-a1"}
+    assert executor.query_count == 1
 
 
 @pytest.mark.asyncio

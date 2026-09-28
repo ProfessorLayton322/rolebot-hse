@@ -61,6 +61,38 @@ async def test_parameterized_query_is_prepared_before_execution() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_only_query_uses_snapshot_transaction() -> None:
+    executor = YdbExecutor.__new__(YdbExecutor)
+    executor.pool = MagicMock()
+    session = MagicMock()
+    transaction = session.transaction.return_value
+    session.prepare.return_value = object()
+    transaction.execute.return_value = []
+    executor.pool.retry_operation_sync.side_effect = lambda operation: operation(session)
+
+    await executor.query("SELECT 1;", read_only=True)
+
+    mode = session.transaction.call_args.args[0]
+    assert mode.name == "snapshot_read_only"
+
+
+@pytest.mark.asyncio
+async def test_mutating_query_keeps_serializable_transaction() -> None:
+    executor = YdbExecutor.__new__(YdbExecutor)
+    executor.pool = MagicMock()
+    session = MagicMock()
+    transaction = session.transaction.return_value
+    session.prepare.return_value = object()
+    transaction.execute.return_value = []
+    executor.pool.retry_operation_sync.side_effect = lambda operation: operation(session)
+
+    await executor.query("UPDATE `events` SET name = 'new';")
+
+    mode = session.transaction.call_args.args[0]
+    assert mode.name == "serializable_read_write"
+
+
+@pytest.mark.asyncio
 async def test_delivery_claim_prepares_both_transaction_queries() -> None:
     executor = YdbExecutor.__new__(YdbExecutor)
     executor.pool = MagicMock()
@@ -340,12 +372,13 @@ async def test_event_repository_removes_leader_without_renaming_ydb_table() -> N
     repository = YdbEventRepository(executor)
     identity = BotIdentity(platform=Platform.VK, platform_user_id=84)
 
-    with patch.object(repository, "get", AsyncMock(return_value=object())):
-        removed = await repository.remove_leader("event-a1", identity)
+    removed = await repository.remove_leader("event-a1", identity)
 
     assert removed
     delete_query, delete_params = executor.query.await_args.args
     assert "DELETE FROM `event_leaders`" in delete_query
+    assert "RETURNING event_id" in delete_query
+    executor.query.assert_awaited_once()
     assert delete_params == {
         "$event_id": "event-a1",
         "$platform": "vk",

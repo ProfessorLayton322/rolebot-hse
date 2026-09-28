@@ -86,3 +86,40 @@ def test_registration_notifier_reuses_event_loop_between_warm_invocations(
     assert notifier.handler({}, None) == expected
     assert loops[0] is loops[1]
     assert not loops[0].is_closed()
+
+
+@pytest.mark.asyncio
+async def test_registration_notifier_shares_one_due_event_read_between_all_dispatchers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notifier = _module("larp_bot.functions.registration_notifier.handler")
+    due_events = [object()]
+    container = SimpleNamespace(
+        events=SimpleNamespace(list_due_lifecycle_events=AsyncMock(return_value=due_events)),
+        registration_opening_notifications=SimpleNamespace(
+            notify_due=AsyncMock(return_value=SimpleNamespace(events_completed=1, notifications_delivered=2))
+        ),
+        scheduled_confirmation_opening_dispatcher=SimpleNamespace(
+            dispatch_due=AsyncMock(return_value=SimpleNamespace(commands_enqueued=3))
+        ),
+        scheduled_game_closing_dispatcher=SimpleNamespace(
+            dispatch_due=AsyncMock(return_value=SimpleNamespace(commands_enqueued=4))
+        ),
+    )
+    monkeypatch.setattr(notifier, "_container", container)
+
+    result = await notifier._run(None)
+
+    assert result == {
+        "events_completed": 1,
+        "notifications_delivered": 2,
+        "confirmation_commands_enqueued": 3,
+        "closing_commands_enqueued": 4,
+    }
+    container.events.list_due_lifecycle_events.assert_awaited_once()
+    for service in (
+        container.registration_opening_notifications.notify_due,
+        container.scheduled_confirmation_opening_dispatcher.dispatch_due,
+        container.scheduled_game_closing_dispatcher.dispatch_due,
+    ):
+        assert service.await_args.kwargs["due_events"] is due_events

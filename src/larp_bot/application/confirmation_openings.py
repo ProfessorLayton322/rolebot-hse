@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
 
 from larp_bot.domain.models import (
     ConfirmationDeadlinePayload,
+    Event,
+    EventStatus,
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    ScheduledLifecycleEvent,
 )
 
 from .ports import EventRepository, OrderedCommandPublisher
@@ -36,9 +40,24 @@ class ScheduledConfirmationOpeningDispatcher:
         *,
         now: datetime | None = None,
         limit: int = 100,
+        due_events: Sequence[ScheduledLifecycleEvent] | None = None,
     ) -> ScheduledConfirmationDispatchResult:
         opened_by = datetime.now(UTC) if now is None else now.astimezone(UTC)
-        due = await self.events.list_due_confirmation_openings(opened_by, limit=limit)
+        if due_events is None:
+            due: Sequence[Event | ScheduledLifecycleEvent] = await self.events.list_due_confirmation_openings(
+                opened_by,
+                limit=limit,
+            )
+        else:
+            due = [
+                event
+                for event in due_events
+                if event.confirmation_open_at is not None
+                and event.confirmation_open_at <= opened_by
+                and event.confirmation_deadline is not None
+                and event.archived_at is None
+                and event.status is EventStatus.CREATED
+            ][:limit]
         for event in due:
             if event.confirmation_open_at is None or event.confirmation_deadline is None:
                 continue

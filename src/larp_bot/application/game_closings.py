@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import NAMESPACE_URL, uuid5
@@ -12,6 +13,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    ScheduledLifecycleEvent,
     UnreachableRecipient,
     event_reference,
 )
@@ -50,9 +52,23 @@ class ScheduledGameClosingDispatcher:
         *,
         now: datetime | None = None,
         limit: int = 100,
+        due_events: Sequence[ScheduledLifecycleEvent] | None = None,
     ) -> ScheduledClosingDispatchResult:
         closed_by = datetime.now(UTC) if now is None else now.astimezone(UTC)
-        due = await self.events.list_due_scheduled_closings(closed_by, limit=limit)
+        if due_events is None:
+            due: Sequence[Event | ScheduledLifecycleEvent] = await self.events.list_due_scheduled_closings(
+                closed_by,
+                limit=limit,
+            )
+        else:
+            due = [
+                event
+                for event in due_events
+                if event.scheduled_close_at is not None
+                and event.scheduled_close_at <= closed_by
+                and event.scheduled_close_completed_at is None
+                and (event.archived_at is None or event.scheduled_close_operation_id is not None)
+            ][:limit]
         for event in due:
             if event.scheduled_close_at is None:
                 continue
