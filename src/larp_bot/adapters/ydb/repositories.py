@@ -1080,7 +1080,9 @@ class YdbEventRepository:
                 event_id=row["event_id"],
                 name=row["name"],
                 game_date=_date(row["game_date"]) if row.get("game_date") is not None else None,
-                status=EventStatus(str(row["status"])),
+                status=(
+                    EventStatus.CONFIRMATION_OPEN if str(row["status"]) == "OPEN" else EventStatus(str(row["status"]))
+                ),
                 registration_open_at=(
                     _dt(row["registration_open_at"]) if row.get("registration_open_at") is not None else None
                 ),

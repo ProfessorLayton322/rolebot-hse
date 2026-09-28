@@ -414,6 +414,16 @@ async def test_lifecycle_scheduler_reads_all_due_actions_with_one_narrow_query()
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_scheduler_accepts_legacy_open_status() -> None:
+    due = datetime(2026, 11, 15, tzinfo=UTC)
+    executor = RecordingExecutor([event_row("OPEN") | {"scheduled_close_at": due}])
+
+    events = await YdbEventRepository(executor).list_due_lifecycle_events(due)  # type: ignore[arg-type]
+
+    assert events[0].status is EventStatus.CONFIRMATION_OPEN
+
+
+@pytest.mark.asyncio
 async def test_scheduled_close_start_closes_registration_before_statistics() -> None:
     closing = datetime(2026, 11, 15, tzinfo=UTC)
     executor = RecordingExecutor([event_row("CONFIRMATION_OPEN") | {"scheduled_close_at": closing}])
