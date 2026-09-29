@@ -61,6 +61,29 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert ydb.count('name = "linked_vk_id"') == 1
 
 
+def test_identity_index_is_synchronous_and_ready_before_functions_deploy() -> None:
+    ydb = (ROOT / "infra/terraform/ydb.tf").read_text()
+    index = ydb.split('resource "yandex_ydb_table_index" "telegram_identity" {', 1)[1].split("}", 1)[0]
+    assert "table_id = yandex_ydb_table.tg_users.id" in index
+    assert 'type     = "global_sync"' in index
+    # A handle prefix also supports find_telegram_by_handle without scanning.
+    assert 'columns  = ["telegram_handle", "linked_vk_id"]' in index
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    for name in ("gateway", "ordered_worker", "upload_completion"):
+        function = functions.split(f'resource "yandex_function" "{name}" {{', 1)[1].split('\nresource "', 1)[0]
+        dependencies = function.split("depends_on = [", 1)[1].split("]", 1)[0]
+        assert "yandex_ydb_table_index.telegram_identity" in dependencies
+
+
+def test_ydb_dashboard_does_not_integrate_sparse_ru_across_idle_gaps() -> None:
+    monitoring = (ROOT / "infra/terraform/monitoring.tf").read_text()
+    assert "to = yandex_monitoring_dashboard.ydb_operations" in monitoring
+    assert 'id = "fbehpu9s0f63vvj3p2v9"' in monitoring
+    assert "integral(replace_nan(${local.ydb_api_ru}, 0) + 0 * ${local.ydb_sql_requests})" in monitoring
+    assert monitoring.count("disabled = true") == 2
+    assert "integral(${local.ydb_sql_requests})" in monitoring
+
+
 def test_no_fifo_native_trigger() -> None:
     trigger = (ROOT / "infra/terraform/ymq.tf").read_text()
     assert "queue_id           = yandex_message_queue.worker_kicks.arn" in trigger

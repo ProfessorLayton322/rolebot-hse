@@ -84,6 +84,16 @@ resource "yandex_ydb_table" "tg_users" {
   depends_on = [time_sleep.ydb_ready]
 }
 
+# Identity checks run on ordinary menu navigation. Keep the handle first so
+# both handle-only and reciprocal (handle, VK ID) lookups use a bounded range.
+# This must be synchronous: stale links must never confer another user's role.
+resource "yandex_ydb_table_index" "telegram_identity" {
+  table_id = yandex_ydb_table.tg_users.id
+  name     = "telegram_identity"
+  type     = "global_sync"
+  columns  = ["telegram_handle", "linked_vk_id"]
+}
+
 resource "yandex_ydb_table" "vk_users" {
   path              = "vk_users"
   connection_string = yandex_ydb_database_serverless.application.ydb_full_endpoint
