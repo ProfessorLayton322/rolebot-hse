@@ -325,7 +325,7 @@ class YdbUserRepository:
                 """
                 DECLARE $vk_id AS Uint64;
                 DECLARE $handle AS Utf8;
-                SELECT tg_id FROM `tg_users`
+                SELECT tg_id FROM `tg_users` VIEW telegram_identity
                 WHERE linked_vk_id = $vk_id AND telegram_handle = $handle
                 LIMIT 2;
                 """,
@@ -343,7 +343,7 @@ class YdbUserRepository:
             DECLARE $vk_id AS Uint64;
             DECLARE $handle AS Utf8;
             SELECT tg_id, vk_url, linked_vk_id, telegram_handle, {self.COMMON_COLUMNS}
-            FROM `tg_users`
+            FROM `tg_users` VIEW telegram_identity
             WHERE linked_vk_id = $vk_id AND telegram_handle = $handle
             LIMIT 2;
             """,
@@ -359,7 +359,7 @@ class YdbUserRepository:
             f"""
             DECLARE $handle AS Utf8;
             SELECT tg_id, vk_url, linked_vk_id, telegram_handle, {self.COMMON_COLUMNS}
-            FROM `tg_users` WHERE telegram_handle = $handle
+            FROM `tg_users` VIEW telegram_identity WHERE telegram_handle = $handle
             LIMIT 2;
             """,
             {"$handle": handle},

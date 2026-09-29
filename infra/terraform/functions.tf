@@ -128,6 +128,7 @@ resource "yandex_function" "gateway" {
 
   depends_on = [
     yandex_ydb_table.tg_users,
+    yandex_ydb_table_index.telegram_identity,
     yandex_ydb_table.vk_users,
     yandex_ydb_table.events,
     yandex_ydb_table.registrations,
@@ -171,6 +172,7 @@ resource "yandex_function" "ordered_worker" {
 
   depends_on = [
     yandex_ydb_table.tg_users,
+    yandex_ydb_table_index.telegram_identity,
     yandex_ydb_table.vk_users,
     yandex_ydb_table.events,
     yandex_ydb_table.registrations,
@@ -255,6 +257,7 @@ resource "yandex_function" "upload_completion" {
 
   depends_on = [
     yandex_ydb_table.tg_users,
+    yandex_ydb_table_index.telegram_identity,
     yandex_ydb_table.vk_users,
     yandex_ydb_table.events,
     time_sleep.async_invoker_ready,

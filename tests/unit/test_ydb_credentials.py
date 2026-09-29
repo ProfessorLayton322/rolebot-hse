@@ -276,6 +276,79 @@ async def test_user_repository_finds_telegram_user_by_own_handle() -> None:
     assert user.is_gamemaster and user.privileged_role is PrivilegedRole.GAMEMASTER_VIEWER
     assert user.gamemaster_grant_operation_id == "grant-1"
     assert executor.query.await_args.args[1] == {"$handle": "@player_name"}
+    assert "FROM `tg_users` VIEW telegram_identity WHERE telegram_handle = $handle" in executor.query.await_args.args[0]
+
+
+@pytest.mark.parametrize("owners", [[], [{"tg_id": 99}], [{"tg_id": 42}, {"tg_id": 99}]])
+async def test_indexed_telegram_link_rejects_missing_wrong_or_ambiguous_owner(owners: list[dict[str, int]]) -> None:
+    executor = SimpleNamespace(query=AsyncMock(return_value=owners))
+    user = TelegramUser(tg_id=42, linked_vk_id=84, telegram_handle="@player_name")
+
+    assert await YdbUserRepository(executor).find_linked(user) is None
+
+    executor.query.assert_awaited_once()
+    query, params = executor.query.await_args.args
+    assert "SELECT tg_id FROM `tg_users` VIEW telegram_identity" in query
+    assert "WHERE linked_vk_id = $vk_id AND telegram_handle = $handle" in query
+    assert "LIMIT 2" in query
+    assert params == {"$vk_id": 84, "$handle": "@player_name"}
+
+
+@pytest.mark.parametrize("reciprocal_handle", ["@player_name", "@someone_else", None])
+async def test_indexed_telegram_link_still_checks_the_vk_profile(reciprocal_handle: str | None) -> None:
+    timestamp = datetime(2026, 9, 29, tzinfo=UTC)
+    executor = SimpleNamespace(
+        query=AsyncMock(
+            side_effect=[
+                [{"tg_id": 42}],
+                [{"vk_id": 84, "telegram_handle": reciprocal_handle, "created_at": timestamp, "updated_at": timestamp}],
+            ]
+        )
+    )
+    user = TelegramUser(tg_id=42, linked_vk_id=84, telegram_handle="@player_name")
+
+    linked = await YdbUserRepository(executor).find_linked(user)
+
+    assert (linked is not None) == (reciprocal_handle == user.telegram_handle)
+    assert "FROM `tg_users` VIEW telegram_identity" in executor.query.await_args_list[0].args[0]
+    assert "FROM `vk_users` WHERE vk_id = $user_id" in executor.query.await_args_list[1].args[0]
+    assert executor.query.await_args_list[1].args[1] == {"$user_id": 84}
+
+
+@pytest.mark.parametrize("matches", [0, 1, 2])
+@pytest.mark.parametrize("by_handle", [False, True])
+async def test_indexed_telegram_profile_lookup_requires_exactly_one_match(matches: int, by_handle: bool) -> None:
+    timestamp = datetime(2026, 9, 29, tzinfo=UTC)
+    executor = SimpleNamespace(
+        query=AsyncMock(
+            return_value=[
+                {
+                    "tg_id": 42 + index,
+                    "telegram_handle": "@player_name",
+                    "linked_vk_id": 84,
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                }
+                for index in range(matches)
+            ]
+        )
+    )
+    repository = YdbUserRepository(executor)
+    linked = (
+        await repository.find_telegram_by_handle("@player_name")
+        if by_handle
+        else await repository.find_linked(VkUser(vk_id=84, telegram_handle="@player_name"))
+    )
+
+    assert (linked is not None) == (matches == 1)
+    if linked is not None:
+        assert isinstance(linked, TelegramUser) and linked.tg_id == 42
+    query, params = executor.query.await_args.args
+    assert "FROM `tg_users` VIEW telegram_identity" in query
+    assert "LIMIT 2" in query
+    assert params == ({"$handle": "@player_name"} if by_handle else {"$vk_id": 84, "$handle": "@player_name"})
+    if not by_handle:
+        assert "WHERE linked_vk_id = $vk_id AND telegram_handle = $handle" in query
 
 
 @pytest.mark.asyncio
