@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from larp_bot.adapters.telegram.callbacks import encode_callback
 from larp_bot.domain.models import Button, Platform, UnreachableRecipient, normalize_vk_url
 from larp_bot.domain.security import sign_request
 
@@ -121,7 +122,9 @@ class CloudflareTelegramEgress:
         payload: dict[str, object] = {"chat_id": chat_id, "text": text}
         if buttons:
             payload["reply_markup"] = {
-                "inline_keyboard": [[{"text": button.label, "callback_data": button.value}] for button in buttons]
+                "inline_keyboard": [
+                    [{"text": button.label, "callback_data": encode_callback(button.value)}] for button in buttons
+                ]
             }
         return payload
 
