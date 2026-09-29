@@ -23,6 +23,7 @@ resource "yandex_monitoring_dashboard" "ydb_operations" {
       h = 8
     }
     chart {
+      chart_id    = "ydb-consumed-ru"
       title       = "Consumed YDB request units (RU)"
       description = "Cumulative RU over the selected interval. RU measure query cost, not the number of requests."
       queries {
@@ -49,14 +50,17 @@ resource "yandex_monitoring_dashboard" "ydb_operations" {
       h = 8
     }
     chart {
-      title       = "YDB SQL executions"
-      description = "Cumulative ExecuteDataQuery calls over the selected interval, separate from their RU cost."
+      chart_id    = "ydb-sql-execution-rate"
+      title       = "YDB SQL execution rate"
+      description = "ExecuteDataQuery calls per second. The scheduled lifecycle check normally produces one isolated call every five minutes."
       queries {
         downsampling {
           disabled = true
         }
         target {
-          query     = "alias(integral(${local.ydb_sql_requests}), \"SQL executions\")"
+          # This metric is already a request rate. Integrating it produced a
+          # monotonically increasing interval total that looked like a backlog.
+          query     = "alias(${local.ydb_sql_requests}, \"SQL executions/s\")"
           text_mode = true
         }
       }
