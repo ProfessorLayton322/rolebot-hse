@@ -6,6 +6,8 @@ from typing import Any
 
 from larp_bot.domain.models import BotIdentity, BotResponse, InboundMessage, Platform
 
+from .callbacks import decode_callback, encode_callback
+
 
 class InvalidTelegramUpdate(ValueError):
     pass
@@ -159,7 +161,7 @@ def parse_telegram_update(update: dict[str, Any]) -> InboundMessage:
         return InboundMessage(
             identity=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=user_id),
             update_id=str(update_id),
-            callback=data,
+            callback=decode_callback(data),
             chat_id=chat_id,
             telegram_username=sender.get("username"),
         )
@@ -193,6 +195,8 @@ def telegram_inline_payload(response: BotResponse, chat_id: int) -> dict[str, An
     }
     if response.buttons:
         payload["reply_markup"] = {
-            "inline_keyboard": [[{"text": button.label, "callback_data": button.value}] for button in response.buttons]
+            "inline_keyboard": [
+                [{"text": button.label, "callback_data": encode_callback(button.value)}] for button in response.buttons
+            ]
         }
     return payload
