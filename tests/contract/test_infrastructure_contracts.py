@@ -79,9 +79,13 @@ def test_ydb_dashboard_does_not_integrate_sparse_ru_across_idle_gaps() -> None:
     monitoring = (ROOT / "infra/terraform/monitoring.tf").read_text()
     assert "to = yandex_monitoring_dashboard.ydb_operations" in monitoring
     assert 'id = "fbehpu9s0f63vvj3p2v9"' in monitoring
+    assert monitoring.count("chart_id") == 2
+    assert 'chart_id    = "ydb-consumed-ru"' in monitoring
+    assert 'chart_id    = "ydb-sql-execution-rate"' in monitoring
     assert "integral(replace_nan(${local.ydb_api_ru}, 0) + 0 * ${local.ydb_sql_requests})" in monitoring
     assert monitoring.count("disabled = true") == 2
-    assert "integral(${local.ydb_sql_requests})" in monitoring
+    assert 'alias(${local.ydb_sql_requests}, \\"SQL executions/s\\")' in monitoring
+    assert "integral(${local.ydb_sql_requests})" not in monitoring
 
 
 def test_no_fifo_native_trigger() -> None:

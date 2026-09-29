@@ -30,7 +30,15 @@ billing reconciliation.
 it through Terraform CI/CD. The RU calculation adds zero times the continuous
 `api.grpc.request.count` series for `ExecuteDataQuery` before integration.
 This aligns the sparse gauge to the regular 15-second observation grid without
-adding request counts to RU. A separate chart shows SQL execution counts.
+adding request counts to RU. A separate chart shows the current SQL execution
+rate. It does not integrate the request rate into an ever-rising interval total,
+which looked like an operation backlog even though no operations were pending.
+
+The first deployment attempt imported the existing dashboard but failed while
+updating it: both chart widgets omitted the provider's optional `chart_id`, so
+the provider serialized two empty IDs and the Monitoring API rejected the
+second one as a duplicate. Both charts now have stable, distinct IDs. The
+dashboard remains managed by the same Terraform resource and dashboard ID.
 
 Keep downsampling disabled for these calculations. Averaging a sparse gauge
 before integration also overstates usage: a replay of the same idle interval
@@ -68,14 +76,32 @@ Synchronous maintenance prevents stale index entries from conferring access.
 Functions using these lookups depend on index creation completing before
 their new version is deployed.
 
+## Recurring lifecycle query
+
+The lifecycle timer intentionally checks for due scheduled actions every five
+minutes. It now issues one combined read per tick, so an idle service produces
+12 `ExecuteDataQuery` calls per hour, or 288 per day. Those calls are completed
+requests, not accumulating operations. A production system-view check after
+the partial deployment showed one call at each timer tick and six rows read per
+call, matching the six current event rows. No overlapping or multiplying timer
+executions were present.
+
+During the six hours ending shortly after the deployment, Monitoring recorded
+an estimated 554 SQL executions. Only 71 15-second samples represented the
+single timer call; most other activity was concentrated in two hours of bot
+traffic and deployment work. The rising old chart was therefore the cumulative
+integral of legitimate completed requests. The request-rate chart now leaves
+idle periods at zero and displays each timer check as an isolated sample.
+
 ## Verification and future diagnosis
 
 Regression tests cover zero, one, and two matches; a different Telegram owner;
 nonreciprocal VK handles; explicit index use; and Terraform deployment ordering.
 The dashboard formulas were replayed against production metrics without
 changing production resources. The dashboard import plan showed an in-place
-update with no deletion. Production index performance must be checked after
-the GitHub Actions deployment; this task stops when the PR merge is started.
+update with no deletion. The index and dependent function versions completed
+successfully before the first dashboard update failed; the corrected dashboard
+will be applied through the next GitHub Actions deployment.
 
 For future incidents, inspect RPC counts and statuses separately from RU, then
 use a bounded, read-only query against YDB's system statistics:
