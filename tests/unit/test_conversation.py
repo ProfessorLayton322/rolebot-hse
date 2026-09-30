@@ -4738,7 +4738,7 @@ async def test_event_tables_action_returns_all_three_permanent_links(disk_store:
 
 
 @pytest.mark.asyncio
-async def test_game_management_exports_achievements_once_and_reuses_the_link(
+async def test_game_management_regenerates_achievements_and_reuses_the_link(
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
@@ -4759,13 +4759,14 @@ async def test_game_management_exports_achievements_once_and_reuses_the_link(
     achievement_path = f"disk:/larp-bot/achievements/{event.event_id}.pptx"
     assert first.text.endswith("https://disk.example/public/2")
     assert achievement_path in disk_store.files
-    first_content = disk_store.files[achievement_path]
+    assert disk_store.files[achievement_path].startswith(b"PK")
+    disk_store.files[achievement_path] = b"stale presentation"
 
     repeated = await engine.handle(inbound(3, f"ag:achievements:{event.event_id}", callback=True))
 
     assert repeated.text == first.text
-    assert disk_store.files[achievement_path] == first_content
-    assert disk_store.replace_count.get(achievement_path, 0) == 0
+    assert disk_store.files[achievement_path].startswith(b"PK")
+    assert disk_store.replace_count[achievement_path] == 1
 
 
 @pytest.mark.asyncio

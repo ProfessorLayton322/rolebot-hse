@@ -13,7 +13,10 @@ dependencies = [
   "google-auth==2.57.1",
   "httpx==0.28.1",
   "openpyxl==3.1.5",
+  "pillow==12.3.0",
   "pydantic==2.13.4",
+  "pypdfium2==5.13.0",
+  "python-pptx==1.0.2",
   "requests==2.34.2",
   "ydb==3.31.2",
 ]
@@ -59,5 +62,15 @@ packages = ["larp_bot"]
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["ydb.*", "boto3.*", "botocore.*", "google.*", "openpyxl.*", "requests.*"]
+module = [
+  "PIL.*",
+  "pypdfium2.*",
+  "pptx.*",
+  "ydb.*",
+  "boto3.*",
+  "botocore.*",
+  "google.*",
+  "openpyxl.*",
+  "requests.*",
+]
 ignore_missing_imports = true

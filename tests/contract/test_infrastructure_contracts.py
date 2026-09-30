@@ -147,15 +147,14 @@ def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() 
     assert 'id      = "expire-abandoned-disk-uploads"' in storage
 
 
-def test_deployment_packages_the_read_only_achievement_template() -> None:
+def test_deployment_packages_the_read_only_achievement_pdf_template() -> None:
     deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
-    fetcher = (ROOT / "scripts/fetch_achievement_template.py").read_text()
+    build = (ROOT / "scripts/build_function.sh").read_text()
+    template = ROOT / "src/larp_bot/assets/pdf_achievements_usual.pdf"
 
-    assert "python scripts/fetch_achievement_template.py" in deploy
-    assert "larp-bot/roleclub_achievement_basic.pptx" in deploy
-    assert deploy.index("python scripts/fetch_achievement_template.py") < deploy.index("bash scripts/build_function.sh")
-    assert "get_object" in fetcher
-    assert "put_object" not in fetcher
+    assert "fetch_achievement_template.py" not in deploy
+    assert template.read_bytes().startswith(b"%PDF-")
+    assert 'cp -R "${repo_dir}/src/larp_bot"' in build
 
 
 def test_no_direct_telegram_connection_from_yandex_python() -> None:

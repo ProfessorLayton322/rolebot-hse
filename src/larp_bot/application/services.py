@@ -1351,13 +1351,13 @@ class EventAdministrationService:
         event = await self.events.get(event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
-        if event.achievement_public_url is not None:
-            return AchievementExport(event.achievement_public_url, created=False)
 
-        disk_path = f"disk:/larp-bot/achievements/{event.event_id}.pptx"
+        replacing = event.achievement_public_url is not None
+        disk_path = event.achievement_resource_path or f"disk:/larp-bot/achievements/{event.event_id}.pptx"
         public_url = await self.showcase.create_achievement_presentation(
             disk_path,
             event.name,
+            overwrite=replacing,
             callback={
                 "kind": "achievement",
                 "event_id": event.event_id,
@@ -1377,7 +1377,9 @@ class EventAdministrationService:
             before_invoke=before_invoke,
         )
         if public_url is None:
-            return AchievementExport(None, created=True)
+            return AchievementExport(None, created=not replacing)
+        if replacing:
+            return AchievementExport(event.achievement_public_url, created=False)
         try:
             if not await self.events.set_achievement(event.event_id, disk_path, public_url):
                 current = await self.events.get(event.event_id)

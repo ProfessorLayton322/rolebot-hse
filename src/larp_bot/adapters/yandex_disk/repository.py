@@ -662,6 +662,7 @@ class YandexDiskShowcaseRepository:
         disk_path: str,
         game_name: str,
         *,
+        overwrite: bool = False,
         callback: dict[str, object] | None = None,
         before_invoke: UploadReadyCallback | None = None,
     ) -> str | None:
@@ -674,7 +675,7 @@ class YandexDiskShowcaseRepository:
             disk_path,
             content,
             content_type=PPTX_MIME_TYPE,
-            overwrite=False,
+            overwrite=overwrite,
             publish=True,
             callback=callback,
             before_invoke=before_invoke,

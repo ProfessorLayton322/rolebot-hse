@@ -68,7 +68,7 @@ async def test_completion_creates_event_and_sends_links_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_completion_persists_achievement_before_sending_link() -> None:
+async def test_completion_sends_the_stable_achievement_link_for_each_new_export_job() -> None:
     event = Event(
         event_id="event-1234",
         name="Осенняя игра",
@@ -96,13 +96,20 @@ async def test_completion_persists_achievement_before_sending_link() -> None:
     }
 
     await service.handle(payload)
-    await service.handle(payload | {"job_id": "22345678-1234-1234-1234-123456789abc"})
+    await service.handle(payload)
+    await service.handle(
+        payload
+        | {
+            "job_id": "22345678-1234-1234-1234-123456789abc",
+            "public_urls": {"achievement": "https://disk.example/unexpected-new-link"},
+        }
+    )
 
     persisted = await events.get(event.event_id)
     assert persisted is not None
     assert persisted.achievement_public_url == "https://disk.example/achievement"
-    assert len(transport.sent) == 1
-    assert transport.sent[0][3].endswith("https://disk.example/achievement")
+    assert len(transport.sent) == 2
+    assert all(message[3].endswith("https://disk.example/achievement") for message in transport.sent)
 
 
 @pytest.mark.asyncio

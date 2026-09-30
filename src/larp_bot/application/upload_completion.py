@@ -227,6 +227,7 @@ class UploadCompletionService:
         self,
         callback: Mapping[str, Any],
         urls: dict[str, str],
+        job_id: str,
     ) -> None:
         if set(urls) != {"achievement"}:
             raise ValueError("achievement completion has unexpected upload results")
@@ -234,13 +235,14 @@ class UploadCompletionService:
         path = str(callback["resource_path"])
         await self.events.set_achievement(event_id, path, urls["achievement"])
         event = await self.events.get(event_id)
-        if event is None:
+        if event is None or event.achievement_public_url is None:
             return
-        link_version = hashlib.sha256(urls["achievement"].encode()).hexdigest()[:16]
+        public_url = event.achievement_public_url
+        link_version = hashlib.sha256(public_url.encode()).hexdigest()[:16]
         await self._send(
             callback,
-            operation_id=f"achievement:{event_id}:{link_version}",
-            text=f"Ачивки игры {event_reference(event.name, event.game_date)}\n\n{urls['achievement']}",
+            operation_id=f"achievement:{event_id}:{link_version}:{job_id}",
+            text=f"Ачивки игры {event_reference(event.name, event.game_date)}\n\n{public_url}",
             buttons=[game_management_button(event_id)],
         )
 
@@ -265,6 +267,6 @@ class UploadCompletionService:
         elif kind == "event_tables":
             await self._event_tables(callback, urls, job_id)
         elif kind == "achievement":
-            await self._achievement(callback, urls)
+            await self._achievement(callback, urls, job_id)
         else:
             raise ValueError("unknown upload completion kind")
