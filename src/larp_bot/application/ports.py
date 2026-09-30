@@ -433,6 +433,7 @@ class RegistrationShowcaseRepository(Protocol):
         disk_path: str,
         game_name: str,
         *,
+        overwrite: bool = False,
         callback: dict[str, object] | None = None,
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> str | None: ...

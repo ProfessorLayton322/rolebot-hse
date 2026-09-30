@@ -58,12 +58,6 @@ jobs:
           python scripts/check_storage_constraint.py
           bash scripts/check_telegram_isolation.sh
           (cd functions/disk_uploader && go test ./... && go vet ./...)
-      - name: Fetch achievement presentation template
-        run: |
-          python scripts/fetch_achievement_template.py \
-            --bucket "${TF_VAR_function_package_bucket}" \
-            --key "larp-bot/roleclub_achievement_basic.pptx" \
-            --output "src/larp_bot/assets/roleclub_achievement_basic.pptx"
       - name: Build deterministic Function package
         run: |
           bash scripts/build_function.sh

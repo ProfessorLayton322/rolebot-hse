@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
-from io import BytesIO
-from zipfile import ZipFile
+from pathlib import Path
 
 import pytest
 
@@ -12,30 +11,7 @@ from larp_bot.domain.models import Event, EventStatus
 
 
 def achievement_template_bytes() -> bytes:
-    slide = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
-       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
-  <p:cSld><p:spTree>
-    <p:sp><p:nvSpPr><p:cNvPr id="1" name="Achievement 1"/></p:nvSpPr>
-      <p:spPr><a:xfrm><a:ext cx="1555074" cy="219833"/></a:xfrm></p:spPr>
-      <p:txBody><a:bodyPr lIns="72850" rIns="72850" wrap="square"/><a:lstStyle/>
-        <a:p><a:r><a:rPr sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>ЛОГОС</a:t></a:r>
-          <a:endParaRPr sz="1200"/></a:p>
-      </p:txBody>
-    </p:sp>
-    <p:sp><p:nvSpPr><p:cNvPr id="2" name="Achievement 2"/></p:nvSpPr>
-      <p:spPr><a:xfrm><a:ext cx="2011769" cy="219833"/></a:xfrm></p:spPr>
-      <p:txBody><a:bodyPr lIns="72850" rIns="72850" wrap="square"><a:spAutoFit/></a:bodyPr><a:lstStyle/>
-        <a:p><a:r><a:rPr sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>ЛОГОС</a:t></a:r></a:p>
-      </p:txBody>
-    </p:sp>
-  </p:spTree></p:cSld>
-</p:sld>""".encode()
-    output = BytesIO()
-    with ZipFile(output, "w") as archive:
-        archive.writestr("ppt/slides/slide1.xml", slide)
-        archive.writestr("ppt/media/unchanged.bin", b"source asset")
-    return output.getvalue()
+    return (Path(__file__).parents[1] / "src/larp_bot/assets/pdf_achievements_usual.pdf").read_bytes()
 
 
 class MemoryDiskStore:
