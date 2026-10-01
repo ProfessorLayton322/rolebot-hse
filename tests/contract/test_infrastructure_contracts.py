@@ -79,13 +79,29 @@ def test_ydb_dashboard_does_not_integrate_sparse_ru_across_idle_gaps() -> None:
     monitoring = (ROOT / "infra/terraform/monitoring.tf").read_text()
     assert "to = yandex_monitoring_dashboard.ydb_operations" in monitoring
     assert 'id = "fbehpu9s0f63vvj3p2v9"' in monitoring
-    assert monitoring.count("chart_id") == 2
     assert 'chart_id    = "ydb-consumed-ru"' in monitoring
     assert 'chart_id    = "ydb-sql-execution-rate"' in monitoring
     assert "integral(replace_nan(${local.ydb_api_ru}, 0) + 0 * ${local.ydb_sql_requests})" in monitoring
-    assert monitoring.count("disabled = true") == 2
     assert 'alias(${local.ydb_sql_requests}, \\"SQL executions/s\\")' in monitoring
     assert "integral(${local.ydb_sql_requests})" not in monitoring
+
+
+def test_dashboard_tracks_cumulative_gb_hours_for_every_function() -> None:
+    functions = (ROOT / "infra/terraform/functions.tf").read_text()
+    monitoring = (ROOT / "infra/terraform/monitoring.tf").read_text()
+
+    function_names = set(re.findall(r'resource "yandex_function" "([^"]+)"', functions))
+    monitored_functions = set(re.findall(r"function_id\s*=\s*yandex_function\.([^.]+)\.id", monitoring))
+
+    assert monitored_functions == function_names
+    for name in function_names:
+        assert re.search(rf"memory_mb\s*=\s*yandex_function\.{name}\.memory", monitoring)
+    assert "for_each = local.function_gb_hour_charts" in monitoring
+    assert 'chart_id    = "function-${widgets.key}-gb-hours"' in monitoring
+    assert monitoring.count("disabled = true") == 3
+    assert "functions_sum_duration" in monitoring
+    assert "functions_inflight" in monitoring
+    assert ") / 15) * ${widgets.value.memory_mb} / 1024 / 3600000" in monitoring
 
 
 def test_no_fifo_native_trigger() -> None:
