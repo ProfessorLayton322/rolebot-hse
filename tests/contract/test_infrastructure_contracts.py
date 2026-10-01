@@ -139,6 +139,7 @@ def test_scheduled_registration_notifications_use_an_isolated_go_timer_function(
     notifier = functions.split('resource "yandex_function" "registration_notifier" {', 1)[1].split('\nresource "', 1)[0]
     assert 'runtime            = "golang123"' in notifier
     assert 'entrypoint         = "index.Handler"' in notifier
+    assert re.search(r"memory\s+= 128", notifier)
     assert "local.registration_notifier_package_hash" in notifier
     assert 'cron_expression = "*/5 * * * ? *"' in triggers
     assert "yandex_function.registration_notifier.id" in triggers
