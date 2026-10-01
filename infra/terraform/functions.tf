@@ -1,7 +1,8 @@
 locals {
-  function_package_hash      = filesha256(var.function_zip_path)
-  disk_uploader_package_hash = filesha256(var.disk_uploader_zip_path)
-  runtime_config_url         = "${local.telegram_egress_url}/runtime/config"
+  function_package_hash              = filesha256(var.function_zip_path)
+  disk_uploader_package_hash         = filesha256(var.disk_uploader_zip_path)
+  registration_notifier_package_hash = filesha256(var.registration_notifier_zip_path)
+  runtime_config_url                 = "${local.telegram_egress_url}/runtime/config"
 
   # The provider records the Function shell even when its initial version
   # cannot be created. This revision makes the now-IAM-ready async Functions
@@ -47,6 +48,14 @@ resource "yandex_storage_object" "disk_uploader_package" {
   key          = "${var.project_name}/functions/disk-uploader.zip"
   source       = var.disk_uploader_zip_path
   source_hash  = local.disk_uploader_package_hash
+  content_type = "application/zip"
+}
+
+resource "yandex_storage_object" "registration_notifier_package" {
+  bucket       = yandex_storage_bucket.deployment.bucket
+  key          = "${var.project_name}/functions/registration-notifier.zip"
+  source       = var.registration_notifier_zip_path
+  source_hash  = local.registration_notifier_package_hash
   content_type = "application/zip"
 }
 
@@ -183,17 +192,17 @@ resource "yandex_function" "registration_notifier" {
   name               = "${var.project_name}-registration-notifier"
   description        = "Dispatch scheduled game lifecycle jobs and registration notifications"
   folder_id          = var.yandex_folder_id
-  runtime            = "python312"
-  entrypoint         = "registration_notifier.handler"
-  memory             = 512
+  runtime            = "golang123"
+  entrypoint         = "index.Handler"
+  memory             = 256
   execution_timeout  = "60"
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
-  environment = merge(local.function_environment, {
+  environment = merge(local.base_function_environment, {
     RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
   })
   tags      = ["production"]
-  user_hash = local.function_package_hash
+  user_hash = local.registration_notifier_package_hash
 
   metadata_options {
     gce_http_endpoint    = 1
@@ -201,9 +210,9 @@ resource "yandex_function" "registration_notifier" {
   }
 
   package {
-    bucket_name = yandex_storage_object.function_package.bucket
-    object_name = yandex_storage_object.function_package.key
-    sha_256     = local.function_package_hash
+    bucket_name = yandex_storage_object.registration_notifier_package.bucket
+    object_name = yandex_storage_object.registration_notifier_package.key
+    sha_256     = local.registration_notifier_package_hash
   }
 
   log_options {

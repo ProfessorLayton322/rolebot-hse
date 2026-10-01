@@ -29,6 +29,12 @@ variable "disk_uploader_zip_path" {
   default     = "../../dist/disk-uploader.zip"
 }
 
+variable "registration_notifier_zip_path" {
+  type        = string
+  description = "Deterministic Go lifecycle notifier ZIP produced by scripts/build_registration_notifier.sh."
+  default     = "../../dist/registration-notifier.zip"
+}
+
 variable "function_package_bucket" {
   type        = string
   description = "Existing private, versioned Object Storage bucket used for Terraform state and the Function package."

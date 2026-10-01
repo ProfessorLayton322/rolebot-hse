@@ -18,7 +18,6 @@ cp -R "${repo_dir}/src/larp_bot" "${package_dir}/larp_bot"
 cp \
   "${repo_dir}/main.py" \
   "${repo_dir}/ordered_worker.py" \
-  "${repo_dir}/registration_notifier.py" \
   "${repo_dir}/upload_completion.py" \
   "${package_dir}/"
 

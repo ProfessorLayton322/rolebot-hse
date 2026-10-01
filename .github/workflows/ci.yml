@@ -22,6 +22,19 @@ jobs:
       - working-directory: functions/disk_uploader
         run: go vet ./...
 
+  go-registration-notifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: functions/registration_notifier/go.mod
+      - working-directory: functions/registration_notifier
+        run: go test ./...
+      - working-directory: functions/registration_notifier
+        run: go vet ./...
+
   python:
     runs-on: ubuntu-latest
     steps:
@@ -74,13 +87,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
-          cache-dependency-path: functions/disk_uploader/go.mod
+          cache-dependency-path: |
+            functions/disk_uploader/go.mod
+            functions/registration_notifier/go.mod
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.15.9"
       - run: python -m pip install --upgrade pip==26.2.1
       - run: bash scripts/build_function.sh
       - run: bash scripts/build_disk_uploader.sh
+      - run: bash scripts/build_registration_notifier.sh
       - run: npm ci && npm run build
         working-directory: cloudflare/telegram-ingress
       - run: npm ci && npm run build

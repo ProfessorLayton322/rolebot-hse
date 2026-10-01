@@ -20,10 +20,8 @@ from larp_bot.adapters.yandex_disk.uploader import StagedYandexDiskUploader
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
 from larp_bot.application.chat_management import TelegramChatManagementService
-from larp_bot.application.confirmation_openings import ScheduledConfirmationOpeningDispatcher
 from larp_bot.application.conversation import ConversationEngine
-from larp_bot.application.game_closings import ScheduledGameClosingDispatcher, ScheduledGameClosingService
-from larp_bot.application.registration_openings import RegistrationOpeningNotificationService
+from larp_bot.application.game_closings import ScheduledGameClosingService
 from larp_bot.application.services import (
     ConfirmationNotificationService,
     EventAdministrationService,
@@ -52,9 +50,6 @@ class AppContainer:
     telegram_chat_management: TelegramChatManagementService
     conversation: ConversationEngine
     worker: OrderedWorker
-    registration_opening_notifications: RegistrationOpeningNotificationService
-    scheduled_confirmation_opening_dispatcher: ScheduledConfirmationOpeningDispatcher
-    scheduled_game_closing_dispatcher: ScheduledGameClosingDispatcher
     upload_completion: UploadCompletionService
 
 
@@ -157,11 +152,6 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         users,
         config,
     )
-    registration_opening_notifications = RegistrationOpeningNotificationService(
-        events,
-        config,
-        transport,
-    )
     statistics = StatisticsService(
         player_statistics,
         master_statistics,
@@ -169,8 +159,6 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         administration,
         registration_service,
     )
-    scheduled_game_closing_dispatcher = ScheduledGameClosingDispatcher(events, publisher)
-    scheduled_confirmation_opening_dispatcher = ScheduledConfirmationOpeningDispatcher(events, publisher)
     scheduled_game_closing = ScheduledGameClosingService(events, statistics, transport, publisher)
     upload_completion = UploadCompletionService(events, users, config, transport)
     worker = OrderedWorker(
@@ -196,8 +184,5 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         telegram_chat_management=telegram_chat_management,
         conversation=conversation,
         worker=worker,
-        registration_opening_notifications=registration_opening_notifications,
-        scheduled_confirmation_opening_dispatcher=scheduled_confirmation_opening_dispatcher,
-        scheduled_game_closing_dispatcher=scheduled_game_closing_dispatcher,
         upload_completion=upload_completion,
     )
