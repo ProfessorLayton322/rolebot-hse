@@ -15,37 +15,55 @@ locals {
       function_id = yandex_function.disk_uploader.id
       memory_mb   = yandex_function.disk_uploader.memory
       x           = 0
-      y           = 8
+      y           = 16
     }
     gateway = {
       title       = "Gateway compute (GB-hours)"
       function_id = yandex_function.gateway.id
       memory_mb   = yandex_function.gateway.memory
       x           = 12
-      y           = 8
+      y           = 16
     }
     ordered-worker = {
       title       = "Ordered worker compute (GB-hours)"
       function_id = yandex_function.ordered_worker.id
       memory_mb   = yandex_function.ordered_worker.memory
       x           = 0
-      y           = 16
+      y           = 24
     }
     registration-notifier = {
       title       = "Registration notifier compute (GB-hours)"
       function_id = yandex_function.registration_notifier.id
       memory_mb   = yandex_function.registration_notifier.memory
       x           = 12
-      y           = 16
+      y           = 24
     }
     upload-completion = {
       title       = "Upload completion compute (GB-hours)"
       function_id = yandex_function.upload_completion.id
       memory_mb   = yandex_function.upload_completion.memory
       x           = 0
-      y           = 24
+      y           = 32
     }
   }
+
+  # This histogram is an execution-duration rate. Its sum is milliseconds of
+  # execution per second, which integral() converts to cumulative milliseconds.
+  function_execution_time_rates = {
+    for name, function in local.function_gb_hour_charts :
+    name => "series_sum(histogram_sum(\"bin\", \"serverless.functions.execution_time_milliseconds\"{folderId=\"${var.yandex_folder_id}\", service=\"serverless-functions\", function=\"${function.function_id}\"}))"
+  }
+  function_inflight = {
+    for name, function in local.function_gb_hour_charts :
+    name => "series_sum(\"serverless.functions.inflight\"{folderId=\"${var.yandex_folder_id}\", service=\"serverless-functions\", function=\"${function.function_id}\"})"
+  }
+  function_gb_hour_queries = {
+    for name, function in local.function_gb_hour_charts :
+    name => "integral(replace_nan(${local.function_execution_time_rates[name]}, 0) + 0 * ${local.function_inflight[name]}) * ${function.memory_mb} / 1024 / 3600000"
+  }
+  function_total_gb_hour_query = join(" + ", [
+    for query in values(local.function_gb_hour_queries) : "(${query})"
+  ])
 }
 
 resource "yandex_monitoring_dashboard" "ydb_operations" {
@@ -105,6 +123,29 @@ resource "yandex_monitoring_dashboard" "ydb_operations" {
     }
   }
 
+  widgets {
+    position {
+      x = 0
+      y = 8
+      w = 24
+      h = 8
+    }
+    chart {
+      chart_id    = "functions-total-gb-hours"
+      title       = "Total function compute (GB-hours)"
+      description = "Cumulative execution-time consumption for all deployed functions over the selected interval. Billing can be slightly higher because each invocation is rounded to its billing duration."
+      queries {
+        downsampling {
+          disabled = true
+        }
+        target {
+          query     = "alias(${local.function_total_gb_hour_query}, \"Total consumed GB-hours\")"
+          text_mode = true
+        }
+      }
+    }
+  }
+
   dynamic "widgets" {
     for_each = local.function_gb_hour_charts
 
@@ -118,18 +159,15 @@ resource "yandex_monitoring_dashboard" "ydb_operations" {
       chart {
         chart_id    = "function-${widgets.key}-gb-hours"
         title       = widgets.value.title
-        description = "Cumulative allocated-memory consumption over the selected interval, derived from total execution time and configured memory. The value resets at the left edge of the selected range."
+        description = "Cumulative execution-time consumption over the selected interval, derived from the execution-time rate and configured memory. The value resets at the left edge of the selected range."
         queries {
-          # functions_sum_duration is the total execution time, in
-          # milliseconds, observed during each 15-second collection period.
-          # Convert it back to a per-second rate before integral(), then from
-          # MB-milliseconds to GB-hours. functions_inflight supplies regular
-          # zero-valued timestamps so idle gaps cannot inflate the integral.
+          # The in-flight metric supplies regular zero-valued timestamps so
+          # idle gaps cannot inflate the cumulative execution-time integral.
           downsampling {
             disabled = true
           }
           target {
-            query     = "alias(integral((replace_nan(series_sum(\"functions_sum_duration\"{folderId=\"${var.yandex_folder_id}\", service=\"serverless-functions\", resource_type=\"function\", resource_id=\"${widgets.value.function_id}\"}), 0) + 0 * series_sum(\"functions_inflight\"{folderId=\"${var.yandex_folder_id}\", service=\"serverless-functions\", resource_type=\"function\", resource_id=\"${widgets.value.function_id}\"})) / 15) * ${widgets.value.memory_mb} / 1024 / 3600000, \"Consumed GB-hours\")"
+            query     = "alias(${local.function_gb_hour_queries[widgets.key]}, \"Consumed GB-hours\")"
             text_mode = true
           }
         }

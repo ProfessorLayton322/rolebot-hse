@@ -98,10 +98,15 @@ def test_dashboard_tracks_cumulative_gb_hours_for_every_function() -> None:
         assert re.search(rf"memory_mb\s*=\s*yandex_function\.{name}\.memory", monitoring)
     assert "for_each = local.function_gb_hour_charts" in monitoring
     assert 'chart_id    = "function-${widgets.key}-gb-hours"' in monitoring
-    assert monitoring.count("disabled = true") == 3
-    assert "functions_sum_duration" in monitoring
-    assert "functions_inflight" in monitoring
-    assert ") / 15) * ${widgets.value.memory_mb} / 1024 / 3600000" in monitoring
+    assert monitoring.count("disabled = true") == 4
+    assert "functions_sum_duration" not in monitoring
+    assert 'histogram_sum(\\"bin\\", \\"serverless.functions.execution_time_milliseconds\\"' in monitoring
+    assert "serverless.functions.inflight" in monitoring
+    assert " / 15" not in monitoring
+    assert "* ${function.memory_mb} / 1024 / 3600000" in monitoring
+    assert 'chart_id    = "functions-total-gb-hours"' in monitoring
+    assert "function_total_gb_hour_query = join" in monitoring
+    assert 'alias(${local.function_total_gb_hour_query}, \\"Total consumed GB-hours\\")' in monitoring
 
 
 def test_no_fifo_native_trigger() -> None:
