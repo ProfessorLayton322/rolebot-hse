@@ -642,7 +642,7 @@ The September 27 DLQ rollback leaves the two unattached queues `registration-com
 
 The implementation was checked against current official documentation in August 2026:
 
-- Yandex Cloud Functions supports `python312`.
+- Yandex Cloud Functions supports `python312` and `golang123`.
 - FIFO supports message groups and deduplication IDs, while native YMQ Function triggers support standard queues only.
 - API Gateway supports Smart Web Security/ARL integration through `x-yc-apigateway.smartWebSecurity`.
 - Cloudflare provider v5 supports Worker/version/deployment resources; Worker secrets are safer via Wrangler after Terraform.
@@ -656,14 +656,15 @@ One provider constraint deserves attention: Terraform's Yandex Message Queue res
 
 ```text
 .
-├── main.py / ordered_worker.py / registration_notifier.py
+├── main.py / ordered_worker.py / upload_completion.py
 ├── pyproject.toml / requirements.txt
+├── functions/{disk_uploader,registration_notifier}/
 ├── src/larp_bot/
 │   ├── domain/
 │   ├── application/
 │   ├── adapters/{telegram,vk,ydb,yandex_disk,ymq,runtime_config,transports}/
 │   ├── config/
-│   └── functions/{gateway,ordered_worker,registration_notifier}/
+│   └── functions/{gateway,ordered_worker,upload_completion}/
 ├── cloudflare/
 │   ├── telegram-ingress/{src,tests}/
 │   └── telegram-egress/{src,tests}/

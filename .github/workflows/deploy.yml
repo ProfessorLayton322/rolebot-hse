@@ -42,7 +42,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
-          cache-dependency-path: functions/disk_uploader/go.mod
+          cache-dependency-path: |
+            functions/disk_uploader/go.mod
+            functions/registration_notifier/go.mod
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.15.9"
@@ -58,10 +60,12 @@ jobs:
           python scripts/check_storage_constraint.py
           bash scripts/check_telegram_isolation.sh
           (cd functions/disk_uploader && go test ./... && go vet ./...)
+          (cd functions/registration_notifier && go test ./... && go vet ./...)
       - name: Build deterministic Function package
         run: |
           bash scripts/build_function.sh
           bash scripts/build_disk_uploader.sh
+          bash scripts/build_registration_notifier.sh
       # One command per line and one step per Worker. A previous `&&` chain
       # followed by another line hid a failing `npm test`: Bash `-e` ignores a
       # non-final command of an `&&` list, the step took its status from the

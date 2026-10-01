@@ -128,19 +128,27 @@ def test_worker_deadline_leaves_cleanup_time_before_function_and_queue_timeouts(
     assert int(function_timeout[1]) < int(kick_visibility[1])
 
 
-def test_scheduled_registration_notifications_use_an_isolated_timer_function() -> None:
+def test_scheduled_registration_notifications_use_an_isolated_go_timer_function() -> None:
     functions = (ROOT / "infra/terraform/functions.tf").read_text()
     triggers = (ROOT / "infra/terraform/ymq.tf").read_text()
-    build = (ROOT / "scripts/build_function.sh").read_text()
+    python_build = (ROOT / "scripts/build_function.sh").read_text()
+    go_build = (ROOT / "scripts/build_registration_notifier.sh").read_text()
+    service = (ROOT / "functions/registration_notifier/service.go").read_text()
+    repository = (ROOT / "functions/registration_notifier/ydb.go").read_text()
 
-    assert 'entrypoint         = "registration_notifier.handler"' in functions
+    notifier = functions.split('resource "yandex_function" "registration_notifier" {', 1)[1].split('\nresource "', 1)[0]
+    assert 'runtime            = "golang123"' in notifier
+    assert 'entrypoint         = "index.Handler"' in notifier
+    assert "local.registration_notifier_package_hash" in notifier
     assert 'cron_expression = "*/5 * * * ? *"' in triggers
     assert "yandex_function.registration_notifier.id" in triggers
-    assert "registration_notifier.py" in build
-    handler = (ROOT / "src/larp_bot/functions/registration_notifier/handler.py").read_text()
-    assert "events.list_due_lifecycle_events(now)" in handler
-    assert "scheduled_game_closing_dispatcher.dispatch_due(" in handler
-    assert "scheduled_confirmation_opening_dispatcher.dispatch_due(" in handler
+    assert "registration_notifier.py" not in python_build
+    assert 'source_dir="${repo_dir}/functions/registration_notifier"' in go_build
+    assert "invocationInterval = 5 * time.Minute" in service
+    assert "instant.Before(cutoff)" in service
+    assert "registration_open_at < $due_before" in repository
+    assert 'Operation:      "SCHEDULED_OPEN_CONFIRMATION"' in service
+    assert 'Operation:      "SCHEDULED_CLOSE_EVENT"' in service
 
 
 def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() -> None:
