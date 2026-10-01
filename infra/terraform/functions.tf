@@ -194,7 +194,7 @@ resource "yandex_function" "registration_notifier" {
   folder_id          = var.yandex_folder_id
   runtime            = "golang123"
   entrypoint         = "index.Handler"
-  memory             = 256
+  memory             = 128
   execution_timeout  = "60"
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
