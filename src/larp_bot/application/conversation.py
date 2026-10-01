@@ -145,6 +145,7 @@ LOGGER = logging.getLogger("larp_bot.application.conversation")
 MANAGE_STATISTICS = "Управление статистикой"
 STATS_LINKS = "Ссылки на таблицы статистики"
 STATS_ADD_GAME = "Добавить игру в статистику"
+STATS_CONFIRM_ADD_GAME = "Да, добавить в статистику"
 EVENT_TABLES = "Таблицы участников и пропусков"
 EXPORT_ACHIEVEMENTS = "Выгрузить ачивки"
 GAME_FILES = "Файлы игры"
@@ -5387,7 +5388,17 @@ class ConversationEngine:
             if parts[2] == "p":
                 return await self._show_statistics_games(user, before=cursor)
             return await self._show_statistics_games(user, after=cursor)
-        if len(parts) != 3 or parts[:2] != ["stats", "game"]:
+        if (
+            len(parts) != 3
+            or parts[0] != "stats"
+            or parts[1]
+            not in {
+                "game",
+                "game-manage",
+                "confirm",
+                "confirm-manage",
+            }
+        ):
             return BotResponse(text="Некорректное действие.")
         event = await self.events.get(parts[2])
         if event is None or event.archived_at is not None:
@@ -5395,11 +5406,37 @@ class ConversationEngine:
                 text="Игра не найдена или уже архивирована.",
                 buttons=[Button(label=BACK, value=MANAGE_STATISTICS)],
             )
+        from_management = parts[1].endswith("-manage")
+        back = (
+            game_management_button(event.event_id) if from_management else Button(label=BACK, value=MANAGE_STATISTICS)
+        )
+        if parts[1].startswith("game"):
+            confirmation_action = "confirm-manage" if from_management else "confirm"
+            return BotResponse(
+                text=(
+                    f"Добавить игру {event_reference(event.name, event.game_date)} в статистику?\n\n"
+                    "Будут изменены обе постоянные таблицы статистики, а участие "
+                    "будет засчитано подтверждённым игрокам и мастерам. "
+                    "Отменить это действие через бота нельзя."
+                ),
+                buttons=[
+                    Button(
+                        label=STATS_CONFIRM_ADD_GAME,
+                        value=f"stats:{confirmation_action}:{event.event_id}",
+                    ),
+                    back,
+                ],
+            )
+        if value not in {button.value for button in user.last_bot_buttons}:
+            return BotResponse(
+                text="Это подтверждение устарело. Откройте игру и повторите действие.",
+                buttons=[back],
+            )
         return await self._enqueue_statistics(
             user,
             message,
             StatisticsPayload(action="game", game_id=event.event_id),
-            back=Button(label=BACK, value=MANAGE_STATISTICS),
+            back=back,
         )
 
     async def _show_admin_games(
@@ -5540,7 +5577,7 @@ class ConversationEngine:
         ]
         buttons = [Button(label=label, value=f"ag:{action}:{event.event_id}") for label, action in actions]
         if is_admin:
-            buttons.append(Button(label=STATS_ADD_GAME, value=f"stats:game:{event.event_id}"))
+            buttons.append(Button(label=STATS_ADD_GAME, value=f"stats:game-manage:{event.event_id}"))
         buttons.append(Button(label=BACK, value=MANAGE_GAMES))
         return BotResponse(text=text + "\n\nВыберите действие:", buttons=buttons)
 

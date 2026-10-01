@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 from zipfile import ZipFile
 
+import httpx
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -25,6 +27,8 @@ from larp_bot.adapters.google_drive.statistics import (
 )
 from larp_bot.adapters.google_drive.statistics_workbook import MasterStatisticsWorkbook, StatisticsWorkbook
 from larp_bot.adapters.memory import MemoryDeferredTransport
+from larp_bot.adapters.telegram import parse_telegram_update, telegram_inline_payload
+from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress
 from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.application.conversation import (
     ADMIN,
@@ -34,6 +38,7 @@ from larp_bot.application.conversation import (
     PAGE_FORWARD,
     PAGE_SIZE,
     STATS_ADD_GAME,
+    STATS_CONFIRM_ADD_GAME,
     STATS_LINKS,
 )
 from larp_bot.application.services import DomainError, OrderedMutationService
@@ -42,6 +47,7 @@ from larp_bot.application.worker import OrderedWorker
 from larp_bot.domain.models import (
     AttendanceStatus,
     BotIdentity,
+    BotResponse,
     Button,
     Event,
     Operation,
@@ -550,21 +556,94 @@ async def test_statistics_admin_menu_picker_and_global_fifo_only_show_active_gam
     picker = await engine.handle(inbound(3, STATS_ADD_GAME))
     assert f"stats:game:{event.event_id}" in {button.value for button in picker.buttons}
     assert "stats:game:archived-event" not in {button.value for button in picker.buttons}
-    await engine.handle(inbound(4, f"stats:game:{event.event_id}"))
-    await engine.handle(inbound(5, STATS_LINKS))
+    confirmation = await engine.handle(inbound(4, f"stats:game:{event.event_id}"))
+    assert not publisher.commands
+    assert "нельзя" in confirmation.text
+    confirm = next(button for button in confirmation.buttons if button.label == STATS_CONFIRM_ADD_GAME)
+    assert confirm.value == f"stats:confirm:{event.event_id}"
+    confirmed = await engine.handle(inbound(5, confirm.value, callback=True))
+    assert confirmed.deferred is True
+    assert confirmed.buttons == [Button(label=BACK, value=MANAGE_STATISTICS)]
+    await engine.handle(inbound(6, STATS_LINKS))
     assert [command.payload.action for command in publisher.commands] == ["game", "link"]
     assert all(
         command.event_id == "statistics" and command.operation is Operation.STATISTICS for command in publisher.commands
     )
 
-    game_menu = await engine.handle(inbound(6, f"ag:manage:{event.event_id}"))
+    game_menu = await engine.handle(inbound(7, f"ag:manage:{event.event_id}"))
     add_from_game = next(button for button in game_menu.buttons if button.label == STATS_ADD_GAME)
-    assert add_from_game.value == f"stats:game:{event.event_id}"
-    response = await engine.handle(inbound(7, add_from_game.value, callback=True))
+    assert add_from_game.value == f"stats:game-manage:{event.event_id}"
+    management_confirmation = await engine.handle(inbound(8, add_from_game.value, callback=True))
+    management_confirm = next(
+        button for button in management_confirmation.buttons if button.label == STATS_CONFIRM_ADD_GAME
+    )
+    assert management_confirm.value == f"stats:confirm-manage:{event.event_id}"
+    assert management_confirmation.buttons[-1].value == f"ag:manage:{event.event_id}"
+    assert [command.payload.action for command in publisher.commands] == ["game", "link"]
+    response = await engine.handle(inbound(9, management_confirm.value, callback=True))
     assert response.deferred is True
-    assert response.buttons == [Button(label=BACK, value=MANAGE_STATISTICS)]
+    assert response.buttons[0].value == f"ag:manage:{event.event_id}"
     assert [command.payload.action for command in publisher.commands] == ["game", "link", "game"]
     assert publisher.commands[-1].payload.game_id == event.event_id
+
+
+async def test_stale_statistics_confirmation_does_not_enqueue(event: Event) -> None:
+    engine, _users, publisher, _registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    confirmation = await engine.handle(inbound(1, f"stats:game:{event.event_id}", callback=True))
+    confirm = next(button for button in confirmation.buttons if button.label == STATS_CONFIRM_ADD_GAME)
+
+    await engine.handle(inbound(2, MANAGE_STATISTICS, callback=True))
+    stale = await engine.handle(inbound(3, confirm.value, callback=True))
+
+    assert "устарело" in stale.text
+    assert not publisher.commands
+
+
+@pytest.mark.parametrize("delivery", ["inline", "deferred"])
+async def test_statistics_confirmation_callbacks_fit_telegram_limit_and_route(
+    event: Event,
+    delivery: str,
+) -> None:
+    full_uuid = "2ea09780-4241-469a-829f-227e67b83473"
+    event.event_id = full_uuid
+    engine, _users, publisher, _registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    management = await engine.handle(inbound(1, f"ag:manage:{full_uuid}", callback=True))
+    payloads: list[dict[str, Any]] = []
+
+    def telegram(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content)["payload"])
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    async def deliver(response: BotResponse, request_id: str) -> list[str]:
+        if delivery == "inline":
+            payload = telegram_inline_payload(response, 1)
+        else:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(telegram)) as client:
+                egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+                await egress.send_message(
+                    chat_id=1,
+                    request_id=request_id,
+                    text=response.text,
+                    buttons=response.buttons,
+                )
+            payload = payloads[-1]
+        callbacks = [button["callback_data"] for row in payload["reply_markup"]["inline_keyboard"] for button in row]
+        assert all(1 <= len(callback.encode("utf-8")) <= 64 for callback in callbacks)
+        return callbacks
+
+    management_callbacks = await deliver(management, "statistics-management")
+    add_game = next(callback for callback in management_callbacks if callback.startswith("stats:game-manage:"))
+    confirmation = await engine.handle(
+        parse_telegram_update({"update_id": 2, "callback_query": {"from": {"id": 1}, "data": add_game}})
+    )
+    confirmation_callbacks = await deliver(confirmation, "statistics-confirmation")
+    confirm = next(callback for callback in confirmation_callbacks if callback.startswith("stats:confirm-manage:"))
+
+    routed = await engine.handle(
+        parse_telegram_update({"update_id": 3, "callback_query": {"from": {"id": 1}, "data": confirm}})
+    )
+    assert routed.command_enqueued is True
+    assert [command.payload.action for command in publisher.commands] == ["game"]
 
 
 async def test_statistics_game_picker_uses_shared_bidirectional_pagination(event: Event) -> None:
@@ -604,7 +683,16 @@ async def test_statistics_actions_are_denied_to_moderators_even_with_forged_call
     menu = await engine.handle(inbound(1, ADMIN))
     assert MANAGE_STATISTICS not in {button.value for button in menu.buttons}
     for index, action in enumerate(
-        (MANAGE_STATISTICS, STATS_LINKS, STATS_ADD_GAME, f"stats:game:{event.event_id}"), start=2
+        (
+            MANAGE_STATISTICS,
+            STATS_LINKS,
+            STATS_ADD_GAME,
+            f"stats:game:{event.event_id}",
+            f"stats:confirm:{event.event_id}",
+            f"stats:game-manage:{event.event_id}",
+            f"stats:confirm-manage:{event.event_id}",
+        ),
+        start=2,
     ):
         response = await engine.handle(inbound(index, action))
         assert "прав" in response.text
