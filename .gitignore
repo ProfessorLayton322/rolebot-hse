@@ -21,4 +21,6 @@ node_modules/
 cloudflare/*/.wrangler/
 function-package.zip
 *.xlsx
+# Local billing exports named by their report date range.
+/20??????-20??????.csv
 src/larp_bot/assets/roleclub_achievement_basic.pptx
