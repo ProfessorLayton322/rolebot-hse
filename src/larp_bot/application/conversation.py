@@ -116,6 +116,7 @@ PAGE_SIZE = 5
 NO_WISHES = "Без пожеланий"
 KEEP = "Оставить без изменений"
 SKIP = "Пропустить"
+ENLIST_SKIP = "Пропустить и записаться"
 NO_CO_PLAYER_WISH = "Без пожеланий"
 CHANGE_STATUS = "🔄 Изменить статус"
 CHANGE_PLAYER_AMOUNT = "👥 Изменить количество игроков"
@@ -492,7 +493,12 @@ def _my_game_text(
     return f"{text}\n\n" + "\n".join(links)
 
 
-def co_player_wish_prompt(*, skip_value: str, same_day_warning_date: date | None = None) -> BotResponse:
+def co_player_wish_prompt(
+    *,
+    skip_value: str,
+    skip_label: str = SKIP,
+    same_day_warning_date: date | None = None,
+) -> BotResponse:
     warning = f"{same_day_signup_warning(same_day_warning_date)}\n\n" if same_day_warning_date is not None else ""
     return BotResponse(
         text=(
@@ -500,9 +506,9 @@ def co_player_wish_prompt(*, skip_value: str, same_day_warning_date: date | None
             "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
             "Укажите каждого как «Фамилия Имя», через запятую. "
             "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
-            "Если пожеланий нет, нажмите «Пропустить»."
+            f"Если пожеланий нет, нажмите «{skip_label}»."
         ),
-        buttons=[Button(label=SKIP, value=skip_value), dialog_exit_button()],
+        buttons=[Button(label=skip_label, value=skip_value), dialog_exit_button()],
     )
 
 
@@ -1988,6 +1994,7 @@ class ConversationEngine:
             user.dialog_state = "ENLIST_WISH_PLAY"
             response = co_player_wish_prompt(
                 skip_value="enlist:wish-play:skip",
+                skip_label=ENLIST_SKIP,
                 same_day_warning_date=event.game_date if same_day_registrations else None,
             )
             response.text = f"{_signup_game_text(event, platform)}\n\n{response.text}"
@@ -2171,18 +2178,18 @@ class ConversationEngine:
             if message.callback is not None and value != "enlist:wish-play:skip":
                 return BotResponse(
                     text=(
-                        "Используйте текущую клавиатуру: нажмите «Пропустить» или "
+                        f"Используйте текущую клавиатуру: нажмите «{ENLIST_SKIP}» или "
                         "отправьте сообщением, с кем вы хотите играть."
                     ),
                     buttons=[
-                        Button(label=SKIP, value="enlist:wish-play:skip"),
+                        Button(label=ENLIST_SKIP, value="enlist:wish-play:skip"),
                         dialog_exit_button(),
                     ],
                 )
             if value != "enlist:wish-play:skip" and len(value) > MAX_CO_PLAYER_WISH_LENGTH:
                 return BotResponse(
                     text=INVALID_INPUT_RESPONSE,
-                    buttons=[Button(label=SKIP, value="enlist:wish-play:skip"), dialog_exit_button()],
+                    buttons=[Button(label=ENLIST_SKIP, value="enlist:wish-play:skip"), dialog_exit_button()],
                 )
             user.dialog_context["wish_play"] = NO_CO_PLAYER_WISH if value == "enlist:wish-play:skip" else value
             return await self._enqueue_enlist(user, message)

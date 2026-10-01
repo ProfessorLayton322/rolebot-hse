@@ -283,6 +283,7 @@ async def test_game_deep_link_starts_signup_for_complete_profile(
 
     assert response.text.startswith("Это меню записи на игру «Лесной предел» (14.11.26).")
     assert "Есть ли игроки" in response.text
+    assert response.buttons[0].label == "Пропустить и записаться"
     assert "символ" not in response.text.casefold()
     assert saved is not None and saved.dialog_state == "ENLIST_WISH_PLAY"
     assert saved.dialog_context["event_id"] == event.event_id
@@ -534,13 +535,15 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
         "Есть ли игроки, с которыми вы хотели бы играть в одной сессии? "
         "Укажите каждого как «Фамилия Имя», через запятую. "
         "Мастера постараются учесть пожелание, но не могут его гарантировать.\n\n"
-        "Если пожеланий нет, нажмите «Пропустить»."
+        "Если пожеланий нет, нажмите «Пропустить и записаться»."
     )
-    assert "нажмите «пропустить»" in prompt.text.casefold()
-    assert any(button.value == "enlist:wish-play:skip" for button in prompt.buttons)
+    assert "нажмите «пропустить и записаться»" in prompt.text.casefold()
+    assert prompt.buttons[0] == Button(label="Пропустить и записаться", value="enlist:wish-play:skip")
+    assert 1 <= len(prompt.buttons[0].value.encode("utf-8")) <= 64
 
     stale = await engine.handle(inbound(3, f"select:enlist:{event.event_id}", callback=True))
     assert "текущую клавиатуру" in stale.text
+    assert stale.buttons[0].label == "Пропустить и записаться"
     assert "Если вы увидели это сообщение, попробуйте написать боту /start" in stale.text
     assert not publisher.commands
 
