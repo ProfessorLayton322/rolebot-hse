@@ -24,6 +24,48 @@ func openYDB(ctx context.Context, endpoint, database, iamToken string) (*ydb.Dri
 	return driver, nil
 }
 
+func (repository *ydbEventRepository) completeRegistrationNotificationsBefore(
+	ctx context.Context,
+	openedBefore time.Time,
+	completedAt time.Time,
+) (int, error) {
+	result, err := repository.driver.Query().QueryResultSet(ctx, `
+DECLARE $opened_before AS Timestamp;
+DECLARE $completed_at AS Timestamp;
+
+UPDATE events
+SET registration_open_notification_completed_at = $completed_at,
+    updated_at = $completed_at
+WHERE registration_open_at IS NOT NULL
+  AND registration_open_at <= $opened_before
+  AND registration_open_notification_completed_at IS NULL
+RETURNING event_id;
+`,
+		query.WithParameters(ydb.ParamsBuilder().
+			Param("$opened_before").Timestamp(openedBefore.UTC()).
+			Param("$completed_at").Timestamp(completedAt.UTC()).
+			Build()),
+		query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx())),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = result.Close(ctx) }()
+
+	completed := 0
+	for row, rowErr := range result.Rows(ctx) {
+		if rowErr != nil {
+			return completed, rowErr
+		}
+		var eventID string
+		if err := row.ScanNamed(query.Named("event_id", &eventID)); err != nil {
+			return completed, err
+		}
+		completed++
+	}
+	return completed, nil
+}
+
 func (repository *ydbEventRepository) listBefore(
 	ctx context.Context,
 	dueBefore time.Time,

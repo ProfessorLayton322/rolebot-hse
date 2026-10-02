@@ -10,12 +10,34 @@ import (
 )
 
 type fakeEventRepository struct {
-	events     []plannedEvent
-	dueBefore  time.Time
-	marked     map[string][]string
-	completed  []string
-	opened     []string
-	refuseOpen bool
+	events           []plannedEvent
+	dueBefore        time.Time
+	backlogCutoff    *time.Time
+	backlogCompleted []string
+	marked           map[string][]string
+	completed        []string
+	opened           []string
+	refuseOpen       bool
+}
+
+func (repository *fakeEventRepository) completeRegistrationNotificationsBefore(
+	_ context.Context,
+	openedBefore time.Time,
+	completedAt time.Time,
+) (int, error) {
+	repository.backlogCutoff = timePointer(openedBefore)
+	completed := 0
+	for index := range repository.events {
+		event := &repository.events[index]
+		if event.RegistrationOpenAt == nil || event.RegistrationOpenAt.After(openedBefore) ||
+			event.RegistrationCompleted != nil {
+			continue
+		}
+		event.RegistrationCompleted = timePointer(completedAt)
+		repository.backlogCompleted = append(repository.backlogCompleted, event.EventID)
+		completed++
+	}
+	return completed, nil
 }
 
 func (repository *fakeEventRepository) listBefore(
@@ -53,9 +75,14 @@ func (repository *fakeEventRepository) markRegistrationDelivered(
 func (repository *fakeEventRepository) completeRegistration(
 	_ context.Context,
 	eventID string,
-	_ time.Time,
+	completedAt time.Time,
 ) error {
 	repository.completed = append(repository.completed, eventID)
+	for index := range repository.events {
+		if repository.events[index].EventID == eventID {
+			repository.events[index].RegistrationCompleted = timePointer(completedAt)
+		}
+	}
 	return nil
 }
 
@@ -204,6 +231,50 @@ func TestSchedulerImmediatelyDispatchesEventsBeforeNextInvocation(t *testing.T) 
 	}
 	if publisher.commands[0].EventID != "confirmation" || publisher.commands[1].EventID != "closing" {
 		t.Fatalf("unexpected commands: %#v", publisher.commands)
+	}
+}
+
+func TestSchedulerCompletesEveryLegacyRegistrationBeforeSendingCurrentOpenings(t *testing.T) {
+	cutoff := time.Date(2026, 10, 2, 16, 15, 0, 0, time.UTC)
+	now := cutoff.Add(4 * time.Minute)
+	legacyOne := cutoff.Add(-time.Hour)
+	legacyTwo := cutoff
+	current := cutoff.Add(time.Minute)
+	repository := &fakeEventRepository{events: []plannedEvent{
+		{EventID: "legacy-one", Name: "Same game", Status: "CREATED", RegistrationOpenAt: &legacyOne},
+		{EventID: "legacy-two", Name: "Same game", Status: "CREATED", RegistrationOpenAt: &legacyTwo},
+		{EventID: "current", Name: "Current game", Status: "CREATED", RegistrationOpenAt: &current},
+	}}
+	notifier := &fakeNotifier{}
+	service := scheduler{
+		events:                    repository,
+		recipients:                fakeRecipients{identities: []identity{{Platform: "telegram", UserID: 1}}},
+		notifier:                  notifier,
+		publisher:                 &fakePublisher{},
+		registrationBacklogCutoff: &cutoff,
+	}
+
+	result, err := service.run(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.BacklogEventsCompleted != 2 || result.EventsCompleted != 1 || result.NotificationsDelivered != 1 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(repository.backlogCompleted) != 2 || repository.backlogCompleted[0] != "legacy-one" ||
+		repository.backlogCompleted[1] != "legacy-two" {
+		t.Fatalf("legacy backlog was not fully completed: %#v", repository.backlogCompleted)
+	}
+	if len(notifier.sent) != 1 || notifier.sent[0].eventID != "current" {
+		t.Fatalf("unexpected notifications: %#v", notifier.sent)
+	}
+
+	repeated, err := service.run(context.Background(), now.Add(invocationInterval))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated != (runResult{}) || len(notifier.sent) != 1 {
+		t.Fatalf("completed backlog ran again: result=%#v sent=%#v", repeated, notifier.sent)
 	}
 }
 

@@ -8,7 +8,13 @@ import (
 	"time"
 )
 
-var now = time.Now
+var (
+	now = time.Now
+	// The missing commits in the first Go notifier deployment left every
+	// earlier opening pending. Complete that finite backlog before sending so
+	// duplicate event rows cannot emit another copy; later schedules are kept.
+	registrationNotificationBacklogCutoff = time.Date(2026, time.October, 2, 16, 15, 0, 0, time.UTC)
+)
 
 // Handler is the Yandex Cloud Functions timer entry point.
 func Handler(ctx context.Context, _ []byte) ([]byte, error) {
@@ -39,10 +45,11 @@ func Handler(ctx context.Context, _ []byte) ([]byte, error) {
 		return nil, fmt.Errorf("configure command publisher: %w", err)
 	}
 	service := scheduler{
-		events:     &ydbEventRepository{driver: driver},
-		recipients: runtimeConfig,
-		notifier:   notifier,
-		publisher:  publisher,
+		events:                    &ydbEventRepository{driver: driver},
+		recipients:                runtimeConfig,
+		notifier:                  notifier,
+		publisher:                 publisher,
+		registrationBacklogCutoff: &registrationNotificationBacklogCutoff,
 	}
 	result, err := service.run(ctx, now().UTC())
 	if err != nil {
