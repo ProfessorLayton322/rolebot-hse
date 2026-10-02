@@ -367,6 +367,17 @@ class RegistrationRepository(Protocol):
 
     async def sift_waiting_to_end(self, event_id: str) -> None: ...
 
+    async def swap_queue_positions(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        promoted_participant_key: str,
+        promoted_created_at: datetime,
+        demoted_participant_key: str,
+        demoted_created_at: datetime,
+    ) -> bool: ...
+
     async def remove(self, event_id: str, *, participant_key: str) -> bool: ...
 
     async def remove_many(self, event_id: str, *, participant_keys: Sequence[str]) -> None: ...

@@ -999,6 +999,73 @@ async def test_confirmation_sift_notifies_promoted_and_demoted_players_exactly_o
     assert len(transport.sent) == 4
 
 
+@pytest.mark.asyncio
+async def test_manual_reserve_promotion_notifies_both_swapped_players(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    event.player_amount = 2
+    event.confirmed_notifications = ["https://t.me/+GameChat_123"]
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    users = MemoryUserRepository()
+    for user_id in range(1, 5):
+        await users.save(TelegramUser(tg_id=user_id))
+    keys = [participant_key(secret, Platform.TELEGRAM, user_id, event.event_id) for user_id in range(2, 5)]
+    tables = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key,
+                display_name=f"Player {index}",
+                wish_play="A",
+                attendance_status=(AttendanceStatus.WAITING if index == 1 else AttendanceStatus.CONFIRMED),
+                created_at=base + timedelta(seconds=index),
+            )
+            for index, key in enumerate(keys)
+        ]
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.PROMOTE_RESERVE_PARTICIPANT,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        participant_key=keys[2],
+        payload=EmptyPayload(),
+    )
+    catalog = RegistrationCatalog(events, tables, showcase)
+    transport = MemoryDeferredTransport()
+    notifications = ConfirmationNotificationService(events, catalog, users, transport, secret)
+    mutations = OrderedMutationService(events, catalog)
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-promotion")])
+    worker = OrderedWorker(consumer, mutations, users, transport, notifications, max_seconds=2)
+
+    assert await worker.run() == 1
+
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert [(sent[1], sent[3]) for sent in transport.sent] == [
+        (
+            4,
+            f"Вы перешли из запаса в основной состав игры «{event.name}».\n\n"
+            f"Посмотрите актуальный состав игроков: {stored_event.public_table_public_url}",
+        ),
+        (4, confirmed_notification_text(event.name, event.confirmed_notifications[0])),
+        (3, f"Мастера переместили вашу неподтверждённую заявку в запас игры «{event.name}»."),
+        (1, "Игрок «Player 2» перемещён в основной состав, игрок «Player 1» — в запас"),
+    ]
+    assert [row.participant_key for row in await tables.list_for_event(event.event_id)] == [
+        keys[0],
+        keys[2],
+        keys[1],
+    ]
+
+
 class SiftFailingOnceRegistrationRepository(MemoryRegistrationRepository):
     def __init__(self, registrations: Sequence[Registration]) -> None:
         super().__init__(registrations)

@@ -194,6 +194,7 @@ class Operation(StrEnum):
     UPDATE_PLAYER_AMOUNT = "UPDATE_PLAYER_AMOUNT"
     REMOVE_PARTICIPANT = "REMOVE_PARTICIPANT"
     REMOVE_WAITING_PARTICIPANTS = "REMOVE_WAITING_PARTICIPANTS"
+    PROMOTE_RESERVE_PARTICIPANT = "PROMOTE_RESERVE_PARTICIPANT"
     CLOSE_EVENT = "CLOSE_EVENT"
     ARCHIVE_EVENT = "ARCHIVE_EVENT"
     SCHEDULED_CLOSE_EVENT = "SCHEDULED_CLOSE_EVENT"
@@ -803,6 +804,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.UPDATE_CO_PLAYER_WISH,
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,
+            Operation.PROMOTE_RESERVE_PARTICIPANT,
         }
         if self.operation in participant_ops and not self.participant_key:
             raise ValueError("participant_key is required")
@@ -832,6 +834,7 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.UPDATE_PROFILE,
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,
+            Operation.PROMOTE_RESERVE_PARTICIPANT,
             Operation.OPEN_REGISTRATION,
             Operation.SEND_CONFIRMATION_REMINDER,
             Operation.CLOSE_EVENT,

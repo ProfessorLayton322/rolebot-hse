@@ -893,18 +893,23 @@ class RegistrationService:
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
+            Operation.PROMOTE_RESERVE_PARTICIPANT,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
             Operation.UNARCHIVE_EVENT,
             Operation.DELETE_EVENT,
         }
         identities: tuple[BotIdentity, ...] | None = None
-        if operation is Operation.REMOVE_PARTICIPANT:
+        targeted_administrative_operations = {
+            Operation.REMOVE_PARTICIPANT,
+            Operation.PROMOTE_RESERVE_PARTICIPANT,
+        }
+        if operation in targeted_administrative_operations:
             if target_participant_key is None:
-                raise ValueError("REMOVE_PARTICIPANT requires a target participant")
+                raise ValueError(f"{operation} requires a target participant")
             participant = target_participant_key
         elif target_participant_key is not None:
-            raise ValueError("a target participant is only valid for REMOVE_PARTICIPANT")
+            raise ValueError("a target participant is only valid for a targeted administrative operation")
         elif operation not in administrative_operations:
             if operation in {Operation.ENLIST, Operation.UPDATE_PROFILE}:
                 participant = self.key(platform, user_id, event_id)
@@ -1190,6 +1195,97 @@ class EventAdministrationService:
             after=after,
             before=before,
             limit=limit,
+        )
+
+    async def confirmed_reserve_registration_page(
+        self,
+        event_id: str,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        limit: int = 10,
+    ) -> RegistrationPage:
+        if after is not None and before is not None:
+            raise ValueError("only one registration-page cursor may be supplied")
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        active = [
+            registration
+            for registration in await self.catalog.registrations.list_for_event(event_id)
+            if registration.attendance_status is not AttendanceStatus.CANCELLED
+        ]
+        active.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+        reserve = [
+            registration
+            for registration in active[event.player_amount :]
+            if registration.attendance_status is AttendanceStatus.CONFIRMED
+        ]
+        if after is not None:
+            reserve = [
+                registration
+                for registration in reserve
+                if (registration.created_at, registration.participant_key) > after
+            ]
+            rows = reserve[:limit]
+        elif before is not None:
+            reserve = [
+                registration
+                for registration in reserve
+                if (registration.created_at, registration.participant_key) < before
+            ]
+            rows = reserve[-limit:]
+        else:
+            rows = reserve[:limit]
+        if not rows:
+            return RegistrationPage(rows=[], has_previous=False, has_next=False)
+
+        all_reserve = [
+            registration
+            for registration in active[event.player_amount :]
+            if registration.attendance_status is AttendanceStatus.CONFIRMED
+        ]
+        first_cursor = (rows[0].created_at, rows[0].participant_key)
+        last_cursor = (rows[-1].created_at, rows[-1].participant_key)
+        return RegistrationPage(
+            rows=rows,
+            has_previous=any(
+                (registration.created_at, registration.participant_key) < first_cursor for registration in all_reserve
+            ),
+            has_next=any(
+                (registration.created_at, registration.participant_key) > last_cursor for registration in all_reserve
+            ),
+        )
+
+    async def can_promote_confirmed_reserve(self, event_id: str, participant_key: str) -> bool:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        active = [
+            registration
+            for registration in await self.catalog.registrations.list_for_event(event_id)
+            if registration.attendance_status is not AttendanceStatus.CANCELLED
+        ]
+        active.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+        return any(
+            registration.attendance_status is AttendanceStatus.WAITING for registration in active[: event.player_amount]
+        ) and any(
+            registration.participant_key == participant_key
+            and registration.attendance_status is AttendanceStatus.CONFIRMED
+            for registration in active[event.player_amount :]
+        )
+
+    async def has_unconfirmed_main_slot(self, event_id: str) -> bool:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        await self.catalog.ensure_migrated(event)
+        registrations = await self.catalog.registrations.list_for_event(event_id)
+        return any(
+            registration.attendance_status is AttendanceStatus.WAITING
+            for registration in _active_main_roster(registrations, event.player_amount)
         )
 
     async def waiting_registration_count(self, event_id: str) -> int:
@@ -2321,7 +2417,10 @@ class ConfirmationNotificationService:
         return delivered
 
     async def notify_sifted_participants(self, command: OrderedRegistrationCommand) -> int:
-        if command.operation is not Operation.REMOVE_WAITING_PARTICIPANTS:
+        if command.operation not in {
+            Operation.REMOVE_WAITING_PARTICIPANTS,
+            Operation.PROMOTE_RESERVE_PARTICIPANT,
+        }:
             raise ValueError("command does not sift participants")
         event = await self.events.get(command.event_id)
         if event is None:
@@ -2379,12 +2478,17 @@ class ConfirmationNotificationService:
                 ]
                 transition_name = "promotion"
             else:
-                messages = [
-                    (
+                if command.operation is Operation.PROMOTE_RESERVE_PARTICIPANT:
+                    demotion_text = (
+                        "Мастера переместили вашу неподтверждённую заявку в запас игры "
+                        f"{event_reference(event.name, event.game_date)}."
+                    )
+                else:
+                    demotion_text = (
                         "Вы не успели подтвердить или отменить ваше участие в игре "
                         f"«{event.name}». Мы были вынуждены переместить вашу заявку в запас"
                     )
-                ]
+                messages = [demotion_text]
                 transition_name = "demotion"
             last_request_id = ""
             reached = True
@@ -2649,6 +2753,7 @@ class OrderedMutationService:
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
+            Operation.PROMOTE_RESERVE_PARTICIPANT,
             Operation.CLOSE_EVENT,
             Operation.ARCHIVE_EVENT,
         }
@@ -2790,6 +2895,74 @@ class OrderedMutationService:
             demoted_count = sum(entry.startswith(SIFT_DEMOTED_PREFIX) for entry in current_entries)
             return MutationResult(
                 f"Заявки пересортированы: в основной состав перемещено {promoted_count}, в запас — {demoted_count}"
+            )
+
+        if command.operation is Operation.PROMOTE_RESERVE_PARTICIPANT:
+            assert command.participant_key is not None
+            registrations = [
+                registration
+                for registration in await self.catalog.registrations.list_for_event(event.event_id)
+                if registration.attendance_status is not AttendanceStatus.CANCELLED
+            ]
+            registrations.sort(key=lambda row: (row.created_at, row.participant_key))
+            promoted_entry = _sift_snapshot_entry(SIFT_PROMOTED_PREFIX, command.participant_key)
+            if (
+                event.last_participant_removal_operation_id == command.operation_id
+                and promoted_entry
+                in _current_sift_entries(
+                    event.participant_removal_keys,
+                    registrations,
+                    event.player_amount,
+                )
+            ):
+                await self.catalog.refresh(event)
+                return MutationResult("Игрок уже перемещён в основной состав")
+
+            selected_index = next(
+                (
+                    index
+                    for index, registration in enumerate(registrations)
+                    if registration.participant_key == command.participant_key
+                ),
+                None,
+            )
+            if selected_index is None or selected_index < event.player_amount:
+                raise OperationNotAllowed("Выбранный игрок уже не находится в запасе")
+            promoted = registrations[selected_index]
+            if promoted.attendance_status is not AttendanceStatus.CONFIRMED:
+                raise OperationNotAllowed("Выбранный игрок уже не подтвердил участие")
+            demoted = next(
+                (
+                    registration
+                    for registration in reversed(registrations[: event.player_amount])
+                    if registration.attendance_status is AttendanceStatus.WAITING
+                ),
+                None,
+            )
+            if demoted is None:
+                raise OperationNotAllowed(
+                    "В основном составе нет неподтверждённой заявки, которую можно переместить в запас"
+                )
+
+            moves = [
+                promoted_entry,
+                _sift_snapshot_entry(SIFT_DEMOTED_PREFIX, demoted.participant_key),
+            ]
+            if event.last_participant_removal_operation_id == command.operation_id:
+                await self.events.add_participant_removal_keys(event.event_id, command.operation_id, moves)
+            else:
+                await self.events.set_participant_removal(event.event_id, command.operation_id, moves)
+            await self.catalog.registrations.swap_queue_positions(
+                event.event_id,
+                operation_id=command.operation_id,
+                promoted_participant_key=promoted.participant_key,
+                promoted_created_at=promoted.created_at,
+                demoted_participant_key=demoted.participant_key,
+                demoted_created_at=demoted.created_at,
+            )
+            await self.catalog.refresh(event)
+            return MutationResult(
+                f"Игрок «{promoted.display_name}» перемещён в основной состав, игрок «{demoted.display_name}» — в запас"
             )
 
         assert command.participant_key is not None

@@ -2637,6 +2637,47 @@ class YdbRegistrationRepository:
             },
         )
 
+    async def swap_queue_positions(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        promoted_participant_key: str,
+        promoted_created_at: datetime,
+        demoted_participant_key: str,
+        demoted_created_at: datetime,
+    ) -> bool:
+        await self.db.query(
+            """
+            DECLARE $event_id AS Utf8; DECLARE $operation_id AS Utf8;
+            DECLARE $promoted_participant_key AS Utf8; DECLARE $promoted_created_at AS Timestamp;
+            DECLARE $demoted_participant_key AS Utf8; DECLARE $demoted_created_at AS Timestamp;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `registrations`
+            SET created_at = $demoted_created_at,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $promoted_participant_key
+              AND last_operation_id != $operation_id;
+            UPDATE `registrations`
+            SET created_at = $promoted_created_at,
+                last_operation_id = $operation_id,
+                updated_at = $updated_at
+            WHERE event_id = $event_id AND participant_key = $demoted_participant_key
+              AND last_operation_id != $operation_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$operation_id": operation_id,
+                "$promoted_participant_key": promoted_participant_key,
+                "$promoted_created_at": promoted_created_at,
+                "$demoted_participant_key": demoted_participant_key,
+                "$demoted_created_at": demoted_created_at,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return True
+
     async def remove(self, event_id: str, *, participant_key: str) -> bool:
         await self.db.query(
             """

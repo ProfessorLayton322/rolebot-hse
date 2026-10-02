@@ -1155,6 +1155,102 @@ async def test_confirmation_sift_moves_confirmed_up_and_keeps_retry_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_confirmed_reserve_player_swaps_with_last_waiting_main_player_and_retries_safely(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    event.player_amount = 3
+    keys = [character * 43 for character in "abcde"]
+    rows = [
+        Registration(
+            event_id=event.event_id,
+            participant_key=key,
+            display_name=f"Player {index}",
+            wish_play="Anyone",
+            attendance_status=(AttendanceStatus.WAITING if index in {1, 2} else AttendanceStatus.CONFIRMED),
+            created_at=base + timedelta(seconds=index),
+        )
+        for index, key in enumerate(keys)
+    ]
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    tables = MemoryRegistrationRepository(rows)
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
+    mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
+    promotion = command(
+        event,
+        Operation.PROMOTE_RESERVE_PARTICIPANT,
+        EmptyPayload(),
+        key=keys[4],
+    )
+
+    assert (await mutations.apply(promotion)).text == (
+        "Игрок «Player 4» перемещён в основной состав, игрок «Player 2» — в запас"
+    )
+    assert (await mutations.apply(promotion)).text == "Игрок уже перемещён в основной состав"
+
+    reordered = await tables.list_for_event(event.event_id)
+    assert [row.participant_key for row in reordered] == [keys[0], keys[1], keys[4], keys[3], keys[2]]
+    stored_event = await events.get(event.event_id)
+    assert stored_event is not None
+    assert stored_event.participant_removal_keys == [
+        f"promoted:{keys[4]}",
+        f"demoted:{keys[2]}",
+    ]
+    workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
+    try:
+        assert [workbook.active.cell(row, 2).value for row in (2, 3, 4, 6, 7)] == [
+            "Player 0",
+            "Player 1",
+            "Player 4",
+            "Player 3",
+            "Player 2",
+        ]
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_reserve_promotion_rejects_roster_without_waiting_main_player(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.player_amount = 1
+    rows = [
+        Registration(
+            event_id=event.event_id,
+            participant_key=key * 43,
+            display_name=name,
+            wish_play="Anyone",
+            attendance_status=AttendanceStatus.CONFIRMED,
+            created_at=datetime(2026, 1, index + 1, tzinfo=UTC),
+        )
+        for index, (key, name) in enumerate([("a", "Main"), ("b", "Reserve")])
+    ]
+    events = MemoryEventRepository([event])
+    await add_command_author_as_leader(events, event)
+    tables = MemoryRegistrationRepository(rows)
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, YandexDiskShowcaseRepository(disk_store)),
+    )
+
+    with pytest.raises(OperationNotAllowed, match="нет неподтверждённой заявки"):
+        await mutations.apply(
+            command(
+                event,
+                Operation.PROMOTE_RESERVE_PARTICIPANT,
+                EmptyPayload(),
+                key="b" * 43,
+            )
+        )
+
+    assert [row.participant_key for row in await tables.list_for_event(event.event_id)] == ["a" * 43, "b" * 43]
+
+
+@pytest.mark.asyncio
 async def test_archive_operation_is_distinct_from_closing_registration(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
