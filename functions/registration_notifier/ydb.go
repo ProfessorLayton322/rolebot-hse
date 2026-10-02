@@ -141,7 +141,7 @@ RETURNING event_id;
 			Param("$opened_at").Timestamp(openedAt.UTC()).
 			Param("$closed_status").Text("CLOSED").
 			Build()),
-		query.WithTxControl(query.SerializableReadWriteTxControl()),
+		query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx())),
 	)
 	if err != nil {
 		return false, err
@@ -182,7 +182,7 @@ WHERE event_id = $event_id
 			Param("$notified_recipients_json").Text(string(encoded)).
 			Param("$updated_at").Timestamp(updatedAt.UTC()).
 			Build()),
-		query.WithTxControl(query.SerializableReadWriteTxControl()),
+		query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx())),
 	)
 }
 
@@ -205,6 +205,6 @@ WHERE event_id = $event_id
 			Param("$event_id").Text(eventID).
 			Param("$completed_at").Timestamp(completedAt.UTC()).
 			Build()),
-		query.WithTxControl(query.SerializableReadWriteTxControl()),
+		query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx())),
 	)
 }
