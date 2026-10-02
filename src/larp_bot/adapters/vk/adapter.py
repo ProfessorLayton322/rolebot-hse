@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from larp_bot.domain.models import BotIdentity, InboundMessage, Platform
+
+VK_MAX_KEYBOARD_ROWS = 10
+VK_MAX_BUTTONS_PER_ROW = 4
+VK_MAX_KEYBOARD_BUTTONS = VK_MAX_KEYBOARD_ROWS * VK_MAX_BUTTONS_PER_ROW
 
 
 class InvalidVkEvent(ValueError):
@@ -47,26 +52,30 @@ def parse_vk_event(event: dict[str, Any]) -> InboundMessage:
     )
 
 
-def vk_keyboard(buttons: list[Any]) -> str | None:
-    if not buttons:
+def vk_keyboard(buttons: Sequence[Any]) -> str | None:
+    if not buttons or len(buttons) > VK_MAX_KEYBOARD_BUTTONS:
         return None
+    buttons_per_row = (len(buttons) + VK_MAX_KEYBOARD_ROWS - 1) // VK_MAX_KEYBOARD_ROWS
+    rows = []
+    for offset in range(0, len(buttons), buttons_per_row):
+        rows.append(
+            [
+                {
+                    "action": {
+                        "type": "text",
+                        "label": button.label,
+                        "payload": json.dumps({"value": button.value}, ensure_ascii=False),
+                    },
+                    "color": "primary",
+                }
+                for button in buttons[offset : offset + buttons_per_row]
+            ]
+        )
     return json.dumps(
         {
             "one_time": False,
             "inline": False,
-            "buttons": [
-                [
-                    {
-                        "action": {
-                            "type": "text",
-                            "label": button.label,
-                            "payload": json.dumps({"value": button.value}, ensure_ascii=False),
-                        },
-                        "color": "primary",
-                    }
-                ]
-                for button in buttons
-            ],
+            "buttons": rows,
         },
         ensure_ascii=False,
         separators=(",", ":"),

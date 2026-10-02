@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from larp_bot.adapters.telegram.callbacks import encode_callback
+from larp_bot.adapters.vk import vk_keyboard
 from larp_bot.domain.models import Button, Platform, UnreachableRecipient, normalize_vk_url
 from larp_bot.domain.security import sign_request
 
@@ -298,7 +299,7 @@ class CloudflareTelegramEgress:
 
 class VkApiTransport:
     API_BASE = "https://api.vk.com/method"
-    CHATBOT_FEATURE_DISABLED = 912
+    KEYBOARD_ERROR_CODES = frozenset({911, 912})
     # 901: the person forbade community messages; 902: their privacy settings
     # forbid this conversation. Both stay refused until the person changes them.
     UNREACHABLE_ERROR_CODES = frozenset({901, 902})
@@ -348,45 +349,24 @@ class VkApiTransport:
         buttons: Sequence[Button] = (),
     ) -> None:
         random_id = int.from_bytes(hashlib.sha256(request_id.encode()).digest()[:4], "big")
-        keyboard = None
-        if buttons:
-            keyboard = json.dumps(
-                {
-                    "one_time": False,
-                    "inline": False,
-                    "buttons": [
-                        [
-                            {
-                                "action": {
-                                    "type": "text",
-                                    "label": button.label,
-                                    "payload": json.dumps({"value": button.value}, ensure_ascii=False),
-                                },
-                                "color": "primary",
-                            }
-                        ]
-                        for button in buttons
-                    ],
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+        keyboard = vk_keyboard(buttons)
         data: dict[str, str | int] = {
             "access_token": self.access_token,
             "v": self.api_version,
             "peer_id": user_id,
             "random_id": random_id,
-            "message": text,
+            "message": text if keyboard is not None or not buttons else self._text_keyboard(text, buttons),
         }
         if keyboard is not None:
             data["keyboard"] = keyboard
         payload = await self._post("messages.send", data)
         error = self._api_error(payload)
-        if error is not None and error[0] == self.CHATBOT_FEATURE_DISABLED and keyboard is not None:
+        if error is not None and error[0] in self.KEYBOARD_ERROR_CODES and keyboard is not None:
             # Community message tokens can send text but cannot enable the VK
-            # "Chat bot feature" setting. Keep the bot usable until an owner
-            # enables it in the community UI: retry without the keyboard and
-            # expose the exact callback values as text commands.
+            # "Chat bot feature" setting. VK may also reject a keyboard when a
+            # button violates a constraint not represented in our domain model.
+            # Keep the bot usable by retrying without the keyboard and exposing
+            # the exact callback values as text commands.
             data.pop("keyboard")
             data["message"] = self._text_keyboard(text, buttons)
             payload = await self._post("messages.send", data)
