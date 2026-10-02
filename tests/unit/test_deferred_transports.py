@@ -33,6 +33,44 @@ async def test_vk_transport_sends_keyboard_when_chatbot_feature_is_enabled() -> 
 
 
 @pytest.mark.asyncio
+async def test_vk_transport_shortens_long_cyrillic_labels_without_changing_callbacks() -> None:
+    requests: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"response": 1})
+
+    buttons = [
+        Button(
+            label="11:00–13:00 «Типичная суббота» (10.10.26)",
+            value="select:enlist:3718d786-f49f-446d-81ce-5ee0af518979",
+        ),
+        Button(
+            label="13:30–15:30 «Типичная суббота» (10.10.26)",
+            value="select:enlist:2da6442d-038d-47c2-a36f-cd11e116787f",
+        ),
+        Button(
+            label="13:00–18:00 «Проклятье острова Эверрейн» (10.10.26)",
+            value="select:enlist:461df237-4f48-46c0-b1e8-9c69e7b3c3b2",
+        ),
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        await transport.send(user_id=42, request_id="request-long-labels", text="Choose", buttons=buttons)
+
+    assert len(requests) == 1
+    assert requests[0]["message"] == ["Choose"]
+    keyboard = json.loads(requests[0]["keyboard"][0])
+    actions = [button["action"] for row in keyboard["buttons"] for button in row]
+    labels = [action["label"] for action in actions]
+    assert all(len(label) <= 40 for label in labels)
+    assert all(label.endswith("» (10.10.26)") for label in labels)
+    assert labels[0].startswith("11:00–13:00")
+    assert labels[1].startswith("13:30–15:30")
+    assert [json.loads(action["payload"])["value"] for action in actions] == [button.value for button in buttons]
+
+
+@pytest.mark.asyncio
 async def test_vk_transport_packs_large_keyboard_within_vk_row_limits() -> None:
     requests: list[dict[str, list[str]]] = []
 

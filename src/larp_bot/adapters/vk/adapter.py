@@ -9,10 +9,19 @@ from larp_bot.domain.models import BotIdentity, InboundMessage, Platform
 VK_MAX_KEYBOARD_ROWS = 10
 VK_MAX_BUTTONS_PER_ROW = 4
 VK_MAX_KEYBOARD_BUTTONS = VK_MAX_KEYBOARD_ROWS * VK_MAX_BUTTONS_PER_ROW
+VK_MAX_BUTTON_LABEL_LENGTH = 40
+VK_BUTTON_LABEL_SUFFIX_LENGTH = 12
 
 
 class InvalidVkEvent(ValueError):
     pass
+
+
+def vk_button_label(label: str) -> str:
+    if len(label) <= VK_MAX_BUTTON_LABEL_LENGTH:
+        return label
+    prefix_length = VK_MAX_BUTTON_LABEL_LENGTH - VK_BUTTON_LABEL_SUFFIX_LENGTH - 1
+    return f"{label[:prefix_length]}…{label[-VK_BUTTON_LABEL_SUFFIX_LENGTH:]}"
 
 
 def parse_vk_event(event: dict[str, Any]) -> InboundMessage:
@@ -63,7 +72,7 @@ def vk_keyboard(buttons: Sequence[Any]) -> str | None:
                 {
                     "action": {
                         "type": "text",
-                        "label": button.label,
+                        "label": vk_button_label(button.label),
                         "payload": json.dumps({"value": button.value}, ensure_ascii=False),
                     },
                     "color": "primary",
