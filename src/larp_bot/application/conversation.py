@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 from pydantic import ValidationError
 
 from larp_bot.domain.models import (
+    MAX_EVENT_PAGE_SIZE,
     MAX_PLAYER_AMOUNT,
     AttendanceStatus,
     BotIdentity,
@@ -1615,21 +1616,47 @@ class ConversationEngine:
         before: tuple[datetime, str] | None = None,
         empty_text: str = "Подходящих игр сейчас нет.",
     ) -> BotResponse:
-        events = list(
-            await self.events.list_page(
-                statuses=statuses,
-                after=after,
-                before=before,
-                archived=False,
-                registration_opened=True if flow == "enlist" else None,
-                limit=PAGE_SIZE,
+        if flow == "enlist":
+            events: list[Event] = []
+            cursor: tuple[datetime, str] | None = None
+            while True:
+                page = list(
+                    await self.events.list_page(
+                        statuses=statuses,
+                        after=cursor,
+                        archived=False,
+                        registration_opened=True,
+                        limit=MAX_EVENT_PAGE_SIZE,
+                    )
+                )
+                events.extend(page)
+                if len(page) < MAX_EVENT_PAGE_SIZE:
+                    break
+                last = page[-1]
+                cursor = (last.created_at, last.event_id)
+        else:
+            events = list(
+                await self.events.list_page(
+                    statuses=statuses,
+                    after=after,
+                    before=before,
+                    archived=False,
+                    limit=PAGE_SIZE,
+                )
             )
-        )
         cancel = ADMIN_MENU if flow.startswith("admin-") else CANCEL_DIALOG
         if not events:
             return BotResponse(
                 text=empty_text,
                 buttons=_pagination_buttons(previous=None, following=None, cancel=cancel),
+            )
+        if flow == "enlist":
+            return BotResponse(
+                text=_player_game_picker_text(flow),
+                buttons=[
+                    *_event_buttons(events, flow),
+                    *_pagination_buttons(previous=None, following=None, cancel=cancel),
+                ],
             )
         first, last = events[0], events[-1]
         previous, following = await asyncio.gather(
