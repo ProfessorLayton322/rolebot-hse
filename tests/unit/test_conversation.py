@@ -4988,20 +4988,22 @@ async def test_profile_fanout_pages_events_and_reaches_games_past_the_first_page
 
 
 @pytest.mark.asyncio
-async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_store: MemoryDiskStore) -> None:
+async def test_signup_picker_shows_every_game_while_other_player_pickers_remain_paginated(
+    disk_store: MemoryDiskStore,
+) -> None:
     base = datetime(2026, 1, 1, tzinfo=UTC)
     events = [
         Event(
-            event_id=f"event-{index:04d}",
+            event_id=f"00000000-0000-0000-0000-{index:012d}",
             name=f"Game {index}",
-            disk_resource_path=f"disk:/larp-bot/events/event-{index:04d}/game.xlsx",
+            disk_resource_path=f"disk:/larp-bot/events/{index:012d}/game.xlsx",
             public_registration_url=f"https://disk.example/{index}",
             status=EventStatus.CONFIRMATION_OPEN,
             registrations_migrated_at=base,
             created_at=base + timedelta(seconds=index),
             updated_at=base + timedelta(seconds=index),
         )
-        for index in range(PAGE_SIZE + 1)
+        for index in range(MAX_EVENT_PAGE_SIZE + 2)
     ]
     engine, _, _, registrations = await engine_setup(disk_store, *events)
     await registrations.import_missing(
@@ -5017,34 +5019,32 @@ async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_stor
     )
 
     enlist_first = await engine.handle(inbound(1, ENLIST))
-    assert len([button for button in enlist_first.buttons if button.value.startswith("select:enlist:")]) == PAGE_SIZE
+    enlist_buttons = [button for button in enlist_first.buttons if button.value.startswith("select:enlist:")]
+    assert len(enlist_buttons) == len(events)
+    assert [button.label for button in enlist_buttons] == [f"Game {index}" for index in range(len(events))]
     assert PAGE_BACK not in {button.label for button in enlist_first.buttons}
-    enlist_second = await engine.handle(
-        inbound(
-            2,
-            next(button.value for button in enlist_first.buttons if button.label == PAGE_FORWARD),
-            callback=True,
-        )
-    )
-    assert len([button for button in enlist_second.buttons if button.value.startswith("select:enlist:")]) == 1
-    assert PAGE_BACK in {button.label for button in enlist_second.buttons}
-    assert PAGE_FORWARD not in {button.label for button in enlist_second.buttons}
-    assert enlist_second.buttons[-1] == Button(label=MAIN_MENU_LABEL, value="Отмена")
+    assert PAGE_FORWARD not in {button.label for button in enlist_first.buttons}
+    assert enlist_first.buttons[-1] == Button(label=MAIN_MENU_LABEL, value="Отмена")
+    callback_payloads = [encode_callback(button.value) for button in enlist_buttons]
+    assert all(1 <= len(payload.encode("utf-8")) <= 64 for payload in callback_payloads)
+    assert [decode_callback(payload) for payload in callback_payloads] == [button.value for button in enlist_buttons]
 
-    registered_first = await engine.handle(inbound(3, CONFIRM))
+    registered_first = await engine.handle(inbound(2, CONFIRM))
     registered_second = await engine.handle(
         inbound(
-            4,
+            3,
             next(button.value for button in registered_first.buttons if button.label == PAGE_FORWARD),
             callback=True,
         )
     )
-    assert len([button for button in registered_second.buttons if button.value.startswith("select:confirm:")]) == 1
+    assert (
+        len([button for button in registered_second.buttons if button.value.startswith("select:confirm:")]) == PAGE_SIZE
+    )
     assert PAGE_BACK in {button.label for button in registered_second.buttons}
-    assert PAGE_FORWARD not in {button.label for button in registered_second.buttons}
+    assert PAGE_FORWARD in {button.label for button in registered_second.buttons}
     returned = await engine.handle(
         inbound(
-            5,
+            4,
             next(button.value for button in registered_second.buttons if button.label == PAGE_BACK),
             callback=True,
         )
@@ -5052,21 +5052,24 @@ async def test_player_event_pickers_have_bidirectional_five_item_pages(disk_stor
     assert len([button for button in returned.buttons if button.value.startswith("select:confirm:")]) == PAGE_SIZE
     assert PAGE_BACK not in {button.label for button in returned.buttons}
 
-    wishes_first = await engine.handle(inbound(6, GAME_WISHES))
+    wishes_first = await engine.handle(inbound(5, GAME_WISHES))
     assert len([button for button in wishes_first.buttons if button.value.startswith("select:wishes:")]) == PAGE_SIZE
     wishes_second = await engine.handle(
         inbound(
-            7,
+            6,
             next(button.value for button in wishes_first.buttons if button.label == PAGE_FORWARD),
             callback=True,
         )
     )
     last_game_buttons = [button for button in wishes_second.buttons if button.value.startswith("select:wishes:")]
-    assert len(last_game_buttons) == 1
+    assert len(last_game_buttons) == PAGE_SIZE
     assert PAGE_BACK in {button.label for button in wishes_second.buttons}
-    selected = await engine.handle(inbound(8, last_game_buttons[0].value, callback=True))
+    selected = await engine.handle(inbound(7, last_game_buttons[0].value, callback=True))
     assert selected.text.startswith("Пожелания по игре «")
     assert [button.label for button in selected.buttons] == [CHARACTER_WISHES, CO_PLAYER_WISHES]
+
+    routed = await engine.handle(inbound(8, decode_callback(callback_payloads[-1]), callback=True))
+    assert routed.text == f"Вы уже записаны на игру «Game {len(events) - 1}»."
 
 
 def my_games_event(index: int, **changes: object) -> Event:
