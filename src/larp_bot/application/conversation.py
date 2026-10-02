@@ -133,6 +133,7 @@ LIST_WAITING_PLAYERS = "👥 Не подтвердившие участие"
 REMOVE_PLAYER = "🗑 Удалить игрока"
 MANAGE_PLAYERS = "Управление игроками"
 LIST_PLAYER_PROFILES = "📋 Список профилей игроков"
+PROMOTE_RESERVE_PLAYER = "Подвинуть игрока в основную сессию"
 REMOVE_WAITING_PLAYERS = "Убрать не подтвердившихся в запас"
 LEGACY_REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
@@ -244,6 +245,7 @@ ADMIN_ACTIONS = frozenset(
         REMOVE_PLAYER,
         MANAGE_PLAYERS,
         LIST_PLAYER_PROFILES,
+        PROMOTE_RESERVE_PLAYER,
         REMOVE_WAITING_PLAYERS,
         LEGACY_REMOVE_WAITING_PLAYERS,
         CREATE_PASS_TABLE,
@@ -322,6 +324,8 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_REMOVE_WAITING_CONFIRM",
         "ADMIN_WAITING_PICK",
         "ADMIN_PROFILES_PICK",
+        "ADMIN_RESERVE_PROMOTION_PICK",
+        "ADMIN_RESERVE_PROMOTION_CONFIRM",
     }
 )
 
@@ -3717,6 +3721,8 @@ class ConversationEngine:
             "ADMIN_REMOVE_WAITING_CONFIRM",
             "ADMIN_WAITING_PICK",
             "ADMIN_PROFILES_PICK",
+            "ADMIN_RESERVE_PROMOTION_PICK",
+            "ADMIN_RESERVE_PROMOTION_CONFIRM",
         }
         view_only_event_states = {
             "ADMIN_EVENT_LEADER_LIST",
@@ -3839,6 +3845,10 @@ class ConversationEngine:
             return await self._admin_waiting_pick(user, value)
         if user.dialog_state == "ADMIN_PROFILES_PICK":
             return await self._admin_profiles_pick(user, value)
+        if user.dialog_state == "ADMIN_RESERVE_PROMOTION_PICK":
+            return await self._admin_reserve_promotion_pick(user, value)
+        if user.dialog_state == "ADMIN_RESERVE_PROMOTION_CONFIRM":
+            return await self._admin_reserve_promotion_confirm(user, message, value)
         if user.dialog_state in {
             "ADMIN_CREATE_MASTER_CHOICE",
             "ADMIN_CREATE_MASTER_PICK",
@@ -5128,6 +5138,253 @@ class ConversationEngine:
             buttons=buttons,
         )
 
+    async def _show_confirmed_reserve_players(
+        self,
+        user: User,
+        event: Event,
+        *,
+        after: tuple[datetime, str] | None = None,
+        before: tuple[datetime, str] | None = None,
+        invalid: str = "",
+    ) -> BotResponse:
+        if not await self.administration.has_unconfirmed_main_slot(event.event_id):
+            await self._clear(user)
+            return BotResponse(
+                text=(
+                    f"В основном составе игры {event_reference(event.name, event.game_date)} нет свободных мест: "
+                    "там нет неподтверждённых заявок, которые можно переместить в запас. "
+                    "Сейчас никого нельзя подвинуть из запаса в основную сессию."
+                ),
+                buttons=[player_management_button(event.event_id)],
+            )
+        page = await self.administration.confirmed_reserve_registration_page(
+            event.event_id,
+            after=after,
+            before=before,
+            limit=PAGE_SIZE,
+        )
+        if not page.rows and (after is not None or before is not None):
+            return await self._show_confirmed_reserve_players(user, event, invalid=invalid)
+        user.dialog_state = "ADMIN_RESERVE_PROMOTION_PICK"
+        user.dialog_context = {
+            "event_id": event.event_id,
+            "event_name": event.name,
+            "game_date": event.game_date.isoformat() if event.game_date is not None else None,
+        }
+        if not page.rows:
+            return BotResponse(
+                text=(
+                    f"В запасе игры {event_reference(event.name, event.game_date)} нет подтвердивших участие игроков."
+                ),
+                buttons=[player_management_button(event.event_id)],
+            )
+
+        choices: dict[str, str] = {}
+        buttons: list[Button] = []
+        for registration in page.rows:
+            token = token_urlsafe(8)
+            choices[token] = registration.participant_key
+            buttons.append(
+                Button(
+                    label=registration.display_name,
+                    value=f"admin:promote:pick:{token}",
+                )
+            )
+        page_token = token_urlsafe(8)
+        buttons.extend(
+            _pagination_buttons(
+                previous=f"admin:promote:page:p:{page_token}" if page.has_previous else None,
+                following=f"admin:promote:page:n:{page_token}" if page.has_next else None,
+                cancel=f"ag:players:{event.event_id}",
+            )
+        )
+        user.dialog_context.update(
+            {
+                "promote_choices": choices,
+                "promote_page_token": page_token,
+                "promote_first": [page.rows[0].created_at.isoformat(), page.rows[0].participant_key],
+                "promote_last": [page.rows[-1].created_at.isoformat(), page.rows[-1].participant_key],
+                "promote_after": None if after is None else [after[0].isoformat(), after[1]],
+                "promote_before": None if before is None else [before[0].isoformat(), before[1]],
+            }
+        )
+        prefix = f"{invalid}\n\n" if invalid else ""
+        return BotResponse(
+            text=(
+                f"{prefix}Подвинуть игрока в основную сессию игры "
+                f"{event_reference(event.name, event.game_date)}\n\n"
+                "Выберите подтвердившего участие игрока из запаса."
+            ),
+            buttons=buttons,
+        )
+
+    async def _current_confirmed_reserve_players(
+        self,
+        user: User,
+        event: Event,
+        *,
+        invalid: str = "",
+    ) -> BotResponse:
+        return await self._show_confirmed_reserve_players(
+            user,
+            event,
+            after=self._optional_registration_cursor(user, "promote_after"),
+            before=self._optional_registration_cursor(user, "promote_before"),
+            invalid=invalid,
+        )
+
+    async def _reserve_promotion_confirmation(
+        self,
+        user: User,
+        event: Event,
+        registration: Registration,
+        *,
+        invalid: str = "",
+    ) -> BotResponse:
+        participant = await self.administration.registration_user(event.event_id, registration.participant_key)
+        if participant is None:
+            return await self._current_confirmed_reserve_players(
+                user,
+                event,
+                invalid="Не удалось найти профиль этого пользователя.",
+            )
+        role = await self._user_role_label(participant)
+        prefix = f"{invalid}\n\n" if invalid else ""
+        token = str(user.dialog_context["promote_selected_token"])
+        profile_text = self._player_profile_text(
+            event,
+            registration,
+            participant,
+            role=role,
+            in_main_roster=False,
+        )
+        return BotResponse(
+            text=(
+                f"{prefix}{profile_text}"
+                "\n\nПереместить этого игрока в основную сессию? "
+                "Последний неподтверждённый игрок в основном составе будет перемещён в запас."
+            ),
+            buttons=[
+                Button(label="Да", value=f"admin:promote:confirm:{token}"),
+                Button(label="Нет", value=f"admin:promote:page:c:{user.dialog_context['promote_page_token']}"),
+            ],
+        )
+
+    async def _admin_reserve_promotion_pick(self, user: User, value: str) -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+
+        parts = value.split(":")
+        page_token = user.dialog_context.get("promote_page_token")
+        if len(parts) == 5 and parts[:3] == ["admin", "promote", "page"]:
+            direction, requested_token = parts[3:]
+            if requested_token != page_token or direction not in {"n", "p", "c"}:
+                return await self._show_confirmed_reserve_players(user, event, invalid="Эта страница устарела.")
+            if direction == "p":
+                return await self._show_confirmed_reserve_players(
+                    user,
+                    event,
+                    before=self._stored_registration_cursor(user, "promote_first"),
+                )
+            if direction == "n":
+                return await self._show_confirmed_reserve_players(
+                    user,
+                    event,
+                    after=self._stored_registration_cursor(user, "promote_last"),
+                )
+            return await self._current_confirmed_reserve_players(user, event)
+        if len(parts) != 4 or parts[:3] != ["admin", "promote", "pick"]:
+            return await self._current_confirmed_reserve_players(
+                user,
+                event,
+                invalid="Выберите игрока кнопкой из списка.",
+            )
+        choices = user.dialog_context.get("promote_choices")
+        registration_key = choices.get(parts[3]) if isinstance(choices, dict) else None
+        if not isinstance(registration_key, str):
+            return await self._current_confirmed_reserve_players(user, event, invalid="Этот список устарел.")
+        registration = await self.administration.get_registration(event_id, registration_key)
+        if registration is None or not await self.administration.can_promote_confirmed_reserve(
+            event_id,
+            registration_key,
+        ):
+            return await self._current_confirmed_reserve_players(
+                user,
+                event,
+                invalid="Этот игрок уже не является подтвердившим участником в запасе.",
+            )
+        user.dialog_state = "ADMIN_RESERVE_PROMOTION_CONFIRM"
+        user.dialog_context.update(
+            {
+                "promote_selected_key": registration_key,
+                "promote_selected_token": parts[3],
+                "promote_selected_name": registration.display_name,
+            }
+        )
+        return await self._reserve_promotion_confirmation(user, event, registration)
+
+    async def _admin_reserve_promotion_confirm(
+        self,
+        user: User,
+        message: InboundMessage,
+        value: str,
+    ) -> BotResponse:
+        event_id = str(user.dialog_context["event_id"])
+        event = await self.events.get(event_id)
+        if event is None:
+            await self._clear(user)
+            return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
+        token = str(user.dialog_context["promote_selected_token"])
+        if value == f"admin:promote:page:c:{user.dialog_context['promote_page_token']}":
+            return await self._current_confirmed_reserve_players(user, event)
+        participant_key = str(user.dialog_context["promote_selected_key"])
+        registration = await self.administration.get_registration(event_id, participant_key)
+        if value != f"admin:promote:confirm:{token}":
+            if registration is None:
+                return await self._current_confirmed_reserve_players(user, event, invalid="Этот список устарел.")
+            return await self._reserve_promotion_confirmation(
+                user,
+                event,
+                registration,
+                invalid="Перемещение не подтверждено.",
+            )
+        if registration is None or not await self.administration.can_promote_confirmed_reserve(
+            event_id,
+            participant_key,
+        ):
+            return await self._current_confirmed_reserve_players(
+                user,
+                event,
+                invalid="Состав игроков изменился. Выберите игрока заново.",
+            )
+        context = user.dialog_context.copy()
+        await self._clear(user)
+        await self.registrations.enqueue(
+            operation=Operation.PROMOTE_RESERVE_PARTICIPANT,
+            event_id=event_id,
+            platform=message.identity.platform,
+            user_id=message.identity.platform_user_id,
+            payload=EmptyPayload(),
+            reply_context=ReplyContext(
+                text_success=(
+                    f"✅ Игрок «{context['promote_selected_name']}» перемещён в основную сессию "
+                    f"игры {_context_event_reference(context)}."
+                ),
+                buttons=[player_management_button(event_id)],
+            ),
+            idempotency_key=f"{message.update_id}:{Operation.PROMOTE_RESERVE_PARTICIPANT.value}",
+            target_participant_key=participant_key,
+        )
+        return BotResponse(
+            text="⏳ Перемещение принято в обработку.",
+            buttons=[player_management_button(event_id)],
+            deferred=True,
+            command_enqueued=True,
+        )
+
     @staticmethod
     def _remove_confirmation_response(user: User, *, invalid: str = "") -> BotResponse:
         event_id = str(user.dialog_context["event_id"])
@@ -5733,6 +5990,7 @@ class ConversationEngine:
             buttons[:0] = [
                 Button(label=REMOVE_PLAYER, value=f"ag:remove:{event.event_id}"),
                 Button(label=REMOVE_WAITING_PLAYERS, value=f"ag:remove-waiting:{event.event_id}"),
+                Button(label=PROMOTE_RESERVE_PLAYER, value=f"ag:promote:{event.event_id}"),
             ]
         buttons.append(game_management_button(event.event_id))
         return BotResponse(
@@ -6133,6 +6391,8 @@ class ConversationEngine:
             return await self._show_removable_players(user, event)
         if action == "remove-waiting":
             return await self._remove_waiting_confirmation(user, event)
+        if action == "promote":
+            return await self._show_confirmed_reserve_players(user, event)
         if action == "profiles":
             return await self._show_player_profiles(user, event)
         if action == "masters":
@@ -6240,6 +6500,7 @@ class ConversationEngine:
             REMOVE_PLAYER,
             MANAGE_PLAYERS,
             LIST_PLAYER_PROFILES,
+            PROMOTE_RESERVE_PLAYER,
             REMOVE_WAITING_PLAYERS,
             LEGACY_REMOVE_WAITING_PLAYERS,
             ADD_EVENT_LEADER,

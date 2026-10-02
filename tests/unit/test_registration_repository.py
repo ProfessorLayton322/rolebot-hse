@@ -528,6 +528,65 @@ async def test_ydb_registration_sift_moves_all_waiting_rows_with_one_update() ->
 
 
 @pytest.mark.asyncio
+async def test_registration_position_swap_is_idempotent() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    promoted = Registration(
+        event_id="event-a1",
+        participant_key="a" * 43,
+        display_name="Confirmed reserve",
+        wish_play="Anyone",
+        attendance_status=AttendanceStatus.CONFIRMED,
+        created_at=base + timedelta(seconds=2),
+    )
+    demoted = Registration(
+        event_id="event-a1",
+        participant_key="b" * 43,
+        display_name="Waiting main",
+        wish_play="Anyone",
+        created_at=base,
+    )
+    repository = MemoryRegistrationRepository([promoted, demoted])
+    arguments = {
+        "operation_id": "promote-operation",
+        "promoted_participant_key": promoted.participant_key,
+        "promoted_created_at": promoted.created_at,
+        "demoted_participant_key": demoted.participant_key,
+        "demoted_created_at": demoted.created_at,
+    }
+
+    assert await repository.swap_queue_positions("event-a1", **arguments)
+    assert not await repository.swap_queue_positions("event-a1", **arguments)
+
+    rows = await repository.list_for_event("event-a1")
+    assert [row.participant_key for row in rows] == [promoted.participant_key, demoted.participant_key]
+    assert all(row.last_operation_id == "promote-operation" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_ydb_registration_position_swap_updates_both_rows_together() -> None:
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    executor = RecordingExecutor([[]])
+    repository = YdbRegistrationRepository(executor)  # type: ignore[arg-type]
+
+    await repository.swap_queue_positions(
+        "event-a1",
+        operation_id="promote-operation",
+        promoted_participant_key="a" * 43,
+        promoted_created_at=base + timedelta(seconds=2),
+        demoted_participant_key="b" * 43,
+        demoted_created_at=base,
+    )
+
+    query, params = executor.queries[0]
+    assert query.count("UPDATE `registrations`") == 2
+    assert "participant_key = $promoted_participant_key" in query
+    assert "participant_key = $demoted_participant_key" in query
+    assert query.count("last_operation_id != $operation_id") == 2
+    assert params["$promoted_created_at"] == base + timedelta(seconds=2)
+    assert params["$demoted_created_at"] == base
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("returning", [False, True])
 async def test_signups_after_sifting_preserve_main_and_reserve_order(returning: bool) -> None:
     now = datetime.now(UTC)

@@ -1017,6 +1017,31 @@ class MemoryRegistrationRepository:
             if registration.attendance_status is AttendanceStatus.WAITING:
                 registration.created_at += shift
 
+    async def swap_queue_positions(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        promoted_participant_key: str,
+        promoted_created_at: datetime,
+        demoted_participant_key: str,
+        demoted_created_at: datetime,
+    ) -> bool:
+        promoted = self.rows.get((event_id, promoted_participant_key))
+        demoted = self.rows.get((event_id, demoted_participant_key))
+        if promoted is None or demoted is None:
+            return False
+        if promoted.last_operation_id == operation_id and demoted.last_operation_id == operation_id:
+            return False
+        now = datetime.now(UTC)
+        promoted.created_at = demoted_created_at
+        promoted.last_operation_id = operation_id
+        promoted.updated_at = now
+        demoted.created_at = promoted_created_at
+        demoted.last_operation_id = operation_id
+        demoted.updated_at = now
+        return True
+
     async def remove(self, event_id: str, *, participant_key: str) -> bool:
         return self.rows.pop((event_id, participant_key), None) is not None
 

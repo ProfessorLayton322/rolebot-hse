@@ -16,6 +16,7 @@ from larp_bot.adapters.memory import (
     MemoryVkUserIdResolver,
     StaticAdminProvider,
 )
+from larp_bot.adapters.telegram.callbacks import decode_callback, encode_callback
 from larp_bot.adapters.yandex_disk.repository import DiskUpload, YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADD_EVENT_LEADER,
@@ -77,6 +78,7 @@ from larp_bot.application.conversation import (
     PHONE_PROMPT,
     PROFILE,
     PROFILE_EDITED,
+    PROMOTE_RESERVE_PLAYER,
     REFILL_PROFILE,
     REMOVE_EVENT_LEADER,
     REMOVE_NICKNAME,
@@ -2186,6 +2188,7 @@ async def test_viewer_roles_can_inspect_and_export_but_not_administer_an_unled_g
     players = await engine.handle(inbound(21, f"ag:players:{event.event_id}", callback=True))
     assert {LIST_WAITING_PLAYERS, LIST_PLAYER_PROFILES} <= {button.label for button in players.buttons}
     assert REMOVE_PLAYER not in {button.label for button in players.buttons}
+    assert PROMOTE_RESERVE_PLAYER not in {button.label for button in players.buttons}
 
     achievements = await engine.handle(inbound(2, f"ag:achievements:{event.event_id}", callback=True))
     assert achievements.text.endswith("https://disk.example/public/2")
@@ -2485,6 +2488,126 @@ async def test_event_leader_pages_all_active_players_and_shows_their_profiles(
     assert [button.label for button in cancelled.buttons if button.value.startswith("admin:profiles:pick:")] == [
         "Петров Пётр — Подтверждено"
     ]
+    assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("as_admin", [False, True])
+async def test_master_or_admin_pages_confirmed_reserve_players_and_confirms_promotion(
+    as_admin: bool,
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event = event.model_copy(
+        update={
+            "event_id": "123e4567-e89b-12d3-a456-426614174000",
+            "player_amount": 2,
+            "game_date": date(2026, 10, 3),
+        }
+    )
+    engine, users, publisher, tables = await engine_setup(
+        disk_store,
+        event,
+        admin=as_admin,
+        privileged_role=None if as_admin else PrivilegedRole.GAMEMASTER,
+    )
+    if not as_admin:
+        await engine.events.add_leader(
+            event.event_id,
+            BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+        )
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    registrations = [
+        Registration(
+            event_id=event.event_id,
+            participant_key=engine.registrations.key(Platform.TELEGRAM, 100 + index, event.event_id),
+            display_name=f"Игрок {index}",
+            wish_play="Без пожеланий",
+            attendance_status=(AttendanceStatus.WAITING if index in {1, 2} else AttendanceStatus.CONFIRMED),
+            created_at=base + timedelta(seconds=index),
+        )
+        for index in range(10)
+    ]
+    for index in range(3, 10):
+        await users.save(
+            TelegramUser(
+                tg_id=100 + index,
+                full_name=f"Игрок {index}",
+                telegram_handle=f"@reserve_{index}",
+                vk_url=f"https://vk.com/id{100 + index}",
+                crossplay=False,
+                larp_experience=True,
+                needs_pass=False,
+            )
+        )
+    await tables.import_missing(registrations)
+
+    management = await engine.handle(inbound(1, f"ag:players:{event.event_id}", callback=True))
+    promotion_button = next(button for button in management.buttons if button.label == PROMOTE_RESERVE_PLAYER)
+    assert promotion_button.value == f"ag:promote:{event.event_id}"
+    first = await engine.handle(inbound(2, promotion_button.value, callback=True))
+    first_players = [button for button in first.buttons if button.value.startswith("admin:promote:pick:")]
+    assert [button.label for button in first_players] == [f"Игрок {index}" for index in range(3, 8)]
+    assert "Игрок 2" not in [button.label for button in first_players]
+
+    next_button = next(button for button in first.buttons if button.label == PAGE_FORWARD)
+    second = await engine.handle(inbound(3, next_button.value, callback=True))
+    second_players = [button for button in second.buttons if button.value.startswith("admin:promote:pick:")]
+    assert [button.label for button in second_players] == ["Игрок 8", "Игрок 9"]
+
+    confirmation = await engine.handle(inbound(4, second_players[-1].value, callback=True))
+    assert "ФИО: Игрок 9" in confirmation.text
+    assert "Запись: Подтверждено, запас" in confirmation.text
+    assert "Последний неподтверждённый игрок" in confirmation.text
+    assert [button.label for button in confirmation.buttons] == ["Да", "Нет"]
+    accepted = await engine.handle(inbound(5, confirmation.buttons[0].value, callback=True))
+
+    assert accepted.deferred and accepted.command_enqueued
+    queued = publisher.commands[-1]
+    assert queued.operation is Operation.PROMOTE_RESERVE_PARTICIPANT
+    assert queued.participant_key == registrations[9].participant_key
+    assert queued.reply_context.text_success == (
+        "✅ Игрок «Игрок 9» перемещён в основную сессию игры «Лесной предел» (03.10.26)."
+    )
+
+    feature_buttons = [
+        *management.buttons,
+        *first.buttons,
+        *second.buttons,
+        *confirmation.buttons,
+        *accepted.buttons,
+        *queued.reply_context.buttons,
+    ]
+    callback_payloads = [encode_callback(button.value) for button in feature_buttons]
+    assert all(1 <= len(payload.encode("utf-8")) <= 64 for payload in callback_payloads)
+    assert [decode_callback(payload) for payload in callback_payloads] == [button.value for button in feature_buttons]
+
+
+@pytest.mark.asyncio
+async def test_reserve_promotion_button_reports_when_main_roster_has_no_movable_slot(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event = event.model_copy(update={"player_amount": 1})
+    engine, _, publisher, tables = await engine_setup(disk_store, event, admin=True)
+    await tables.import_missing(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=key * 43,
+                display_name=name,
+                wish_play="Без пожеланий",
+                attendance_status=AttendanceStatus.CONFIRMED,
+                created_at=datetime(2026, 1, index + 1, tzinfo=UTC),
+            )
+            for index, (key, name) in enumerate([("a", "Основной"), ("b", "Запас")])
+        ]
+    )
+
+    response = await engine.handle(inbound(1, f"ag:promote:{event.event_id}", callback=True))
+
+    assert "нет свободных мест" in response.text
+    assert "никого нельзя подвинуть" in response.text
     assert publisher.commands == []
 
 
