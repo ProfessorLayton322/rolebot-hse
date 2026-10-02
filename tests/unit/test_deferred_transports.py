@@ -33,6 +33,46 @@ async def test_vk_transport_sends_keyboard_when_chatbot_feature_is_enabled() -> 
 
 
 @pytest.mark.asyncio
+async def test_vk_transport_packs_large_keyboard_within_vk_row_limits() -> None:
+    requests: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"response": 1})
+
+    buttons = [Button(label=f"Button {index}", value=f"callback:{index}") for index in range(40)]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        await transport.send(user_id=42, request_id="request-large", text="Choose", buttons=buttons)
+
+    keyboard = json.loads(requests[0]["keyboard"][0])
+    rows = keyboard["buttons"]
+    assert len(rows) == 10
+    assert all(len(row) == 4 for row in rows)
+    assert [json.loads(button["action"]["payload"])["value"] for row in rows for button in row] == [
+        button.value for button in buttons
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vk_transport_sends_oversized_keyboard_as_text_commands() -> None:
+    requests: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(parse_qs(request.content.decode()))
+        return httpx.Response(200, json={"response": 1})
+
+    buttons = [Button(label=f"Button {index}", value=f"callback:{index}") for index in range(41)]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        await transport.send(user_id=42, request_id="request-oversized", text="Choose", buttons=buttons)
+
+    assert len(requests) == 1
+    assert "keyboard" not in requests[0]
+    assert "Button 40\n  Команда: callback:40" in requests[0]["message"][0]
+
+
+@pytest.mark.asyncio
 async def test_vk_transport_retries_with_text_commands_when_chatbot_feature_is_disabled() -> None:
     requests: list[dict[str, list[str]]] = []
 
@@ -70,6 +110,35 @@ async def test_vk_transport_retries_with_text_commands_when_chatbot_feature_is_d
     assert fallback.startswith("Choose\n\nДоступные команды")
     assert "• Same" in fallback
     assert "• Visible\n  Команда: callback:value" in fallback
+
+
+@pytest.mark.asyncio
+async def test_vk_transport_retries_without_keyboard_when_vk_rejects_its_format() -> None:
+    requests: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(parse_qs(request.content.decode()))
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={"error": {"error_code": 911, "error_msg": "Keyboard format is invalid"}},
+            )
+        return httpx.Response(200, json={"response": 2})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        await transport.send(
+            user_id=42,
+            request_id="request-invalid-keyboard",
+            text="Choose",
+            buttons=[Button(label="Visible", value="callback:value")],
+        )
+
+    assert len(requests) == 2
+    assert "keyboard" in requests[0]
+    assert "keyboard" not in requests[1]
+    assert requests[0]["random_id"] == requests[1]["random_id"]
+    assert "Visible\n  Команда: callback:value" in requests[1]["message"][0]
 
 
 @pytest.mark.asyncio
