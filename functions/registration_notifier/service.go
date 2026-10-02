@@ -43,6 +43,7 @@ func (i identity) key() string {
 }
 
 type eventRepository interface {
+	completeRegistrationNotificationsBefore(context.Context, time.Time, time.Time) (int, error)
 	listBefore(context.Context, time.Time, int) ([]plannedEvent, error)
 	openRegistrationNow(context.Context, string, time.Time, time.Time) (bool, error)
 	markRegistrationDelivered(context.Context, string, []string, time.Time) error
@@ -62,13 +63,15 @@ type commandPublisher interface {
 }
 
 type scheduler struct {
-	events     eventRepository
-	recipients recipientProvider
-	notifier   notificationSender
-	publisher  commandPublisher
+	events                    eventRepository
+	recipients                recipientProvider
+	notifier                  notificationSender
+	publisher                 commandPublisher
+	registrationBacklogCutoff *time.Time
 }
 
 type runResult struct {
+	BacklogEventsCompleted       int `json:"backlog_events_completed"`
 	EventsCompleted              int `json:"events_completed"`
 	NotificationsDelivered       int `json:"notifications_delivered"`
 	ConfirmationCommandsEnqueued int `json:"confirmation_commands_enqueued"`
@@ -88,13 +91,24 @@ func beforeNextInvocation(instant *time.Time, cutoff time.Time) bool {
 
 func (s *scheduler) run(ctx context.Context, now time.Time) (runResult, error) {
 	now = now.UTC()
+	result := runResult{}
+	if s.registrationBacklogCutoff != nil {
+		completed, err := s.events.completeRegistrationNotificationsBefore(
+			ctx,
+			s.registrationBacklogCutoff.UTC(),
+			now,
+		)
+		if err != nil {
+			return result, fmt.Errorf("complete registration notification backlog: %w", err)
+		}
+		result.BacklogEventsCompleted = completed
+	}
 	cutoff := nextInvocation(now)
 	events, err := s.events.listBefore(ctx, cutoff, 3*perActionLimit)
 	if err != nil {
-		return runResult{}, fmt.Errorf("list planned lifecycle events: %w", err)
+		return result, fmt.Errorf("list planned lifecycle events: %w", err)
 	}
 
-	result := runResult{}
 	registrationCount := 0
 	var registrationRecipients []identity
 	recipientsLoaded := false

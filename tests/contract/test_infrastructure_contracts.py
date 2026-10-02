@@ -149,7 +149,8 @@ def test_scheduled_registration_notifications_use_an_isolated_go_timer_function(
     assert "instant.Before(cutoff)" in service
     assert "registration_open_at < $due_before" in repository
     assert "SerializableReadWriteTxControl()" not in repository
-    assert repository.count("SerializableReadWriteTxControl(query.CommitTx())") == 3
+    assert repository.count("SerializableReadWriteTxControl(query.CommitTx())") == 4
+    assert "completeRegistrationNotificationsBefore" in repository
     assert 'Operation:      "SCHEDULED_OPEN_CONFIRMATION"' in service
     assert 'Operation:      "SCHEDULED_CLOSE_EVENT"' in service
 
