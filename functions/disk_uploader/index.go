@@ -43,14 +43,20 @@ var (
 )
 
 type uploadFile struct {
-	Role        string `json:"role"`
-	ObjectKey   string `json:"object_key"`
-	DiskPath    string `json:"disk_path"`
-	ContentType string `json:"content_type"`
-	SHA256      string `json:"sha256"`
-	Generation  string `json:"generation"`
-	Overwrite   bool   `json:"overwrite"`
-	Publish     bool   `json:"publish"`
+	Role          string `json:"role"`
+	ObjectKey     string `json:"object_key"`
+	ObjectVersion string `json:"object_version,omitempty"`
+	DiskPath      string `json:"disk_path"`
+	ContentType   string `json:"content_type"`
+	SHA256        string `json:"sha256"`
+	Generation    string `json:"generation"`
+	Overwrite     bool   `json:"overwrite"`
+	Publish       bool   `json:"publish"`
+}
+
+type storedGeneration struct {
+	Value     string
+	VersionID string
 }
 
 type uploadJob struct {
@@ -170,6 +176,9 @@ func validateJob(job *uploadJob) error {
 		seen[file.Role] = true
 		if !strings.HasPrefix(file.ObjectKey, stagingPrefix+job.JobID+"/") || strings.Contains(file.ObjectKey, "..") {
 			return errors.New("upload object key is outside the job staging directory")
+		}
+		if len(file.ObjectVersion) > 1024 || strings.ContainsAny(file.ObjectVersion, "\r\n") {
+			return errors.New("upload object version is invalid")
 		}
 		if !strings.HasPrefix(file.DiskPath, "disk:/larp-bot/") || strings.Contains(file.DiskPath, "..") ||
 			strings.ContainsAny(file.DiskPath, "\r\n") {
@@ -353,28 +362,29 @@ func (service *uploaderService) takeOverStaleDestinationLock(
 	bucket string,
 	file uploadFile,
 	iamToken string,
-) (bool, error) {
+) (string, bool, error) {
 	key := lockKey(file.DiskPath)
 	response, err := service.objectRequest(ctx, http.MethodGet, bucket, key, iamToken, nil)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if response.StatusCode == http.StatusNotFound {
 		response.Body.Close()
-		return false, nil
+		return "", false, nil
 	}
 	etag := response.Header.Get("ETag")
+	staleVersion := response.Header.Get("X-Amz-Version-Id")
 	body, err := readResponse(response)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	timestamp, _, found := strings.Cut(string(body), "-")
 	if !found || etag == "" {
-		return false, nil
+		return "", false, nil
 	}
 	nanoseconds, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil || time.Since(time.Unix(0, nanoseconds)) <= lockStaleAfter {
-		return false, nil
+		return "", false, nil
 	}
 	request, err := http.NewRequestWithContext(
 		ctx,
@@ -383,24 +393,33 @@ func (service *uploaderService) takeOverStaleDestinationLock(
 		strings.NewReader(file.Generation),
 	)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	request.Header.Set("Authorization", "Bearer "+iamToken)
 	request.Header.Set("If-Match", etag)
 	response, err = service.client.Do(request)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		versionID := response.Header.Get("X-Amz-Version-Id")
 		response.Body.Close()
-		return true, nil
+		if versionID == "" {
+			return "", false, errors.New("Object Storage returned no lock version")
+		}
+		if staleVersion != "" {
+			if err := service.deleteObjectVersion(ctx, bucket, key, staleVersion, iamToken); err != nil {
+				return "", false, fmt.Errorf("delete stale lock version: %w", err)
+			}
+		}
+		return versionID, true, nil
 	}
 	if response.StatusCode == http.StatusConflict || response.StatusCode == http.StatusPreconditionFailed {
 		response.Body.Close()
-		return false, nil
+		return "", false, nil
 	}
 	_, statusErr := readResponse(response)
-	return false, statusErr
+	return "", false, statusErr
 }
 
 func (service *uploaderService) acquireDestination(
@@ -408,7 +427,7 @@ func (service *uploaderService) acquireDestination(
 	bucket string,
 	file uploadFile,
 	iamToken string,
-) error {
+) (string, error) {
 	for attempt := 0; attempt < 10; attempt++ {
 		request, err := http.NewRequestWithContext(
 			ctx,
@@ -417,46 +436,60 @@ func (service *uploaderService) acquireDestination(
 			strings.NewReader(file.Generation),
 		)
 		if err != nil {
-			return err
+			return "", err
 		}
 		request.Header.Set("Authorization", "Bearer "+iamToken)
 		request.Header.Set("If-None-Match", "*")
 		response, err := service.client.Do(request)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			versionID := response.Header.Get("X-Amz-Version-Id")
 			response.Body.Close()
-			return nil
+			if versionID == "" {
+				return "", errors.New("Object Storage returned no lock version")
+			}
+			return versionID, nil
 		}
 		if response.StatusCode != http.StatusConflict && response.StatusCode != http.StatusPreconditionFailed {
 			_, statusErr := readResponse(response)
-			return statusErr
+			return "", statusErr
 		}
 		response.Body.Close()
-		takenOver, err := service.takeOverStaleDestinationLock(ctx, bucket, file, iamToken)
+		versionID, takenOver, err := service.takeOverStaleDestinationLock(ctx, bucket, file, iamToken)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if takenOver {
-			return nil
+			return versionID, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return "", ctx.Err()
 		case <-time.After(time.Duration(attempt+1) * 100 * time.Millisecond):
 		}
 	}
-	return errDestinationBusy
+	return "", errDestinationBusy
 }
 
-func (service *uploaderService) releaseDestination(
+func (service *uploaderService) deleteObjectVersion(
 	ctx context.Context,
 	bucket string,
-	diskPath string,
+	key string,
+	versionID string,
 	iamToken string,
 ) error {
-	response, err := service.objectRequest(ctx, http.MethodDelete, bucket, lockKey(diskPath), iamToken, nil)
+	requestURL := service.objectURL(bucket, key)
+	if versionID != "" {
+		requestURL += "?" + url.Values{"versionId": {versionID}}.Encode()
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, requestURL, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+iamToken)
+	response, err := service.client.Do(request)
 	if err != nil {
 		return err
 	}
@@ -468,22 +501,36 @@ func (service *uploaderService) releaseDestination(
 	return err
 }
 
+func (service *uploaderService) releaseDestination(
+	ctx context.Context,
+	bucket string,
+	diskPath string,
+	versionID string,
+	iamToken string,
+) error {
+	return service.deleteObjectVersion(ctx, bucket, lockKey(diskPath), versionID, iamToken)
+}
+
 func (service *uploaderService) readGeneration(
 	ctx context.Context,
 	bucket string,
 	diskPath string,
 	iamToken string,
-) (string, error) {
+) (storedGeneration, error) {
 	response, err := service.objectRequest(ctx, http.MethodGet, bucket, stateKey(diskPath), iamToken, nil)
 	if err != nil {
-		return "", err
+		return storedGeneration{}, err
 	}
 	if response.StatusCode == http.StatusNotFound {
 		response.Body.Close()
-		return "", nil
+		return storedGeneration{}, nil
 	}
+	versionID := response.Header.Get("X-Amz-Version-Id")
 	body, err := readResponse(response)
-	return string(body), err
+	if err != nil {
+		return storedGeneration{}, err
+	}
+	return storedGeneration{Value: string(body), VersionID: versionID}, nil
 }
 
 func (service *uploaderService) writeGeneration(
@@ -491,7 +538,7 @@ func (service *uploaderService) writeGeneration(
 	bucket string,
 	file uploadFile,
 	iamToken string,
-) error {
+) (string, error) {
 	response, err := service.objectRequest(
 		ctx,
 		http.MethodPut,
@@ -501,28 +548,26 @@ func (service *uploaderService) writeGeneration(
 		strings.NewReader(file.Generation),
 	)
 	if err != nil {
-		return err
+		return "", err
 	}
+	versionID := response.Header.Get("X-Amz-Version-Id")
 	_, err = readResponse(response)
-	return err
+	if err != nil {
+		return "", err
+	}
+	if versionID == "" {
+		return "", errors.New("Object Storage returned no generation version")
+	}
+	return versionID, nil
 }
 
 func (service *uploaderService) deleteStaged(
 	ctx context.Context,
 	bucket string,
-	key string,
+	file uploadFile,
 	iamToken string,
 ) error {
-	response, err := service.objectRequest(ctx, http.MethodDelete, bucket, key, iamToken, nil)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusNoContent {
-		response.Body.Close()
-		return nil
-	}
-	_, err = readResponse(response)
-	return err
+	return service.deleteObjectVersion(ctx, bucket, file.ObjectKey, file.ObjectVersion, iamToken)
 }
 
 func (service *uploaderService) diskRequest(
@@ -649,11 +694,12 @@ func (service *uploaderService) uploadOne(
 	iamToken string,
 	diskToken string,
 ) (string, error) {
-	if err := service.acquireDestination(ctx, bucket, file, iamToken); err != nil {
+	lockVersion, err := service.acquireDestination(ctx, bucket, file, iamToken)
+	if err != nil {
 		return "", err
 	}
 	defer func() {
-		if err := service.releaseDestination(ctx, bucket, file.DiskPath, iamToken); err != nil {
+		if err := service.releaseDestination(ctx, bucket, file.DiskPath, lockVersion, iamToken); err != nil {
 			fmt.Printf("release upload lock for role %s: %v\n", file.Role, err)
 		}
 	}()
@@ -661,8 +707,8 @@ func (service *uploaderService) uploadOne(
 	if err != nil {
 		return "", err
 	}
-	if previous >= file.Generation {
-		if err := service.deleteStaged(ctx, bucket, file.ObjectKey, iamToken); err != nil {
+	if previous.Value >= file.Generation {
+		if err := service.deleteStaged(ctx, bucket, file, iamToken); err != nil {
 			return "", err
 		}
 		return service.existingResult(ctx, file, diskToken)
@@ -698,10 +744,22 @@ func (service *uploaderService) uploadOne(
 		if existingErr != nil {
 			return "", existingErr
 		}
-		if err := service.writeGeneration(ctx, bucket, file, iamToken); err != nil {
+		generationVersion, err := service.writeGeneration(ctx, bucket, file, iamToken)
+		if err != nil {
 			return "", err
 		}
-		if err := service.deleteStaged(ctx, bucket, file.ObjectKey, iamToken); err != nil {
+		if previous.VersionID != "" {
+			if err := service.deleteObjectVersion(
+				ctx,
+				bucket,
+				stateKey(file.DiskPath),
+				previous.VersionID,
+				iamToken,
+			); err != nil {
+				fmt.Printf("delete previous generation %s after writing %s: %v\n", previous.VersionID, generationVersion, err)
+			}
+		}
+		if err := service.deleteStaged(ctx, bucket, file, iamToken); err != nil {
 			return "", err
 		}
 		return publicURL, nil
@@ -734,10 +792,22 @@ func (service *uploaderService) uploadOne(
 			return "", err
 		}
 	}
-	if err := service.writeGeneration(ctx, bucket, file, iamToken); err != nil {
+	generationVersion, err := service.writeGeneration(ctx, bucket, file, iamToken)
+	if err != nil {
 		return "", err
 	}
-	if err := service.deleteStaged(ctx, bucket, file.ObjectKey, iamToken); err != nil {
+	if previous.VersionID != "" {
+		if err := service.deleteObjectVersion(
+			ctx,
+			bucket,
+			stateKey(file.DiskPath),
+			previous.VersionID,
+			iamToken,
+		); err != nil {
+			fmt.Printf("delete previous generation %s after writing %s: %v\n", previous.VersionID, generationVersion, err)
+		}
+	}
+	if err := service.deleteStaged(ctx, bucket, file, iamToken); err != nil {
 		return "", err
 	}
 	return publicURL, nil
@@ -800,7 +870,7 @@ func (service *uploaderService) process(ctx context.Context, job uploadJob) erro
 			if job.Callback == nil {
 				return err
 			}
-			return service.invokeCompletion(ctx, iamToken, completion{
+			completionErr := service.invokeCompletion(ctx, iamToken, completion{
 				SchemaVersion: 1,
 				JobID:         job.JobID,
 				Success:       false,
@@ -808,6 +878,15 @@ func (service *uploaderService) process(ctx context.Context, job uploadJob) erro
 				Callback:      job.Callback,
 				Error:         err.Error(),
 			})
+			if completionErr != nil {
+				return completionErr
+			}
+			for _, stagedFile := range job.Files {
+				if cleanupErr := service.deleteStaged(ctx, job.Bucket, stagedFile, iamToken); cleanupErr != nil {
+					fmt.Printf("delete staged object after failed job %s: %v\n", job.JobID, cleanupErr)
+				}
+			}
+			return nil
 		}
 		if file.Publish {
 			publicURLs[file.Role] = publicURL

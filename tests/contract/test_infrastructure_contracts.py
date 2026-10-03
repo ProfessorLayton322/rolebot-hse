@@ -174,10 +174,14 @@ def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() 
     assert 'async_function_revision = "async-iam-ready-v1"' in functions
     assert functions.count("local.async_function_revision") == 2
     assert 'stagingPrefix    = "larp-bot/uploads/"' in go_uploader
+    assert 'json:"object_version,omitempty"' in go_uploader
+    assert 'params={"versionId": str(file["object_version"])}' in staging
     assert "resources/upload" in go_uploader
     assert "resources/publish" in go_uploader
     assert "deleteStaged" in go_uploader
     assert 'id      = "expire-abandoned-disk-uploads"' in storage
+    assert 'id      = "expire-old-disk-upload-state"' in storage
+    assert storage.count("expired_object_delete_marker = true") == 2
 
 
 def test_deployment_packages_the_read_only_achievement_pdf_template() -> None:

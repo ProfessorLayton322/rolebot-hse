@@ -51,6 +51,19 @@ resource "yandex_storage_bucket" "deployment" {
   }
 
   lifecycle_rule {
+    id      = "remove-expired-disk-upload-delete-markers"
+    enabled = true
+
+    filter {
+      prefix = "${var.project_name}/uploads/"
+    }
+
+    expiration {
+      expired_object_delete_marker = true
+    }
+  }
+
+  lifecycle_rule {
     id      = "expire-abandoned-disk-upload-locks"
     enabled = true
 
@@ -60,6 +73,34 @@ resource "yandex_storage_bucket" "deployment" {
 
     expiration {
       days = 1
+    }
+
+    noncurrent_version_expiration {
+      days = 1
+    }
+  }
+
+  lifecycle_rule {
+    id      = "remove-expired-disk-upload-lock-delete-markers"
+    enabled = true
+
+    filter {
+      prefix = "${var.project_name}/upload-locks/"
+    }
+
+    expiration {
+      expired_object_delete_marker = true
+    }
+  }
+
+  # Generation markers enforce last-write-wins ordering. Keep their current
+  # values, but discard the historical versions created by each replacement.
+  lifecycle_rule {
+    id      = "expire-old-disk-upload-state"
+    enabled = true
+
+    filter {
+      prefix = "${var.project_name}/upload-state/"
     }
 
     noncurrent_version_expiration {

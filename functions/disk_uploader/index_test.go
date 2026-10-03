@@ -46,6 +46,7 @@ func TestProcessStreamsPublishesDeletesAndCallsCompletion(t *testing.T) {
 	published := false
 	deleted := false
 	lockReleased := false
+	previousGenerationDeleted := false
 	var completionPayload completion
 
 	var server *httptest.Server
@@ -64,13 +65,18 @@ func TestProcessStreamsPublishesDeletesAndCallsCompletion(t *testing.T) {
 			}
 			io.WriteString(writer, `{"values":{"YANDEX_DISK_TOKEN":"disk-token"}}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/private-bucket/"+stateKey(diskPath):
-			http.NotFound(writer, request)
+			writer.Header().Set("X-Amz-Version-Id", "old-generation-version")
+			io.WriteString(writer, "00000000000000000000-old")
 		case request.Method == http.MethodPut && request.URL.Path == "/private-bucket/"+lockKey(diskPath):
 			if request.Header.Get("If-None-Match") != "*" {
 				t.Error("destination lock was not created conditionally")
 			}
+			writer.Header().Set("X-Amz-Version-Id", "lock-version")
 			writer.WriteHeader(http.StatusOK)
 		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+lockKey(diskPath):
+			if request.URL.Query().Get("versionId") != "lock-version" {
+				t.Errorf("unexpected lock version: %q", request.URL.Query().Get("versionId"))
+			}
 			lockReleased = true
 			writer.WriteHeader(http.StatusNoContent)
 		case request.Method == http.MethodGet && request.URL.Path == "/private-bucket/"+objectKey:
@@ -100,10 +106,20 @@ func TestProcessStreamsPublishesDeletesAndCallsCompletion(t *testing.T) {
 			if string(body) != generation {
 				t.Errorf("unexpected generation marker: %q", body)
 			}
+			writer.Header().Set("X-Amz-Version-Id", "generation-version")
 			writer.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+stateKey(diskPath):
+			if request.URL.Query().Get("versionId") != "old-generation-version" {
+				t.Errorf("unexpected generation version: %q", request.URL.Query().Get("versionId"))
+			}
+			previousGenerationDeleted = true
+			writer.WriteHeader(http.StatusNoContent)
 		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+objectKey:
 			if !published {
 				t.Error("staged object was deleted before publication completed")
+			}
+			if request.URL.Query().Get("versionId") != "staged-version" {
+				t.Errorf("unexpected staged version: %q", request.URL.Query().Get("versionId"))
 			}
 			deleted = true
 			writer.WriteHeader(http.StatusNoContent)
@@ -147,13 +163,14 @@ func TestProcessStreamsPublishesDeletesAndCallsCompletion(t *testing.T) {
 		JobID:         jobID,
 		Bucket:        "private-bucket",
 		Files: []uploadFile{{
-			Role:        "master",
-			ObjectKey:   objectKey,
-			DiskPath:    diskPath,
-			ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-			SHA256:      hex.EncodeToString(digest[:]),
-			Generation:  generation,
-			Publish:     true,
+			Role:          "master",
+			ObjectKey:     objectKey,
+			ObjectVersion: "staged-version",
+			DiskPath:      diskPath,
+			ContentType:   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			SHA256:        hex.EncodeToString(digest[:]),
+			Generation:    generation,
+			Publish:       true,
 		}},
 		Callback: map[string]any{"kind": "event_created"},
 	}
@@ -163,6 +180,9 @@ func TestProcessStreamsPublishesDeletesAndCallsCompletion(t *testing.T) {
 	}
 	if !deleted {
 		t.Fatal("staged object was not deleted")
+	}
+	if !previousGenerationDeleted {
+		t.Fatal("previous generation version was not deleted")
 	}
 	if !completionPayload.Success || completionPayload.PublicURLs["master"] != "https://disk.example/game" {
 		t.Fatalf("unexpected completion payload: %#v", completionPayload)
@@ -181,6 +201,98 @@ func TestObjectURLKeepsObjectKeySegments(t *testing.T) {
 	}
 }
 
+func TestFailedCallbackJobDeletesItsExactStagedVersion(t *testing.T) {
+	jobID := "12345678-1234-1234-1234-123456789abc"
+	diskPath := "disk:/larp-bot/events/game.xlsx"
+	objectKey := stagingPrefix + jobID + "/master.xlsx"
+	lockCount := 0
+	completionSeen := false
+	stagedDeleted := false
+	var completionPayload completion
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/metadata":
+			io.WriteString(writer, `{"access_token":"iam-token"}`)
+		case request.URL.Path == "/token":
+			io.WriteString(writer, `{"access_token":"identity-token"}`)
+		case request.URL.Path == "/config":
+			io.WriteString(writer, `{"values":{"YANDEX_DISK_TOKEN":"disk-token"}}`)
+		case request.Method == http.MethodPut && request.URL.Path == "/private-bucket/"+lockKey(diskPath):
+			lockCount++
+			writer.Header().Set("X-Amz-Version-Id", fmt.Sprintf("lock-version-%d", lockCount))
+			writer.WriteHeader(http.StatusOK)
+		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+lockKey(diskPath):
+			writer.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodGet && request.URL.Path == "/private-bucket/"+stateKey(diskPath):
+			http.Error(writer, "state unavailable", http.StatusServiceUnavailable)
+		case request.Method == http.MethodPost && request.URL.Path == "/completion":
+			completionSeen = true
+			if err := json.NewDecoder(request.Body).Decode(&completionPayload); err != nil {
+				t.Fatal(err)
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+objectKey:
+			if !completionSeen {
+				t.Error("staged object was deleted before the failure callback was accepted")
+			}
+			if request.URL.Query().Get("versionId") != "staged-version" {
+				t.Errorf("unexpected staged version: %q", request.URL.Query().Get("versionId"))
+			}
+			stagedDeleted = true
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := uploaderService{
+		env: environment{
+			Bucket:                  "private-bucket",
+			RuntimeConfigURL:        server.URL + "/config",
+			RuntimeConfigAudience:   "https://config.example",
+			RuntimeServiceAccountID: "service-account-id",
+			CompletionFunctionURL:   server.URL + "/completion",
+		},
+		client:     server.Client(),
+		metadata:   server.URL + "/metadata",
+		tokenURL:   server.URL + "/token",
+		diskAPI:    server.URL + "/disk",
+		storageURL: server.URL,
+	}
+	job := uploadJob{
+		SchemaVersion: 1,
+		JobID:         jobID,
+		Bucket:        "private-bucket",
+		Files: []uploadFile{{
+			Role:          "master",
+			ObjectKey:     objectKey,
+			ObjectVersion: "staged-version",
+			DiskPath:      diskPath,
+			ContentType:   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			SHA256:        strings.Repeat("a", 64),
+			Generation:    "00000000000000000001-job",
+			Publish:       true,
+		}},
+		Callback: map[string]any{"kind": "event_created"},
+	}
+
+	if err := service.process(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if lockCount != 3 {
+		t.Fatalf("upload attempts = %d, want 3", lockCount)
+	}
+	if !completionSeen || completionPayload.Success {
+		t.Fatalf("unexpected completion payload: %#v", completionPayload)
+	}
+	if !stagedDeleted {
+		t.Fatal("failed job left its staged object behind")
+	}
+}
+
 func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
 	jobID := "12345678-1234-1234-1234-123456789abc"
 	diskPath := "disk:/larp-bot/events/game.xlsx"
@@ -191,6 +303,7 @@ func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
 		switch request.Method {
 		case http.MethodGet:
 			writer.Header().Set("ETag", `"old-lock-etag"`)
+			writer.Header().Set("X-Amz-Version-Id", "stale-lock-version")
 			io.WriteString(writer, oldGeneration)
 		case http.MethodPut:
 			putSeen = true
@@ -201,7 +314,13 @@ func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
 			if string(body) != newGeneration {
 				t.Errorf("unexpected takeover generation: %q", body)
 			}
+			writer.Header().Set("X-Amz-Version-Id", "new-lock-version")
 			writer.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			if request.URL.Query().Get("versionId") != "stale-lock-version" {
+				t.Errorf("unexpected deleted stale version: %q", request.URL.Query().Get("versionId"))
+			}
+			writer.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected method: %s", request.Method)
 		}
@@ -209,7 +328,7 @@ func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
 	defer server.Close()
 	service := uploaderService{client: server.Client(), storageURL: server.URL}
 
-	takenOver, err := service.takeOverStaleDestinationLock(
+	versionID, takenOver, err := service.takeOverStaleDestinationLock(
 		context.Background(),
 		"private-bucket",
 		uploadFile{DiskPath: diskPath, Generation: newGeneration},
@@ -221,5 +340,8 @@ func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
 	}
 	if !takenOver || !putSeen {
 		t.Fatal("stale lock was not taken over")
+	}
+	if versionID != "new-lock-version" {
+		t.Fatalf("unexpected new lock version: %q", versionID)
 	}
 }
