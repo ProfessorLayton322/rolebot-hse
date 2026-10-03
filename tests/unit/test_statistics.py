@@ -800,6 +800,107 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
         await service.apply(retry.model_copy(update={"operation_id": str(uuid4())}))
 
 
+async def test_game_addition_includes_only_non_admin_chat_profiles_that_are_not_masters(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    chat_id = -1001234567890
+    event.telegram_chat_id = chat_id
+    engine, users, publisher, registrations = await engine_setup(disk_store, event, admin=True)
+    telegram_profiles = {
+        2: TelegramUser(tg_id=2, full_name="Ручной Игрок"),
+        3: TelegramUser(tg_id=3, full_name="Админ Чата"),
+        4: TelegramUser(tg_id=4, full_name="Ушедший Игрок"),
+        5: TelegramUser(tg_id=5, full_name="Прямой Мастер"),
+        6: TelegramUser(
+            tg_id=6,
+            full_name="Связанный Мастер",
+            linked_vk_id=60,
+            telegram_handle="linked_master",
+        ),
+        7: TelegramUser(tg_id=7, full_name="Ограниченный Игрок"),
+        8: TelegramUser(tg_id=8, full_name="Выбывший Игрок"),
+        9: TelegramUser(tg_id=9, full_name="Заявленный Игрок"),
+    }
+    for profile in telegram_profiles.values():
+        await users.save(profile)
+    await users.save(VkUser(vk_id=60, full_name="Связанный Мастер", telegram_handle="linked_master"))
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.TELEGRAM, platform_user_id=5),
+    )
+    await engine.events.add_leader(
+        event.event_id,
+        BotIdentity(platform=Platform.VK, platform_user_id=60),
+    )
+    confirmed = Registration(
+        event_id=event.event_id,
+        participant_key=engine.registrations.key(Platform.TELEGRAM, 9, event.event_id),
+        display_name="Заявленный Игрок",
+        attendance_status=AttendanceStatus.CONFIRMED,
+        wish_play="Без пожеланий",
+    )
+    await registrations.import_missing([confirmed])
+
+    current_event = await engine.events.get(event.event_id)
+    assert current_event is not None
+    await engine.administration.catalog.refresh(current_event)
+    await engine.administration.create_pass_table(event.event_id)
+    files_before = dict(disk_store.files)
+    registrations_before = await registrations.list_for_event(event.event_id)
+
+    memberships = {
+        1: {"status": "creator"},
+        2: {"status": "member"},
+        3: {"status": "administrator"},
+        4: {"status": "left"},
+        5: {"status": "member"},
+        6: {"status": "member"},
+        7: {"status": "restricted", "is_member": True},
+        8: {"status": "restricted", "is_member": False},
+        9: {"status": "administrator"},
+    }
+    telegram = AsyncMock()
+
+    async def get_chat_member(*, chat_id: int, user_id: int, request_id: str) -> dict[str, object] | None:
+        assert chat_id == event.telegram_chat_id
+        assert request_id.endswith(f":statistics-chat-member:{user_id}")
+        return memberships.get(user_id)
+
+    telegram.get_chat_member.side_effect = get_chat_member
+    drive = MemoryGoogleDrive(template(), master_template())
+    service = StatisticsService(
+        GoogleDriveStatisticsRepository(drive, "stats-folder"),
+        GoogleDriveStatisticsRepository.masters(drive, "stats-folder"),
+        engine.admins,
+        engine.administration,
+        engine.registrations,
+        season_year=lambda: 2026,
+        telegram_chat=telegram,
+    )
+
+    await service.add_game(event.event_id, "statistics-operation")
+
+    player_sheet = sheet(drive.content)
+    names = {player_sheet[f"A{row}"].value for row in range(2, player_sheet.max_row + 1)}
+    assert {"Ручной Игрок", "Ограниченный Игрок", "Заявленный Игрок"} <= names
+    assert (
+        not {
+            "Админ Чата",
+            "Ушедший Игрок",
+            "Прямой Мастер",
+            "Связанный Мастер",
+            "Выбывший Игрок",
+        }
+        & names
+    )
+    assert {call.kwargs["user_id"] for call in telegram.get_chat_member.await_args_list} == set(range(1, 10))
+    assert await registrations.list_for_event(event.event_id) == registrations_before
+    assert disk_store.files == files_before
+    profile_updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
+    assert [(command.platform, command.platform_user_id) for command in profile_updates] == [(Platform.TELEGRAM, 9)]
+
+
 async def test_statistics_stages_both_workbooks_before_replacing_either(event: Event) -> None:
     engine, _users, _publisher, _registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
     drive = MemoryGoogleDrive(template(), b"not a workbook")
