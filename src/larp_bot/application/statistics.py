@@ -27,8 +27,8 @@ from larp_bot.domain.models import (
 )
 from larp_bot.domain.security import participant_key
 
-from .identity import identities_for_local_user
-from .ports import AdminConfigProvider
+from .identity import global_identities, identities_for_local_user
+from .ports import AdminConfigProvider, TelegramChatGateway
 from .services import DomainError, EventAdministrationService, RegistrationService
 
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -48,6 +48,7 @@ class StatisticsService:
         administration: EventAdministrationService,
         registrations: RegistrationService,
         season_year: Callable[[], int] = current_season_year,
+        telegram_chat: TelegramChatGateway | None = None,
     ) -> None:
         self.repository = repository
         self.master_repository = master_repository
@@ -55,6 +56,7 @@ class StatisticsService:
         self.administration = administration
         self.registrations = registrations
         self.season_year = season_year
+        self.telegram_chat = telegram_chat
 
     @staticmethod
     def _identity(user: User) -> tuple[Platform, int]:
@@ -115,6 +117,55 @@ class StatisticsService:
         )
         return "Профиль синхронизирован"
 
+    async def _manual_telegram_players(
+        self,
+        *,
+        chat_id: int,
+        leaders: set[tuple[Platform, int]],
+        users: list[User],
+        operation_id: str,
+    ) -> list[str]:
+        telegram_chat = self.telegram_chat
+        if telegram_chat is None:
+            raise RuntimeError("Telegram chat gateway is not configured")
+
+        telegram_users = sorted(
+            (user for user in users if isinstance(user, TelegramUser)),
+            key=lambda user: user.tg_id,
+        )
+        semaphore = asyncio.Semaphore(8)
+
+        async def inspect(user: TelegramUser) -> tuple[str | None, int | None]:
+            async with semaphore:
+                member = await telegram_chat.get_chat_member(
+                    chat_id=chat_id,
+                    user_id=user.tg_id,
+                    request_id=f"{operation_id}:statistics-chat-member:{user.tg_id}",
+                )
+                if member is None:
+                    return None, None
+                status = member.get("status")
+                is_non_admin_member = status == "member" or (status == "restricted" and member.get("is_member") is True)
+                if not is_non_admin_member:
+                    return None, None
+                identities = await global_identities(self.administration.users, user)
+                if any((identity.platform, identity.platform_user_id) in leaders for identity in identities):
+                    return None, None
+                if user.full_name is None:
+                    return None, user.tg_id
+                return surname_and_name(user.full_name), None
+
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(inspect(user)) for user in telegram_users]
+        results = [task.result() for task in tasks]
+        incomplete = [user_id for _, user_id in results if user_id is not None]
+        if incomplete:
+            raise DomainError(
+                "У участников Telegram-чата не заполнены фамилия и имя: "
+                + ", ".join(str(user_id) for user_id in incomplete[:5])
+            )
+        return [name for name, _ in results if name is not None]
+
     async def apply(self, command: OrderedRegistrationCommand) -> str:
         identities = await identities_for_local_user(
             self.administration.users,
@@ -158,6 +209,16 @@ class StatisticsService:
         players = [
             surname_and_name(r.display_name) for r in registrations if r.attendance_status is AttendanceStatus.CONFIRMED
         ]
+        leader_identities = {(leader.platform, leader.platform_user_id) for leader in leaders}
+        if event.telegram_chat_id is not None:
+            players.extend(
+                await self._manual_telegram_players(
+                    chat_id=event.telegram_chat_id,
+                    leaders=leader_identities,
+                    users=list(users),
+                    operation_id=operation_id,
+                )
+            )
         users_by_identity = {self._identity(user): user for user in users}
         masters: list[str] = []
         for leader in leaders:
