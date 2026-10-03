@@ -141,11 +141,11 @@ def test_scheduled_registration_notifications_use_an_isolated_go_timer_function(
     assert 'entrypoint         = "index.Handler"' in notifier
     assert re.search(r"memory\s+= 128", notifier)
     assert "local.registration_notifier_package_hash" in notifier
-    assert 'cron_expression = "*/5 * * * ? *"' in triggers
+    assert 'cron_expression = "0 * * * ? *"' in triggers
     assert "yandex_function.registration_notifier.id" in triggers
     assert "registration_notifier.py" not in python_build
     assert 'source_dir="${repo_dir}/functions/registration_notifier"' in go_build
-    assert "invocationInterval = 5 * time.Minute" in service
+    assert "dispatchWindow = 5 * time.Minute" in service
     assert "instant.Before(cutoff)" in service
     assert "registration_open_at < $due_before" in repository
     assert "SerializableReadWriteTxControl()" not in repository

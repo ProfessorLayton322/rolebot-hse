@@ -69,6 +69,7 @@ from .deadlines import (
     next_night_03,
     next_saturday_game_date,
     parse_confirmation_deadline,
+    parse_scheduled_action_time,
     tuesday_before_game_18,
 )
 from .identity import global_identities, global_users, local_identity
@@ -126,6 +127,7 @@ EDIT_GAME = "Изменить игру"
 SEND_CONFIRMATION_REMINDER = "🔔 Напомнить о подтверждении"
 MANAGE_NOTIFICATIONS = "Уведомления"
 MANAGE_SCHEDULED_EVENTS = "Запланированные события"
+SCHEDULED_TIME_INVALID = "Некорректная дата и время. Минуты должны быть 00. Попробуйте ещё раз."
 SEND_CONFIRMED_LINK = "Отправить подтвержденным ссылку на чат"
 SEND_CONFIRMED_NOTIFICATION = "Отправить подтвержденным сообщение"
 SEND_ALL_PLAYERS_NOTIFICATION = "Уведомить всех игроков"
@@ -641,13 +643,13 @@ def _registration_schedule_response(
     elif past:
         prefix = "Время открытия должно быть строго позже текущего московского времени.\n\n"
     elif invalid:
-        prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n"
+        prefix = f"{SCHEDULED_TIME_INVALID}\n\n"
     else:
         prefix = ""
     return BotResponse(
         text=(
             f"{prefix}Введите время публикации строго в формате DD.MM.YY HH:MM "
-            f"или нажмите «{NEAREST_FRIDAY}». Время указывается по Москве."
+            f"или нажмите «{NEAREST_FRIDAY}». Минуты должны быть 00. Время указывается по Москве."
         ),
         buttons=[
             Button(label=NEAREST_FRIDAY, value="create:schedule:nearest-friday"),
@@ -676,13 +678,14 @@ def _scheduled_close_response(
     elif past:
         prefix = "Закрытие должно быть запланировано на будущее время.\n\n"
     elif invalid:
-        prefix = "Некорректная дата и время. Попробуйте ещё раз.\n\n"
+        prefix = f"{SCHEDULED_TIME_INVALID}\n\n"
     else:
         prefix = ""
     return BotResponse(
         text=(
             f"{prefix}{SCHEDULE_CLOSE_QUESTION}\n\n"
-            "Введите время строго в формате DD.MM.YY HH:MM. Время указывается по Москве."
+            "Введите время строго в формате DD.MM.YY HH:MM. Минуты должны быть 00. "
+            "Время указывается по Москве."
         ),
         buttons=[
             Button(label=NEXT_NIGHT_03, value=next_night_value),
@@ -705,7 +708,7 @@ def _scheduled_confirmation_time_response(
     return BotResponse(
         text=(
             f"{prefix}Введите время открытия подтверждения строго в формате DD.MM.YY HH:MM{shortcut}. "
-            "Время указывается по Москве."
+            "Минуты должны быть 00. Время указывается по Москве."
         ),
         buttons=buttons,
     )
@@ -3080,7 +3083,7 @@ class ConversationEngine:
             registration_open_at = closest_friday_18()
         else:
             try:
-                registration_open_at = parse_confirmation_deadline(value)
+                registration_open_at = parse_scheduled_action_time(value)
             except ValueError:
                 return _registration_schedule_response(invalid=True)
             if registration_open_at <= datetime.now(MOSCOW_TIMEZONE):
@@ -3121,7 +3124,7 @@ class ConversationEngine:
                 opens_at = tuesday_before_game_18(date.fromisoformat(str(context["game_date"])))
             else:
                 try:
-                    opens_at = parse_confirmation_deadline(value)
+                    opens_at = parse_scheduled_action_time(value)
                 except ValueError:
                     return _scheduled_confirmation_time_response(
                         back=Button(
@@ -3129,7 +3132,7 @@ class ConversationEngine:
                             value="create:confirmation:no",
                         ),
                         tuesday_value="create:confirmation:tuesday",
-                        invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                        invalid=SCHEDULED_TIME_INVALID,
                     )
             now = datetime.now(MOSCOW_TIMEZONE)
             registration_open_at = (
@@ -3920,7 +3923,7 @@ class ConversationEngine:
                 scheduled_close_at = next_night_03(game_date)
             else:
                 try:
-                    scheduled_close_at = parse_confirmation_deadline(value)
+                    scheduled_close_at = parse_scheduled_action_time(value)
                 except ValueError:
                     return _scheduled_close_response(invalid=True)
             if scheduled_close_at is not None and scheduled_close_at.date() <= game_date:
@@ -3951,11 +3954,11 @@ class ConversationEngine:
                 await self._clear(user)
                 return BotResponse(text="Игра не найдена.")
             try:
-                opens_at = parse_confirmation_deadline(value)
+                opens_at = parse_scheduled_action_time(value)
             except ValueError:
                 return self._registration_management_prompt(
                     event,
-                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                    invalid=SCHEDULED_TIME_INVALID,
                 )
             if opens_at <= datetime.now(MOSCOW_TIMEZONE):
                 return self._registration_management_prompt(
@@ -3991,11 +3994,11 @@ class ConversationEngine:
                 await self._clear(user)
                 return BotResponse(text="Игра не найдена.")
             try:
-                opens_at = parse_confirmation_deadline(value)
+                opens_at = parse_scheduled_action_time(value)
             except ValueError:
                 return self._confirmation_management_prompt(
                     event,
-                    invalid="Некорректная дата и время. Попробуйте ещё раз.",
+                    invalid=SCHEDULED_TIME_INVALID,
                 )
             if opens_at <= datetime.now(MOSCOW_TIMEZONE):
                 return self._confirmation_management_prompt(
@@ -4067,7 +4070,7 @@ class ConversationEngine:
                 await self._clear(user)
                 return BotResponse(text="Игра не найдена.")
             try:
-                closes_at = parse_confirmation_deadline(value)
+                closes_at = parse_scheduled_action_time(value)
             except ValueError:
                 return _scheduled_close_response(
                     invalid=True,
@@ -5932,7 +5935,7 @@ class ConversationEngine:
         return BotResponse(
             text=(
                 f"{prefix}Введите новое время открытия регистрации строго в формате DD.MM.YY HH:MM. "
-                "Время указывается по Москве."
+                "Минуты должны быть 00. Время указывается по Москве."
             ),
             buttons=buttons,
         )

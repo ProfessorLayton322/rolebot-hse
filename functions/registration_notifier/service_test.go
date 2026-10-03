@@ -129,18 +129,18 @@ func timePointer(value time.Time) *time.Time {
 	return &value
 }
 
-func TestNextInvocationUsesThreeMinuteWallClockBoundaries(t *testing.T) {
+func TestDispatchCutoffIsFiveMinutesAfterCurrentTime(t *testing.T) {
 	tests := []struct {
 		now  time.Time
 		want time.Time
 	}{
 		{
 			now:  time.Date(2026, 10, 1, 12, 0, 4, 0, time.UTC),
-			want: time.Date(2026, 10, 1, 12, 5, 0, 0, time.UTC),
+			want: time.Date(2026, 10, 1, 12, 5, 4, 0, time.UTC),
 		},
 		{
 			now:  time.Date(2026, 10, 1, 12, 55, 59, 0, time.UTC),
-			want: time.Date(2026, 10, 1, 13, 0, 0, 0, time.UTC),
+			want: time.Date(2026, 10, 1, 13, 0, 59, 0, time.UTC),
 		},
 		{
 			now:  time.Date(2026, 10, 1, 13, 0, 0, 0, time.UTC),
@@ -148,19 +148,19 @@ func TestNextInvocationUsesThreeMinuteWallClockBoundaries(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		if got := nextInvocation(test.now); !got.Equal(test.want) {
-			t.Fatalf("nextInvocation(%s) = %s, want %s", test.now, got, test.want)
+		if got := dispatchCutoff(test.now); !got.Equal(test.want) {
+			t.Fatalf("dispatchCutoff(%s) = %s, want %s", test.now, got, test.want)
 		}
 	}
 }
 
-func TestSchedulerImmediatelyDispatchesEventsBeforeNextInvocation(t *testing.T) {
+func TestSchedulerDispatchesAllActionsWithinFiveMinutesTogether(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 4, 0, time.UTC)
 	registrationAt := time.Date(2026, 10, 1, 12, 4, 0, 0, time.UTC)
 	confirmationAt := time.Date(2026, 10, 1, 12, 4, 30, 0, time.UTC)
 	deadline := confirmationAt.Add(24 * time.Hour)
-	closingAt := time.Date(2026, 10, 1, 12, 4, 59, 999999000, time.UTC)
-	boundary := time.Date(2026, 10, 1, 12, 5, 0, 0, time.UTC)
+	closingAt := time.Date(2026, 10, 1, 12, 5, 3, 999999000, time.UTC)
+	boundary := time.Date(2026, 10, 1, 12, 5, 4, 0, time.UTC)
 	repository := &fakeEventRepository{events: []plannedEvent{
 		{
 			EventID:                "registration",
@@ -269,7 +269,7 @@ func TestSchedulerCompletesEveryLegacyRegistrationBeforeSendingCurrentOpenings(t
 		t.Fatalf("unexpected notifications: %#v", notifier.sent)
 	}
 
-	repeated, err := service.run(context.Background(), now.Add(invocationInterval))
+	repeated, err := service.run(context.Background(), now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

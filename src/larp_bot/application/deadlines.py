@@ -21,6 +21,13 @@ def parse_confirmation_deadline(value: str) -> datetime:
     return datetime.strptime(candidate, DEADLINE_FORMAT).replace(tzinfo=MOSCOW_TIMEZONE)
 
 
+def parse_scheduled_action_time(value: str) -> datetime:
+    scheduled_at = parse_confirmation_deadline(value)
+    if scheduled_at.minute != 0:
+        raise ValueError("scheduled action minutes must be zero")
+    return scheduled_at
+
+
 def format_confirmation_deadline(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("deadline must include a timezone")

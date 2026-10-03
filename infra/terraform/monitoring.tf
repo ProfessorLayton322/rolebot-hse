@@ -108,7 +108,7 @@ resource "yandex_monitoring_dashboard" "ydb_operations" {
     chart {
       chart_id    = "ydb-sql-execution-rate"
       title       = "YDB SQL execution rate"
-      description = "ExecuteDataQuery calls per second. The scheduled lifecycle check normally produces one isolated call every five minutes."
+      description = "ExecuteDataQuery calls per second. The scheduled lifecycle check normally produces one isolated call every hour."
       queries {
         downsampling {
           disabled = true
