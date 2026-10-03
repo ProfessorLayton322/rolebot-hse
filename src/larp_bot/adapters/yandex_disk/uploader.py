@@ -64,9 +64,13 @@ class StagedYandexDiskUploader:
             },
         )
         response.raise_for_status()
+        object_version = response.headers.get("X-Amz-Version-Id")
+        if not object_version:
+            raise RuntimeError("Object Storage did not return the staged object version")
         return {
             "role": upload.role,
             "object_key": object_key,
+            "object_version": object_version,
             "disk_path": upload.disk_path,
             "content_type": upload.content_type,
             "sha256": digest,
@@ -74,6 +78,18 @@ class StagedYandexDiskUploader:
             "overwrite": upload.overwrite,
             "publish": upload.publish,
         }
+
+    async def _delete_staged(self, files: Sequence[dict[str, object]]) -> None:
+        async def delete(file: dict[str, object]) -> None:
+            response = await self._client.delete(
+                self._object_url(str(file["object_key"])),
+                params={"versionId": str(file["object_version"])},
+                headers=self._authorization(),
+            )
+            if response.status_code != 404:
+                response.raise_for_status()
+
+        await asyncio.gather(*(delete(file) for file in files), return_exceptions=True)
 
     async def submit(
         self,
@@ -89,7 +105,15 @@ class StagedYandexDiskUploader:
             raise ValueError("upload roles must be unique within a job")
         job_id = str(uuid4())
         generation = f"{time.time_ns():020d}-{job_id}"
-        staged = await asyncio.gather(*(self._stage(upload, job_id=job_id, generation=generation) for upload in files))
+        stage_results = await asyncio.gather(
+            *(self._stage(upload, job_id=job_id, generation=generation) for upload in files),
+            return_exceptions=True,
+        )
+        staged = [result for result in stage_results if isinstance(result, dict)]
+        stage_error = next((result for result in stage_results if isinstance(result, BaseException)), None)
+        if stage_error is not None:
+            await self._delete_staged(staged)
+            raise stage_error
         body = json.dumps(
             {
                 "schema_version": 1,
@@ -102,12 +126,22 @@ class StagedYandexDiskUploader:
             separators=(",", ":"),
         ).encode()
         if before_invoke is not None:
-            await before_invoke()
-        response = await self._client.post(
-            self.function_url,
-            content=body,
-            headers=self._authorization() | {"Content-Type": "application/json"},
-        )
+            try:
+                await before_invoke()
+            except BaseException:
+                await self._delete_staged(staged)
+                raise
+        try:
+            response = await self._client.post(
+                self.function_url,
+                content=body,
+                headers=self._authorization() | {"Content-Type": "application/json"},
+            )
+        except BaseException:
+            # The request may have reached the asynchronous invocation service.
+            # Keep the staged versions for the uploader or the lifecycle backstop.
+            raise
         if response.status_code != 202:
+            await self._delete_staged(staged)
             response.raise_for_status()
             raise RuntimeError(f"asynchronous uploader returned HTTP {response.status_code}")

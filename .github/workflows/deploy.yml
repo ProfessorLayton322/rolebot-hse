@@ -96,6 +96,8 @@ jobs:
           terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="key=larp-bot/production.tfstate"
           terraform plan -input=false -lock-timeout=5m -out=production.tfplan
           terraform apply -input=false -lock-timeout=5m production.tfplan
+      - name: Remove obsolete Object Storage versions
+        run: python scripts/cleanup_object_storage.py --bucket "${{ vars.TF_STATE_BUCKET }}"
       - name: Read Terraform outputs
         id: outputs
         working-directory: infra/terraform
