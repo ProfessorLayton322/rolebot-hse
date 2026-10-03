@@ -12,6 +12,7 @@ from larp_bot.application.deadlines import (
     next_night_03,
     next_saturday_game_date,
     parse_confirmation_deadline,
+    parse_scheduled_action_time,
     tuesday_before_game_18,
 )
 
@@ -29,6 +30,17 @@ def test_deadline_round_trip_uses_moscow_time() -> None:
     parsed = parse_confirmation_deadline("10.09.26 19:00")
     assert parsed.tzinfo == MOSCOW_TIMEZONE
     assert format_confirmation_deadline(parsed) == "10.09.26 19:00"
+
+
+@pytest.mark.parametrize("value", ["10.09.26 18:20", "10.09.26 03:15"])
+def test_scheduled_action_time_requires_zero_minutes(value: str) -> None:
+    with pytest.raises(ValueError, match="minutes must be zero"):
+        parse_scheduled_action_time(value)
+
+
+@pytest.mark.parametrize("value", ["10.09.26 18:00", "10.09.26 03:00"])
+def test_scheduled_action_time_accepts_whole_hours(value: str) -> None:
+    assert parse_scheduled_action_time(value).minute == 0
 
 
 def test_nearest_thursday_includes_today_and_sets_1900() -> None:

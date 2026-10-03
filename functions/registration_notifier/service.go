@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	invocationInterval = 5 * time.Minute
-	perActionLimit     = 100
+	dispatchWindow = 5 * time.Minute
+	perActionLimit = 100
 )
 
 type plannedEvent struct {
@@ -78,14 +78,14 @@ type runResult struct {
 	ClosingCommandsEnqueued      int `json:"closing_commands_enqueued"`
 }
 
-// nextInvocation returns the next wall-clock boundary selected by the */5
-// timer. Events exactly on that boundary belong to that invocation; events
-// before it are deliberately dispatched by the current invocation.
-func nextInvocation(now time.Time) time.Time {
-	return now.UTC().Truncate(invocationInterval).Add(invocationInterval)
+// dispatchCutoff lets the hourly timer dispatch every action scheduled within
+// five minutes of its start. Overdue actions remain eligible so transient
+// failures can be retried instead of permanently skipping lifecycle work.
+func dispatchCutoff(now time.Time) time.Time {
+	return now.UTC().Add(dispatchWindow)
 }
 
-func beforeNextInvocation(instant *time.Time, cutoff time.Time) bool {
+func beforeDispatchCutoff(instant *time.Time, cutoff time.Time) bool {
 	return instant != nil && instant.Before(cutoff)
 }
 
@@ -103,7 +103,7 @@ func (s *scheduler) run(ctx context.Context, now time.Time) (runResult, error) {
 		}
 		result.BacklogEventsCompleted = completed
 	}
-	cutoff := nextInvocation(now)
+	cutoff := dispatchCutoff(now)
 	events, err := s.events.listBefore(ctx, cutoff, 3*perActionLimit)
 	if err != nil {
 		return result, fmt.Errorf("list planned lifecycle events: %w", err)
@@ -207,17 +207,17 @@ func (s *scheduler) run(ctx context.Context, now time.Time) (runResult, error) {
 }
 
 func registrationDue(event plannedEvent, cutoff time.Time) bool {
-	return beforeNextInvocation(event.RegistrationOpenAt, cutoff) &&
+	return beforeDispatchCutoff(event.RegistrationOpenAt, cutoff) &&
 		event.RegistrationCompleted == nil && event.ArchivedAt == nil && event.Status != "CLOSED"
 }
 
 func confirmationDue(event plannedEvent, cutoff time.Time) bool {
-	return beforeNextInvocation(event.ConfirmationOpenAt, cutoff) && event.ConfirmationDeadline != nil &&
+	return beforeDispatchCutoff(event.ConfirmationOpenAt, cutoff) && event.ConfirmationDeadline != nil &&
 		event.ArchivedAt == nil && event.Status == "CREATED"
 }
 
 func closingDue(event plannedEvent, cutoff time.Time) bool {
-	return beforeNextInvocation(event.ScheduledCloseAt, cutoff) && event.ScheduledCloseCompleted == nil &&
+	return beforeDispatchCutoff(event.ScheduledCloseAt, cutoff) && event.ScheduledCloseCompleted == nil &&
 		(event.ArchivedAt == nil || event.ScheduledCloseOperation != nil)
 }
 

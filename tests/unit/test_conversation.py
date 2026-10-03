@@ -3284,7 +3284,7 @@ async def test_admin_can_choose_next_saturday_as_game_date(
     ("closing_value", "callback", "expected"),
     [
         ("create:close:next-night", True, datetime(2040, 11, 16, 3, tzinfo=MOSCOW_TIMEZONE)),
-        ("17.11.40 04:30", False, datetime(2040, 11, 17, 4, 30, tzinfo=MOSCOW_TIMEZONE)),
+        ("17.11.40 04:00", False, datetime(2040, 11, 17, 4, tzinfo=MOSCOW_TIMEZONE)),
     ],
 )
 async def test_creator_can_schedule_automatic_closing_after_the_game_date(
@@ -3303,12 +3303,15 @@ async def test_creator_can_schedule_automatic_closing_after_the_game_date(
     assert close_prompt.text == (
         "Хотите ли вы запланировать закрытие игры? Игра будет закрыта для регистрации, добавлена в статистику "
         "посещений и архивирована сама. Можете запланировать на ночь после игры, либо выбрать удобное вам время\n\n"
-        "Введите время строго в формате DD.MM.YY HH:MM. Время указывается по Москве."
+        "Введите время строго в формате DD.MM.YY HH:MM. Минуты должны быть 00. Время указывается по Москве."
     )
-    same_day = await engine.handle(inbound(4, "15.11.40 23:59"))
+    same_day = await engine.handle(inbound(4, "15.11.40 23:00"))
     assert "строго после даты игры" in same_day.text
     invalid = await engine.handle(inbound(5, "17.11.2040 04:30"))
-    assert "Некорректная дата и время" in invalid.text
+    assert "Минуты должны быть 00" in invalid.text
+
+    non_hour = await engine.handle(inbound(50, "17.11.40 04:30"))
+    assert "Минуты должны быть 00" in non_hour.text
 
     amount = await engine.handle(inbound(6, closing_value, callback=callback))
     assert amount.text == "Введите количество игроков (от 1 до 10000):"
@@ -3340,10 +3343,13 @@ async def test_creator_can_schedule_confirmation_opening_and_deadline(
     assert confirmation_question.text == SCHEDULE_CONFIRMATION_QUESTION
     opening_prompt = await engine.handle(inbound(8, "create:confirmation:yes", callback=True))
     assert "время открытия подтверждения" in opening_prompt.text
+    assert "Минуты должны быть 00" in opening_prompt.text
     assert opening_prompt.buttons[0] == Button(
         label=TUESDAY_BEFORE_GAME_18,
         value="create:confirmation:tuesday",
     )
+    non_hour = await engine.handle(inbound(80, "02.10.40 18:20"))
+    assert "Минуты должны быть 00" in non_hour.text
     too_early = await engine.handle(inbound(9, "01.10.40 18:00"))
     assert "строго после регистрации" in too_early.text
     deadline_prompt = await engine.handle(inbound(10, opening_prompt.buttons[0].value, callback=True))
@@ -3420,6 +3426,8 @@ async def test_master_can_manage_and_change_all_scheduled_events(
         in close_prompt.buttons
     )
     closing = await engine.handle(inbound(9, "17.11.40 04:30"))
+    assert "Минуты должны быть 00" in closing.text
+    closing = await engine.handle(inbound(90, "17.11.40 04:00"))
     assert "✅ Время закрытия сохранено" in closing.text
 
     stored = await engine.events.get(scheduled.event_id)
@@ -3427,7 +3435,7 @@ async def test_master_can_manage_and_change_all_scheduled_events(
     assert stored.registration_open_at == datetime(2040, 10, 2, 18, tzinfo=MOSCOW_TIMEZONE)
     assert stored.confirmation_open_at == datetime(2040, 11, 13, 18, tzinfo=MOSCOW_TIMEZONE)
     assert stored.confirmation_deadline == datetime(2040, 11, 14, 20, tzinfo=MOSCOW_TIMEZONE)
-    assert stored.scheduled_close_at == datetime(2040, 11, 17, 4, 30, tzinfo=MOSCOW_TIMEZONE)
+    assert stored.scheduled_close_at == datetime(2040, 11, 17, 4, tzinfo=MOSCOW_TIMEZONE)
 
     cleared = await engine.handle(inbound(10, f"ag:schedule-clear-close:{scheduled.event_id}", callback=True))
     assert "✅ Запланированное закрытие отменено" in cleared.text
@@ -3476,6 +3484,8 @@ async def test_privileged_user_can_schedule_registration_with_strict_moscow_time
     ]
     invalid = await engine.handle(inbound(7, "9.09.40 18:00"))
     assert "Некорректная дата и время" in invalid.text
+    non_hour = await engine.handle(inbound(70, "31.12.40 18:20"))
+    assert "Минуты должны быть 00" in non_hour.text
     past = await engine.handle(inbound(8, "01.01.20 18:00"))
     assert "строго позже текущего московского времени" in past.text
     assert [candidate.name for candidate in await engine.events.list_page(limit=10)] == [event.name]

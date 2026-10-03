@@ -78,13 +78,15 @@ their new version is deployed.
 
 ## Recurring lifecycle query
 
-The lifecycle timer intentionally checks for due scheduled actions every five
-minutes. It now issues one combined read per tick, so an idle service produces
-12 `ExecuteDataQuery` calls per hour, or 288 per day. Those calls are completed
-requests, not accumulating operations. A production system-view check after
-the partial deployment showed one call at each timer tick and six rows read per
-call, matching the six current event rows. No overlapping or multiplying timer
-executions were present.
+The lifecycle timer checks for due scheduled actions every hour. Each automatic
+action must be scheduled on a whole hour, and one tick dispatches all actions
+before `now + 5 minutes`; overdue actions remain eligible for retries. It issues
+one combined read per tick, so an idle service produces 24 `ExecuteDataQuery`
+calls per day. Those calls are completed requests, not accumulating operations.
+An earlier production system-view check, when the timer still ran every five
+minutes, showed one call at each timer tick and six rows read per call, matching
+the six event rows at that time. No overlapping or multiplying timer executions
+were present.
 
 During the six hours ending shortly after the deployment, Monitoring recorded
 an estimated 554 SQL executions. Only 71 15-second samples represented the
