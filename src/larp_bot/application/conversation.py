@@ -2016,6 +2016,7 @@ class ConversationEngine:
                     event.game_date,
                     statuses={AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED},
                     exclude_event_id=event.event_id,
+                    conflicts_with=event,
                 )
                 if event.game_date is not None
                 else []
@@ -2081,6 +2082,7 @@ class ConversationEngine:
                     event.game_date,
                     statuses={AttendanceStatus.CONFIRMED},
                     exclude_event_id=event.event_id,
+                    conflicts_with=event,
                 )
                 if event.game_date is not None
                 else []
