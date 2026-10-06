@@ -18,6 +18,7 @@ from larp_bot.application.services import (
     OperationNotAllowed,
     OrderedMutationService,
     RegistrationCatalog,
+    confirmation_times_conflict,
 )
 from larp_bot.domain.models import (
     AttendanceStatus,
@@ -661,6 +662,102 @@ async def test_same_day_confirmation_requires_consent_and_atomically_replaces_re
         }
     finally:
         old_workbook.close()
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name", "expected"),
+    [
+        ("Утро 12:00-13:00", "День 13:00-15:00", False),
+        ("Утро 09:15-10:45", "День 11:00-12:00", False),
+        ("Утро 12:00-13:01", "День 13:00-15:00", True),
+        ("Утро 12:00-14:00", "День 13:00-15:00", True),
+        ("Без времени", "День 13:00-15:00", True),
+        ("Ошибка 24:00-25:00", "День 13:00-15:00", True),
+        ("Назад 15:00-13:00", "День 13:00-15:00", True),
+    ],
+)
+def test_confirmation_time_conflicts_are_extracted_from_event_names(
+    event: Event,
+    first_name: str,
+    second_name: str,
+    expected: bool,
+) -> None:
+    first = event.model_copy(update={"name": first_name})
+    second = event.model_copy(update={"name": second_name})
+
+    assert confirmation_times_conflict(first, second) is expected
+
+
+@pytest.mark.asyncio
+async def test_non_overlapping_same_day_confirmation_keeps_both_games_confirmed(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    secret = "participant-secret"
+    event.game_date = date(2026, 11, 14)
+    event.name = "Утренняя игра 12:00-13:00"
+    other = event.model_copy(
+        update={
+            "event_id": "event-b1",
+            "name": "Дневная игра 13:00-15:00",
+            "disk_resource_path": "disk:/larp-bot/events/event-b1-other.xlsx",
+            "public_registration_url": "https://disk.example/public/other",
+        }
+    )
+    target_key = participant_key(secret, Platform.TELEGRAM, 1, event.event_id)
+    other_key = participant_key(secret, Platform.TELEGRAM, 1, other.event_id)
+    target_registration = Registration(
+        event_id=event.event_id,
+        participant_key=target_key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+    )
+    other_registration = Registration(
+        event_id=other.event_id,
+        participant_key=other_key,
+        display_name="Иван Иванов",
+        wish_play="Без пожеланий",
+        character_wish="Врач",
+        attendance_status=AttendanceStatus.CONFIRMED,
+    )
+    events = MemoryEventRepository([event, other])
+    tables = MemoryRegistrationRepository([target_registration, other_registration])
+    showcase = YandexDiskShowcaseRepository(disk_store)
+    await showcase.create_event_workbook(event.disk_resource_path, [target_registration])
+    await showcase.create_event_workbook(other.disk_resource_path, [other_registration])
+    mutations = OrderedMutationService(
+        events,
+        RegistrationCatalog(events, tables, showcase),
+        participant_secret=secret,
+    )
+
+    with pytest.raises(OperationNotAllowed, match="не пересекаются"):
+        await mutations.apply(
+            command(
+                event,
+                Operation.CONFIRM,
+                CharacterWishPayload(
+                    character_wish="Детектив",
+                    replaced_event_id=other.event_id,
+                ),
+                key=target_key,
+            )
+        )
+    assert await tables.get(other.event_id, other_key) == other_registration
+
+    result = await mutations.apply(
+        command(
+            event,
+            Operation.CONFIRM,
+            CharacterWishPayload(character_wish="Детектив"),
+            key=target_key,
+        )
+    )
+
+    target = await tables.get(event.event_id, target_key)
+    assert target is not None and target.attendance_status is AttendanceStatus.CONFIRMED
+    assert await tables.get(other.event_id, other_key) == other_registration
+    assert result.replaced_event_id is None
 
 
 @pytest.mark.asyncio

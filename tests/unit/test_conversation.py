@@ -870,6 +870,57 @@ async def test_same_day_confirmation_requires_replacement_consent_before_charact
 
 
 @pytest.mark.asyncio
+async def test_non_overlapping_same_day_confirmation_skips_replacement_consent(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    event.game_date = date(2026, 11, 14)
+    event.name = "Утренняя игра 12:00-13:00"
+    other = event.model_copy(
+        update={
+            "event_id": "event-b1",
+            "name": "Дневная игра 13:00-15:00",
+            "disk_resource_path": "disk:/larp-bot/events/event-b1-other.xlsx",
+            "public_registration_url": "https://disk.example/public/other",
+        }
+    )
+    engine, users, publisher, tables = await engine_setup(disk_store, event, other)
+    target_key = engine.registrations.key(Platform.TELEGRAM, 1, event.event_id)
+    other_key = engine.registrations.key(Platform.TELEGRAM, 1, other.event_id)
+    for selected_event, key, operation_id in (
+        (event, target_key, "target-enlist"),
+        (other, other_key, "other-enlist"),
+    ):
+        await tables.enlist(
+            selected_event.event_id,
+            operation_id=operation_id,
+            participant_key=key,
+            display_name="Иван Иванов",
+            wish_play="Без пожеланий",
+        )
+    await tables.confirm(
+        other.event_id,
+        operation_id="other-confirm",
+        participant_key=other_key,
+        character_wish="Врач",
+    )
+
+    wishes = await engine.handle(inbound(1, f"select:confirm:{event.event_id}", callback=True))
+
+    assert "пожелания по персонажу" in wishes.text.casefold()
+    saved = await users.get(Platform.TELEGRAM, 1)
+    assert saved is not None and saved.dialog_state == "CONFIRM_WISH"
+    assert not publisher.commands
+
+    queued = await engine.handle(inbound(2, "Детектив"))
+
+    assert queued.deferred
+    command = publisher.commands[-1]
+    assert command.operation is Operation.CONFIRM
+    assert command.payload == CharacterWishPayload(character_wish="Детектив")
+
+
+@pytest.mark.asyncio
 async def test_overlong_character_wish_is_rejected_without_confirming(
     disk_store: MemoryDiskStore,
     event: Event,

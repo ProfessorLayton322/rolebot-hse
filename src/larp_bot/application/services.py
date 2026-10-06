@@ -98,6 +98,7 @@ _CYRILLIC_TRANSLITERATION = {
 }
 _START_PARAMETER_ALPHABET = string.ascii_letters + string.digits
 _MAX_START_PARAMETER_LENGTH = 64
+_GAME_TIME_PERIOD_RE = re.compile(r"(?<!\d)([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)(?!\d)")
 
 
 class DomainError(RuntimeError):
@@ -122,6 +123,32 @@ def same_day_signup_warning(game_date: date) -> str:
         f"{format_game_date(game_date)}. Вы сможете подтвердить своё участие только "
         "в одной игре, когда решите, в какую именно хотите играть."
     )
+
+
+def _game_time_period(event_name: str) -> tuple[int, int] | None:
+    """Extract a valid same-day time period from an event name as minutes."""
+
+    match = _GAME_TIME_PERIOD_RE.search(event_name)
+    if match is None:
+        return None
+    start_hour, start_minute, end_hour, end_minute = (int(value) for value in match.groups())
+    start = start_hour * 60 + start_minute
+    end = end_hour * 60 + end_minute
+    if end <= start:
+        return None
+    return start, end
+
+
+def confirmation_times_conflict(first: Event, second: Event) -> bool:
+    """Return whether same-day confirmations must remain mutually exclusive."""
+
+    first_period = _game_time_period(first.name)
+    second_period = _game_time_period(second.name)
+    if first_period is None or second_period is None:
+        return True
+    first_start, first_end = first_period
+    second_start, second_end = second_period
+    return max(first_start, second_start) < min(first_end, second_end)
 
 
 @dataclass(frozen=True)
@@ -438,6 +465,7 @@ async def player_registrations_on_date(
     statuses: Collection[AttendanceStatus],
     exclude_event_id: str | None = None,
     identities: Sequence[BotIdentity] | None = None,
+    conflicts_with: Event | None = None,
 ) -> list[tuple[Event, Registration]]:
     """Find a player's active registrations on one game date.
 
@@ -453,7 +481,13 @@ async def player_registrations_on_date(
         page = list(await events.list_page(after=after, archived=False, limit=MAX_EVENT_PAGE_SIZE))
         if not page:
             return matches
-        dated_events = [event for event in page if event.game_date == game_date and event.event_id != exclude_event_id]
+        dated_events = [
+            event
+            for event in page
+            if event.game_date == game_date
+            and event.event_id != exclude_event_id
+            and (conflicts_with is None or confirmation_times_conflict(conflicts_with, event))
+        ]
         local_identities = identities or (BotIdentity(platform=platform, platform_user_id=user_id),)
         registration_groups = await asyncio.gather(
             *(
@@ -607,6 +641,7 @@ class RegistrationService:
         *,
         statuses: Collection[AttendanceStatus],
         exclude_event_id: str | None = None,
+        conflicts_with: Event | None = None,
     ) -> list[tuple[Event, Registration]]:
         identities = await self._identities(platform, user_id)
         return await player_registrations_on_date(
@@ -619,6 +654,7 @@ class RegistrationService:
             statuses=statuses,
             exclude_event_id=exclude_event_id,
             identities=identities,
+            conflicts_with=conflicts_with,
         )
 
     async def registered_games_page(
@@ -3081,6 +3117,7 @@ class OrderedMutationService:
                         statuses={AttendanceStatus.WAITING, AttendanceStatus.CONFIRMED},
                         exclude_event_id=event.event_id,
                         identities=identities,
+                        conflicts_with=event,
                     )
                 )
             buttons = (confirmation_button(event.event_id),) if event.status is EventStatus.CONFIRMATION_OPEN else None
@@ -3145,6 +3182,10 @@ class OrderedMutationService:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
             assert isinstance(command.payload, CharacterWishPayload)
+            already_applied = (
+                registration.last_operation_id == command.operation_id
+                and registration.attendance_status is AttendanceStatus.CONFIRMED
+            )
             replaced_event: Event | None = None
             replaced_registration: Registration | None = None
             replaced_participant_key: str | None = None
@@ -3162,12 +3203,17 @@ class OrderedMutationService:
                     statuses={AttendanceStatus.CONFIRMED},
                     exclude_event_id=event.event_id,
                     identities=identities,
+                    conflicts_with=event,
                 )
                 conflict_ids = {conflict.event_id for conflict, _ in conflicts}
                 if conflict_ids and conflict_ids != {command.payload.replaced_event_id}:
                     raise OperationNotAllowed(
                         "Вы уже подтвердили участие в другой игре этого дня. "
                         "Начните подтверждение заново и подтвердите замену."
+                    )
+                if not conflict_ids and command.payload.replaced_event_id is not None and not already_applied:
+                    raise OperationNotAllowed(
+                        "Игры этого дня больше не пересекаются по времени. Начните подтверждение заново."
                     )
                 if command.payload.replaced_event_id is not None:
                     replaced_event = await self.events.get(command.payload.replaced_event_id)
@@ -3202,10 +3248,6 @@ class OrderedMutationService:
                             command.platform_user_id,
                             replaced_event.event_id,
                         )
-                    already_applied = (
-                        registration.last_operation_id == command.operation_id
-                        and registration.attendance_status is AttendanceStatus.CONFIRMED
-                    )
                     if (
                         replaced_registration is None
                         or replaced_registration.attendance_status is not AttendanceStatus.CONFIRMED
