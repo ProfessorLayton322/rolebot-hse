@@ -160,8 +160,8 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         registration_service,
         telegram_chat=telegram,
     )
-    scheduled_game_closing = ScheduledGameClosingService(events, statistics, transport, publisher)
-    upload_completion = UploadCompletionService(events, users, config, transport)
+    scheduled_game_closing = ScheduledGameClosingService(events, statistics, transport, publisher, administration)
+    upload_completion = UploadCompletionService(events, users, config, transport, administration)
     worker = OrderedWorker(
         consumer,
         mutations,

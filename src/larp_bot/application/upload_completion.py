@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
+from datetime import date
 from typing import Any
 
 from larp_bot.domain.models import BotIdentity, Button, Event, Platform, event_reference, format_game_date
@@ -13,7 +14,9 @@ from .conversation import (
     game_management_button,
 )
 from .deadlines import format_confirmation_deadline
+from .navigation import admin_menu_button
 from .ports import AdminConfigProvider, DeferredTransport, EventRepository, UserRepository
+from .services import EventAdministrationService, daily_pass_table_path
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -37,11 +40,13 @@ class UploadCompletionService:
         users: UserRepository,
         config: AdminConfigProvider,
         transport: DeferredTransport,
+        administration: EventAdministrationService | None = None,
     ) -> None:
         self.events = events
         self.users = users
         self.config = config
         self.transport = transport
+        self.administration = administration
 
     @staticmethod
     def _requester(callback: Mapping[str, Any]) -> tuple[Platform, int, int] | None:
@@ -131,6 +136,8 @@ class UploadCompletionService:
             await self.events.create(event, leaders)
         else:
             event = existing
+        if self.administration is not None:
+            await self.administration.refresh_daily_pass_table(event.game_date)
         requester = self._requester(callback)
         await self._notify_leaders(event, leaders, requester, job_id)
 
@@ -246,6 +253,28 @@ class UploadCompletionService:
             buttons=[game_management_button(event_id)],
         )
 
+    async def _daily_passes(
+        self,
+        callback: Mapping[str, Any],
+        urls: dict[str, str],
+        job_id: str,
+    ) -> None:
+        if set(urls) != {"pass"}:
+            raise ValueError("daily pass completion has unexpected upload results")
+        game_date = date.fromisoformat(str(callback["game_date"]))
+        if callback.get("resource_path") != daily_pass_table_path(game_date):
+            raise ValueError("daily pass completion has an unexpected resource path")
+        if self.administration is not None:
+            # Catch any profile or attendance mutation that landed while the
+            # initially rendered workbook was still being uploaded.
+            await self.administration.refresh_daily_pass_table(game_date)
+        await self._send(
+            callback,
+            operation_id=f"daily-passes:{game_date.isoformat()}:{job_id}",
+            text=f"Таблица пропусков на {format_game_date(game_date)}\n\n{urls['pass']}",
+            buttons=[admin_menu_button()],
+        )
+
     async def handle(self, payload: Mapping[str, Any]) -> None:
         if payload.get("schema_version") != 1:
             raise ValueError("unsupported upload completion schema")
@@ -268,5 +297,7 @@ class UploadCompletionService:
             await self._event_tables(callback, urls, job_id)
         elif kind == "achievement":
             await self._achievement(callback, urls, job_id)
+        elif kind == "daily_passes":
+            await self._daily_passes(callback, urls, job_id)
         else:
             raise ValueError("unknown upload completion kind")

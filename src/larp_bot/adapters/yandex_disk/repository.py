@@ -107,6 +107,8 @@ class WorkbookIntegrityError(RuntimeError):
 class DiskObjectStore(Protocol):
     async def download(self, path: str) -> bytes: ...
 
+    async def exists(self, path: str) -> bool: ...
+
     async def delete(self, path: str) -> None: ...
 
 
@@ -643,6 +645,33 @@ class YandexDiskShowcaseRepository:
             before_invoke=before_invoke,
             role="pass",
         )
+
+    async def upsert_published_pass_table(
+        self,
+        disk_path: str,
+        profiles: Sequence[PassDetails],
+        *,
+        callback: dict[str, object],
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> str | None:
+        content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)
+        # Production uploads are deferred. Always allowing overwrite there also
+        # closes the race between two requests for the same deterministic daily
+        # path. The synchronous adapter can inspect the destination directly.
+        overwrite = self.deferred_uploads or await self.store.exists(disk_path)
+        return await self._submit_one(
+            disk_path,
+            content,
+            content_type=XLSX_MIME_TYPE,
+            overwrite=overwrite,
+            publish=True,
+            callback=callback,
+            before_invoke=before_invoke,
+            role="pass",
+        )
+
+    async def pass_table_exists(self, disk_path: str) -> bool:
+        return await self.store.exists(disk_path)
 
     async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None:
         content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)

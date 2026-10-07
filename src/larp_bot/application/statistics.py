@@ -115,6 +115,10 @@ class StatisticsService:
             command.platform_user_id,
             idempotency_key=f"{command.operation_id}:{Operation.SYNC_PROFILE.value}",
         )
+        await self.administration.refresh_daily_pass_tables_for_user(
+            command.platform,
+            command.platform_user_id,
+        )
         return "Профиль синхронизирован"
 
     async def _manual_telegram_players(

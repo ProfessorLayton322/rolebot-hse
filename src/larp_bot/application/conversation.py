@@ -85,6 +85,7 @@ from .ports import (
 from .services import (
     EventAdministrationService,
     GameOverview,
+    OperationNotAllowed,
     RegistrationService,
     confirmed_notification_text,
     event_master_records,
@@ -141,6 +142,10 @@ REMOVE_WAITING_PLAYERS = "Убрать не подтвердившихся в з
 LEGACY_REMOVE_WAITING_PLAYERS = "Удалить не подтвердившихся"
 CREATE_PASS_TABLE = "🎫 Создать таблицу пропусков"
 LIST_PASS_TABLES = "🔗 Ссылки на таблицы пропусков"
+GET_DAILY_PASSES = "Получить все пропуска за день"
+DAILY_PASSES_ACTION = "admin:passes:daily"
+DAILY_PASSES_DATE_PREFIX = "admin:passes:day:"
+DAILY_PASSES_PAGE_PREFIX = "admin:passes:page:"
 MANAGE_GAMES = "Управление играми"
 ARCHIVED_GAMES = "Архив игр"
 MANAGE_MODERATORS = "Управление ролями"
@@ -253,6 +258,7 @@ ADMIN_ACTIONS = frozenset(
         LEGACY_REMOVE_WAITING_PLAYERS,
         CREATE_PASS_TABLE,
         LIST_PASS_TABLES,
+        DAILY_PASSES_ACTION,
         MANAGE_MODERATORS,
         LEGACY_MANAGE_MODERATORS,
         GRANT_GAMEMASTER,
@@ -2431,17 +2437,105 @@ class ConversationEngine:
         return BotResponse(text="⏳ Отмена принята в обработку.", deferred=True, command_enqueued=True)
 
     async def _admin_menu(self, user: User) -> BotResponse:
-        if not await self._has_admin_access(user):
+        role = await self._privileged_role(user)
+        if role is None or not role.includes(PrivilegedRole.GAMEMASTER):
             return BotResponse(text="Недостаточно прав.")
         labels = [
             "➕ Создать игру",
             MANAGE_GAMES,
             BACK,
         ]
+        if role in {PrivilegedRole.PASS_MANAGER, PrivilegedRole.ADMIN}:
+            labels.insert(-1, GET_DAILY_PASSES)
         if await self._is_admin(user):
             labels.insert(-1, MANAGE_MODERATORS)
             labels.insert(-1, MANAGE_STATISTICS)
-        return BotResponse(text="🛠 Администрирование", buttons=[Button(label=x, value=x) for x in labels])
+        buttons = [
+            Button(label=label, value=DAILY_PASSES_ACTION if label == GET_DAILY_PASSES else label) for label in labels
+        ]
+        return BotResponse(text="🛠 Администрирование", buttons=buttons)
+
+    async def _can_manage_daily_passes(self, user: User) -> bool:
+        return await self._privileged_role(user) in {PrivilegedRole.PASS_MANAGER, PrivilegedRole.ADMIN}
+
+    async def _daily_pass_table(self, user: User, message: InboundMessage, game_date: date) -> BotResponse:
+        if not await self._can_manage_daily_passes(user):
+            return BotResponse(text="Недостаточно прав.")
+        requester = self._identity(user)
+        pending_buttons = [admin_menu_button()]
+        before_invoke = self._upload_pending_callback(
+            user,
+            message,
+            text="⏳ Таблица пропусков создаётся. Бот пришлёт ссылку, когда загрузка завершится.",
+            buttons=pending_buttons,
+            operation=f"daily-passes:{game_date.isoformat()}",
+        )
+        try:
+            export = await self.administration.create_daily_pass_table(
+                game_date,
+                requester=requester,
+                reply_user_id=message.chat_id or message.peer_id or requester.platform_user_id,
+                before_invoke=before_invoke,
+            )
+        except OperationNotAllowed:
+            return BotResponse(
+                text="На выбранную дату больше нет активных неархивированных игр.",
+                buttons=pending_buttons,
+            )
+        if export.public_url is None:
+            if before_invoke is not None:
+                return BotResponse(
+                    text="",
+                    buttons=pending_buttons,
+                    deferred=requester.platform is Platform.TELEGRAM,
+                    silent=True,
+                )
+            return BotResponse(
+                text="⏳ Таблица пропусков создаётся. Бот пришлёт ссылку, когда загрузка завершится.",
+                buttons=pending_buttons,
+                deferred=True,
+            )
+        return BotResponse(
+            text=(
+                f"Таблица пропусков на {format_game_date(game_date)}\n"
+                f"Уникальных пользователей: {export.row_count}.\n\n{export.public_url}"
+            ),
+            buttons=pending_buttons,
+        )
+
+    async def _daily_passes_start(self, user: User, message: InboundMessage, *, page: int = 0) -> BotResponse:
+        if not await self._can_manage_daily_passes(user):
+            return BotResponse(text="Недостаточно прав.")
+        game_dates = await self.administration.active_game_dates()
+        if not game_dates:
+            return BotResponse(
+                text="Сейчас нет активных неархивированных игр с указанной датой.",
+                buttons=[admin_menu_button()],
+            )
+        if len(game_dates) == 1:
+            return await self._daily_pass_table(user, message, game_dates[0])
+        page_count = (len(game_dates) + PAGE_SIZE - 1) // PAGE_SIZE
+        page = min(max(page, 0), page_count - 1)
+        visible_dates = game_dates[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+        navigation = []
+        if page > 0:
+            navigation.append(Button(label=PAGE_BACK, value=f"{DAILY_PASSES_PAGE_PREFIX}{page - 1}"))
+        if page + 1 < page_count:
+            navigation.append(Button(label=PAGE_FORWARD, value=f"{DAILY_PASSES_PAGE_PREFIX}{page + 1}"))
+        return BotResponse(
+            text="Выберите день, за который нужно получить все пропуска:",
+            buttons=[
+                *(
+                    Button(
+                        label=format_game_date(game_date),
+                        value=f"{DAILY_PASSES_DATE_PREFIX}{game_date.isoformat()}",
+                    )
+                    for game_date in visible_dates
+                ),
+                *navigation,
+                admin_menu_button(),
+            ],
+        )
 
     @staticmethod
     def _identity(user: User) -> BotIdentity:
@@ -6493,6 +6587,20 @@ class ConversationEngine:
     async def _admin_start(self, user: User, message: InboundMessage, value: str) -> BotResponse:
         if not await self._has_admin_access(user):
             return BotResponse(text="Недостаточно прав.")
+        if value == DAILY_PASSES_ACTION:
+            return await self._daily_passes_start(user, message)
+        if value.startswith(DAILY_PASSES_PAGE_PREFIX):
+            try:
+                page = int(value.removeprefix(DAILY_PASSES_PAGE_PREFIX))
+            except ValueError:
+                page = 0
+            return await self._daily_passes_start(user, message, page=page)
+        if value.startswith(DAILY_PASSES_DATE_PREFIX):
+            try:
+                game_date = date.fromisoformat(value.removeprefix(DAILY_PASSES_DATE_PREFIX))
+            except ValueError:
+                return BotResponse(text="Некорректная дата.", buttons=[admin_menu_button()])
+            return await self._daily_pass_table(user, message, game_date)
         if value == MANAGE_STATISTICS:
             return await self._statistics_menu(user)
         if value == STATS_LINKS:
@@ -6570,6 +6678,10 @@ class ConversationEngine:
 
     # Admin submenu commands arrive while the user is IDLE, so extend the root dispatcher.
     async def dispatch_idle_admin(self, user: User, message: InboundMessage, value: str) -> BotResponse | None:
-        if value in ADMIN_ACTIONS or value in LEGACY_STATUS_ACTIONS:
+        if (
+            value in ADMIN_ACTIONS
+            or value in LEGACY_STATUS_ACTIONS
+            or value.startswith((DAILY_PASSES_DATE_PREFIX, DAILY_PASSES_PAGE_PREFIX))
+        ):
             return await self._admin_start(user, message, value)
         return None

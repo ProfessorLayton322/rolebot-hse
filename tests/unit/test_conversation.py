@@ -16,7 +16,9 @@ from larp_bot.adapters.memory import (
     MemoryVkUserIdResolver,
     StaticAdminProvider,
 )
+from larp_bot.adapters.telegram import telegram_inline_payload
 from larp_bot.adapters.telegram.callbacks import decode_callback, encode_callback
+from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress
 from larp_bot.adapters.yandex_disk.repository import DiskUpload, YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADD_EVENT_LEADER,
@@ -40,6 +42,8 @@ from larp_bot.application.conversation import (
     CREATE_WITHOUT_MASTER,
     CREATION_MASTER_QUESTION,
     CYRILLIC_FULL_NAME_PROMPT,
+    DAILY_PASSES_ACTION,
+    DAILY_PASSES_DATE_PREFIX,
     DELETE_GAME,
     EDIT_GAME,
     EDIT_PROFILE,
@@ -52,6 +56,7 @@ from larp_bot.application.conversation import (
     GAME_WISHES,
     GAMEMASTER_NOTIFICATION,
     GAMEMASTER_REVOKED_NOTIFICATION,
+    GET_DAILY_PASSES,
     GRANT_GAMEMASTER,
     GRANT_GAMEMASTER_VIEWER,
     GRANT_PASS_MANAGER,
@@ -2265,6 +2270,128 @@ async def test_viewer_roles_can_inspect_and_export_but_not_administer_an_unled_g
     repeated_achievements = await engine.handle(inbound(12, f"ag:achievements:{event.event_id}", callback=True))
     assert repeated_achievements.text == achievements.text
     assert publisher.commands == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("admin", "role", "allowed"),
+    [
+        (True, None, True),
+        (False, PrivilegedRole.PASS_MANAGER, True),
+        (False, PrivilegedRole.GAMEMASTER_VIEWER, False),
+        (False, PrivilegedRole.GAMEMASTER, False),
+    ],
+)
+async def test_daily_pass_button_is_limited_to_admins_and_pass_managers(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    admin: bool,
+    role: PrivilegedRole | None,
+    allowed: bool,
+) -> None:
+    dated = event.model_copy(update={"game_date": date(2026, 11, 14)})
+    engine, _, _, _ = await engine_setup(disk_store, dated, admin=admin, privileged_role=role)
+
+    menu = await engine.handle(inbound(1, ADMIN))
+    daily_buttons = [button for button in menu.buttons if button.label == GET_DAILY_PASSES]
+
+    assert bool(daily_buttons) is allowed
+    if allowed:
+        assert daily_buttons[0].value == DAILY_PASSES_ACTION
+    else:
+        denied = await engine.handle(inbound(2, DAILY_PASSES_ACTION, callback=True))
+        assert denied.text == "Недостаточно прав."
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_action_skips_or_shows_day_selection_and_has_deliverable_callbacks(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    first = event.model_copy(
+        update={
+            "event_id": "2ea09780-4241-469a-829f-227e67b83473",
+            "game_date": date(2026, 11, 14),
+            "disk_resource_path": "disk:/larp-bot/events/2ea09780-4241-469a-829f-227e67b83473/master.xlsx",
+        }
+    )
+    second = event.model_copy(
+        update={
+            "event_id": "3887fae0-bfe1-4e0f-805d-f68a6075398e",
+            "name": "Вторая игра",
+            "game_date": date(2026, 11, 15),
+            "disk_resource_path": "disk:/larp-bot/events/3887fae0-bfe1-4e0f-805d-f68a6075398e/master.xlsx",
+        }
+    )
+    later = [
+        event.model_copy(
+            update={
+                "event_id": f"00000000-0000-4000-8000-{offset:012d}",
+                "name": f"Игра {offset}",
+                "game_date": date(2026, 11, 14 + offset),
+                "disk_resource_path": f"disk:/larp-bot/events/00000000-0000-4000-8000-{offset:012d}/master.xlsx",
+            }
+        )
+        for offset in range(2, 6)
+    ]
+    engine, _, _, _ = await engine_setup(
+        disk_store,
+        first,
+        second,
+        *later,
+        privileged_role=PrivilegedRole.PASS_MANAGER,
+    )
+
+    picker = await engine.handle(inbound(1, DAILY_PASSES_ACTION, callback=True))
+
+    assert picker.text == "Выберите день, за который нужно получить все пропуска:"
+    assert [button.label for button in picker.buttons[:2]] == ["14.11.26", "15.11.26"]
+    assert all(button.value.startswith(DAILY_PASSES_DATE_PREFIX) for button in picker.buttons[:5])
+    assert PAGE_FORWARD in [button.label for button in picker.buttons]
+    inline = telegram_inline_payload(picker, 1)
+    deferred = CloudflareTelegramEgress._message_payload(1, picker.text, picker.buttons)
+    for payload in (inline, deferred):
+        callbacks = [button["callback_data"] for row in payload["reply_markup"]["inline_keyboard"] for button in row]
+        assert all(1 <= len(value.encode("utf-8")) <= 64 for value in callbacks)
+
+    following = await engine.handle(
+        inbound(2, next(button.value for button in picker.buttons if button.label == PAGE_FORWARD), callback=True)
+    )
+    assert [button.label for button in following.buttons if button.value.startswith(DAILY_PASSES_DATE_PREFIX)] == [
+        "19.11.26"
+    ]
+
+    selected = await engine.handle(inbound(3, picker.buttons[0].value, callback=True))
+
+    assert selected.text.startswith("Таблица пропусков на 14.11.26\nУникальных пользователей: 0.")
+    assert "https://disk.example/public/" in selected.text
+    assert selected.buttons == [Button(label=ADMIN_MENU, value=ADMIN_MENU)]
+
+    only_one_engine, _, _, _ = await engine_setup(
+        MemoryDiskStore(),
+        first,
+        privileged_role=PrivilegedRole.PASS_MANAGER,
+    )
+    direct = await only_one_engine.handle(inbound(1, DAILY_PASSES_ACTION, callback=True))
+    assert direct.text.startswith("Таблица пропусков на 14.11.26")
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_action_reports_when_there_are_no_active_games(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    archived = event.model_copy(
+        update={
+            "game_date": date(2026, 11, 14),
+            "archived_at": datetime(2026, 11, 15, tzinfo=UTC),
+        }
+    )
+    engine, _, _, _ = await engine_setup(disk_store, archived, admin=True)
+
+    response = await engine.handle(inbound(1, DAILY_PASSES_ACTION, callback=True))
+
+    assert response.text == "Сейчас нет активных неархивированных игр с указанной датой."
 
 
 @pytest.mark.asyncio
