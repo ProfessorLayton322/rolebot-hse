@@ -54,7 +54,8 @@ def foreign_pass() -> PassDetails:
 
 
 @pytest.mark.asyncio
-async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store: MemoryDiskStore, event) -> None:
+async def test_pass_table_uses_all_active_pass_profiles_from_ydb(disk_store: MemoryDiskStore, event) -> None:
+    event = event.model_copy(update={"player_amount": 1})
     secret = "participant-secret"
     users = MemoryUserRepository()
     player_profiles = [
@@ -82,7 +83,13 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
             crossplay=False,
             larp_experience=False,
             needs_pass=True,
-            pass_details=russian_pass().model_copy(update={"email": "waiting@example.com"}),
+            pass_details=russian_pass().model_copy(
+                update={
+                    "surname_cyrillic": "Ждущий",
+                    "name_cyrillic": "Игрок",
+                    "email": "waiting@example.com",
+                }
+            ),
         ),
         TelegramUser(
             tg_id=44,
@@ -128,7 +135,7 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
     result = await service.create_pass_table(event.event_id)
 
     assert result.created is True
-    assert result.row_count == 2
+    assert result.row_count == 3
     assert result.public_url == "https://disk.example/public/1"
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
@@ -152,7 +159,7 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
         assert all(cell.font.name == "Calibri Light" and cell.font.size == 14 for cell in table_cells)
         rows = {
             sheet.cell(row, 1).value: tuple(sheet.cell(row, column).value for column in range(1, 10))
-            for row in range(2, 4)
+            for row in range(2, 5)
         }
         assert all(cell.fill.fill_type is None for row in sheet.iter_rows(min_row=2) for cell in row)
         assert rows["Иванов"] == (
@@ -176,6 +183,17 @@ async def test_pass_table_uses_only_confirmed_pass_profiles_from_ydb(disk_store:
             "-",
             "+44 7700 900123",
             "anna@example.com",
+        )
+        assert rows["Ждущий"] == (
+            "Ждущий",
+            "Игрок",
+            "-",
+            "Нет",
+            None,
+            None,
+            None,
+            "+7 999 123-45-67",
+            "waiting@example.com",
         )
     finally:
         workbook.close()
@@ -246,7 +264,7 @@ async def test_pass_table_includes_pass_requiring_master_without_player_registra
 
 
 @pytest.mark.asyncio
-async def test_pass_table_tracks_confirmation_and_cancellation_without_changing_url(
+async def test_pass_table_tracks_signup_confirmation_and_cancellation_without_changing_url(
     disk_store: MemoryDiskStore, event
 ) -> None:
     secret = "participant-secret"
@@ -290,6 +308,16 @@ async def test_pass_table_tracks_confirmation_and_cancellation_without_changing_
     await mutations.apply(
         mutation(Operation.ENLIST, EnlistPayload(display_name="Иван Иванов", wish_play="Без пожеланий"))
     )
+
+    waiting = load_workbook(BytesIO(disk_store.files[pass_path]))
+    try:
+        assert waiting.active.max_row == 2
+        assert waiting.active["A2"].value == "Иванов"
+    finally:
+        waiting.close()
+    assert disk_store.public_urls[pass_path] == export.public_url
+    assert disk_store.replace_count[pass_path] == 1
+
     await mutations.apply(mutation(Operation.CONFIRM, CharacterWishPayload(character_wish="Без пожеланий")))
 
     confirmed = load_workbook(BytesIO(disk_store.files[pass_path]))
@@ -299,7 +327,7 @@ async def test_pass_table_tracks_confirmation_and_cancellation_without_changing_
     finally:
         confirmed.close()
     assert disk_store.public_urls[pass_path] == export.public_url
-    assert disk_store.replace_count[pass_path] == 1
+    assert disk_store.replace_count[pass_path] == 2
 
     await mutations.apply(mutation(Operation.CANCEL, EmptyPayload()))
 
@@ -312,7 +340,7 @@ async def test_pass_table_tracks_confirmation_and_cancellation_without_changing_
     assert refreshed_event is not None
     assert refreshed_event.pass_table_public_url == export.public_url
     assert disk_store.public_urls[pass_path] == export.public_url
-    assert disk_store.replace_count[pass_path] == 2
+    assert disk_store.replace_count[pass_path] == 3
 
 
 @pytest.mark.asyncio

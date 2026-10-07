@@ -387,10 +387,10 @@ async def _event_pass_profiles(
             users.list_all(),
             events.list_leaders(event.event_id),
         )
-    confirmed_keys = {
+    active_registration_keys = {
         registration.participant_key
         for registration in fetched_registration_rows
-        if registration.attendance_status is AttendanceStatus.CONFIRMED
+        if registration.attendance_status is not AttendanceStatus.CANCELLED
     }
     leader_keys = {(leader.platform, leader.platform_user_id) for leader in leader_rows}
     profiles: list[PassDetails] = []
@@ -400,7 +400,7 @@ async def _event_pass_profiles(
         platform = Platform.TELEGRAM if isinstance(user, TelegramUser) else Platform.VK
         uid = user.tg_id if isinstance(user, TelegramUser) else user.vk_id
         key = participant_key(participant_secret, platform, uid, event.event_id)
-        if key in confirmed_keys or (platform, uid) in leader_keys:
+        if key in active_registration_keys or (platform, uid) in leader_keys:
             profiles.append(user.pass_details)
     return profiles
 
@@ -3097,6 +3097,7 @@ class OrderedMutationService:
                 telegram_profile=telegram_profile,
             )
             event, registration_rows = await self.catalog.refresh_with_rows(event)
+            await self._refresh_pass_table(event, registration_rows)
             active = [row for row in registration_rows if row.attendance_status is not AttendanceStatus.CANCELLED]
             active.sort(key=lambda row: (row.created_at, row.participant_key))
             queue_position = next(

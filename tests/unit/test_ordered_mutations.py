@@ -1011,12 +1011,33 @@ async def test_admin_delete_removes_an_archived_game_with_all_records_and_workbo
     await showcase.create_pass_table(pass_path, [])
     events = MemoryEventRepository([event])
     await add_command_author_as_leader(events, event)
+    secret = "participant-secret"
+    users = MemoryUserRepository()
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="User A",
+            vk_url="https://vk.com/user-a",
+            crossplay=False,
+            larp_experience=False,
+            needs_pass=False,
+        )
+    )
     mutations = OrderedMutationService(
         events,
         RegistrationCatalog(events, tables, showcase),
+        users,
+        secret,
         admins=StaticAdminProvider(tg_ids={1}),
     )
-    await mutations.apply(command(event, Operation.ENLIST, EnlistPayload(display_name="User A", wish_play="X")))
+    await mutations.apply(
+        command(
+            event,
+            Operation.ENLIST,
+            EnlistPayload(display_name="User A", wish_play="X"),
+            key=participant_key(secret, Platform.TELEGRAM, 1, event.event_id),
+        )
+    )
     archived_at = datetime(2026, 9, 1, tzinfo=UTC)
     await events.archive(event.event_id, archived_at)
     archived = await events.get(event.event_id)
