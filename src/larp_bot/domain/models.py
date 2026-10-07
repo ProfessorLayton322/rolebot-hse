@@ -178,6 +178,7 @@ class AttendanceStatus(StrEnum):
 class Operation(StrEnum):
     STATISTICS = "STATISTICS"
     SYNC_PROFILE = "SYNC_PROFILE"
+    REFRESH_DAILY_PASS_TABLE = "REFRESH_DAILY_PASS_TABLE"
     ENLIST = "ENLIST"
     UPDATE_PROFILE = "UPDATE_PROFILE"
     CONFIRM = "CONFIRM"
@@ -727,6 +728,10 @@ class ProfileSyncPayload(StrictModel):
         return normalized
 
 
+class DailyPassRefreshPayload(StrictModel):
+    game_date: date
+
+
 class StatisticsPayload(StrictModel):
     action: Literal["game", "link"]
     game_id: str | None = None
@@ -747,6 +752,7 @@ CommandPayload = (
     | EventDetailsPayload
     | PlayerAmountPayload
     | ProfileSyncPayload
+    | DailyPassRefreshPayload
     | StatisticsPayload
     | EmptyPayload
 )
@@ -796,6 +802,12 @@ class OrderedRegistrationCommand(StrictModel):
             expected_group = f"profile:{self.platform.value}:{self.platform_user_id}"
             if not isinstance(self.payload, ProfileSyncPayload) or self.event_id != expected_group:
                 raise ValueError("SYNC_PROFILE requires ProfileSyncPayload and the user's profile group")
+        if self.operation is Operation.REFRESH_DAILY_PASS_TABLE:
+            if not isinstance(self.payload, DailyPassRefreshPayload):
+                raise ValueError("REFRESH_DAILY_PASS_TABLE requires DailyPassRefreshPayload")
+            expected_group = f"daily-passes:{self.payload.game_date.isoformat()}"
+            if self.event_id != expected_group or self.platform is not Platform.SYSTEM:
+                raise ValueError("REFRESH_DAILY_PASS_TABLE requires its date group and the system platform")
         participant_ops = {
             Operation.ENLIST,
             Operation.UPDATE_PROFILE,

@@ -5,8 +5,19 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
-from larp_bot.domain.models import BotIdentity, Button, Event, Platform, event_reference, format_game_date
+from larp_bot.domain.models import (
+    BotIdentity,
+    Button,
+    DailyPassRefreshPayload,
+    Event,
+    Operation,
+    OrderedRegistrationCommand,
+    Platform,
+    event_reference,
+    format_game_date,
+)
 
 from .conversation import (
     STATUS_REGISTRATION,
@@ -15,8 +26,8 @@ from .conversation import (
 )
 from .deadlines import format_confirmation_deadline
 from .navigation import admin_menu_button
-from .ports import AdminConfigProvider, DeferredTransport, EventRepository, UserRepository
-from .services import EventAdministrationService, daily_pass_table_path
+from .ports import AdminConfigProvider, DeferredTransport, EventRepository, OrderedCommandPublisher, UserRepository
+from .services import daily_pass_table_path
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -40,13 +51,26 @@ class UploadCompletionService:
         users: UserRepository,
         config: AdminConfigProvider,
         transport: DeferredTransport,
-        administration: EventAdministrationService | None = None,
+        publisher: OrderedCommandPublisher,
     ) -> None:
         self.events = events
         self.users = users
         self.config = config
         self.transport = transport
-        self.administration = administration
+        self.publisher = publisher
+
+    async def _queue_daily_pass_refresh(self, game_date: date, job_id: str) -> None:
+        date_group = f"daily-passes:{game_date.isoformat()}"
+        await self.publisher.publish(
+            OrderedRegistrationCommand(
+                operation_id=str(uuid5(NAMESPACE_URL, f"{date_group}:{job_id}")),
+                event_id=date_group,
+                operation=Operation.REFRESH_DAILY_PASS_TABLE,
+                platform=Platform.SYSTEM,
+                platform_user_id=0,
+                payload=DailyPassRefreshPayload(game_date=game_date),
+            )
+        )
 
     @staticmethod
     def _requester(callback: Mapping[str, Any]) -> tuple[Platform, int, int] | None:
@@ -136,8 +160,6 @@ class UploadCompletionService:
             await self.events.create(event, leaders)
         else:
             event = existing
-        if self.administration is not None:
-            await self.administration.refresh_daily_pass_table(event.game_date)
         requester = self._requester(callback)
         await self._notify_leaders(event, leaders, requester, job_id)
 
@@ -198,6 +220,8 @@ class UploadCompletionService:
             text=text,
             buttons=[game_management_button(event.event_id)],
         )
+        if event.game_date is not None:
+            await self._queue_daily_pass_refresh(event.game_date, job_id)
 
     async def _event_tables(
         self,
@@ -264,16 +288,17 @@ class UploadCompletionService:
         game_date = date.fromisoformat(str(callback["game_date"]))
         if callback.get("resource_path") != daily_pass_table_path(game_date):
             raise ValueError("daily pass completion has an unexpected resource path")
-        if self.administration is not None:
-            # Catch any profile or attendance mutation that landed while the
-            # initially rendered workbook was still being uploaded.
-            await self.administration.refresh_daily_pass_table(game_date)
         await self._send(
             callback,
             operation_id=f"daily-passes:{game_date.isoformat()}:{job_id}",
             text=f"Таблица пропусков на {format_game_date(game_date)}\n\n{urls['pass']}",
             buttons=[admin_menu_button()],
         )
+        # Run the final consistency refresh from the ordered worker, whose
+        # function has a real disk-uploader route. The completion function's
+        # route is deliberately non-routable to avoid a Terraform dependency
+        # cycle, so refreshing inline would prevent this message from arriving.
+        await self._queue_daily_pass_refresh(game_date, job_id)
 
     async def handle(self, payload: Mapping[str, Any]) -> None:
         if payload.get("schema_version") != 1:
