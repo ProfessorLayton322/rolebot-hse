@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import AsyncMock
 
 import pytest
 
 from larp_bot.adapters.memory import (
+    MemoryCommandPublisher,
     MemoryDeferredTransport,
     MemoryEventRepository,
     MemoryUserRepository,
@@ -12,7 +14,7 @@ from larp_bot.adapters.memory import (
 )
 from larp_bot.application.services import daily_pass_table_path
 from larp_bot.application.upload_completion import UploadCompletionService
-from larp_bot.domain.models import Event, Platform, TelegramUser
+from larp_bot.domain.models import DailyPassRefreshPayload, Event, Operation, Platform, TelegramUser
 
 
 @pytest.mark.asyncio
@@ -21,11 +23,13 @@ async def test_completion_creates_event_and_sends_links_once() -> None:
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=42))
     transport = MemoryDeferredTransport()
+    publisher = MemoryCommandPublisher()
     service = UploadCompletionService(
         events,
         users,
         StaticAdminProvider(secrets={"TG_BOT_USERNAME": "role_bot", "VK_GROUP_ID": "123"}),
         transport,
+        publisher,
     )
     payload = {
         "schema_version": 1,
@@ -66,6 +70,9 @@ async def test_completion_creates_event_and_sends_links_once() -> None:
     assert len(transport.sent) == 1
     assert "✅ Игра создана." in transport.sent[0][3]
     assert "https://disk.example/pass" in transport.sent[0][3]
+    assert len(publisher.commands) == 1
+    assert publisher.commands[0].operation is Operation.REFRESH_DAILY_PASS_TABLE
+    assert publisher.commands[0].payload == DailyPassRefreshPayload(game_date=date(2026, 10, 10))
 
 
 @pytest.mark.asyncio
@@ -81,7 +88,7 @@ async def test_completion_sends_the_stable_achievement_link_for_each_new_export_
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=42))
     transport = MemoryDeferredTransport()
-    service = UploadCompletionService(events, users, StaticAdminProvider(), transport)
+    service = UploadCompletionService(events, users, StaticAdminProvider(), transport, MemoryCommandPublisher())
 
     payload = {
         "schema_version": 1,
@@ -118,7 +125,9 @@ async def test_failed_upload_sends_retry_message_without_a_link() -> None:
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=42))
     transport = MemoryDeferredTransport()
-    service = UploadCompletionService(MemoryEventRepository(), users, StaticAdminProvider(), transport)
+    service = UploadCompletionService(
+        MemoryEventRepository(), users, StaticAdminProvider(), transport, MemoryCommandPublisher()
+    )
 
     await service.handle(
         {
@@ -142,7 +151,8 @@ async def test_daily_pass_completion_sends_the_published_link_once_with_a_safe_a
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=42))
     transport = MemoryDeferredTransport()
-    service = UploadCompletionService(MemoryEventRepository(), users, StaticAdminProvider(), transport)
+    publisher = MemoryCommandPublisher()
+    service = UploadCompletionService(MemoryEventRepository(), users, StaticAdminProvider(), transport, publisher)
     game_date = date(2026, 11, 14)
     payload = {
         "schema_version": 1,
@@ -164,3 +174,45 @@ async def test_daily_pass_completion_sends_the_published_link_once_with_a_safe_a
     assert transport.sent[0][3] == "Таблица пропусков на 14.11.26\n\nhttps://disk.example/daily-passes"
     callback = transport.sent[0][4][0].value
     assert 1 <= len(callback.encode("utf-8")) <= 64
+    assert len(publisher.commands) == 1
+    command = publisher.commands[0]
+    assert command.operation is Operation.REFRESH_DAILY_PASS_TABLE
+    assert command.event_id == "daily-passes:2026-11-14"
+    assert command.platform is Platform.SYSTEM
+    assert command.payload == DailyPassRefreshPayload(game_date=game_date)
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_completion_sends_link_before_queueing_its_consistency_refresh() -> None:
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=42))
+    transport = MemoryDeferredTransport()
+    publisher = AsyncMock()
+    publisher.publish.side_effect = RuntimeError("queue unavailable")
+    service = UploadCompletionService(
+        MemoryEventRepository(),
+        users,
+        StaticAdminProvider(),
+        transport,
+        publisher,
+    )
+    game_date = date(2026, 11, 14)
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        await service.handle(
+            {
+                "schema_version": 1,
+                "job_id": "12345678-1234-1234-1234-123456789abc",
+                "success": True,
+                "public_urls": {"pass": "https://disk.example/daily-passes"},
+                "callback": {
+                    "kind": "daily_passes",
+                    "game_date": game_date.isoformat(),
+                    "resource_path": daily_pass_table_path(game_date),
+                    "requester": {"platform": "telegram", "user_id": 42, "profile_user_id": 42},
+                },
+            }
+        )
+
+    assert len(transport.sent) == 1
+    assert transport.sent[0][3].endswith("https://disk.example/daily-passes")

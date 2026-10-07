@@ -6,11 +6,11 @@ import time
 from collections.abc import Sequence
 
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.domain.models import Button, Operation, Platform, UnreachableRecipient
+from larp_bot.domain.models import Button, DailyPassRefreshPayload, Operation, Platform, UnreachableRecipient
 
 from .game_closings import ScheduledGameClosingService
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
-from .services import ConfirmationNotificationService, DomainError, OrderedMutationService
+from .services import ConfirmationNotificationService, DomainError, EventAdministrationService, OrderedMutationService
 from .statistics import StatisticsService
 
 LOGGER = logging.getLogger("larp_bot.application.worker")
@@ -28,6 +28,7 @@ class OrderedWorker:
         max_seconds: float = 40.0,
         statistics: StatisticsService | None = None,
         scheduled_game_closing: ScheduledGameClosingService | None = None,
+        administration: EventAdministrationService | None = None,
     ) -> None:
         self.consumer = consumer
         self.mutations = mutations
@@ -37,6 +38,7 @@ class OrderedWorker:
         self.max_seconds = max_seconds
         self.statistics = statistics
         self.scheduled_game_closing = scheduled_game_closing
+        self.administration = administration
 
     async def _deliver_once(self, envelope: QueueEnvelope, text: str, buttons: Sequence[Button]) -> None:
         command = envelope.command
@@ -129,6 +131,13 @@ class OrderedWorker:
                             if self.statistics is None:
                                 raise RuntimeError("statistics service is not configured")
                             default_text = await self.statistics.sync_profile(command)
+                        elif command.operation is Operation.REFRESH_DAILY_PASS_TABLE:
+                            if self.administration is None:
+                                raise RuntimeError("event administration service is not configured")
+                            assert isinstance(command.payload, DailyPassRefreshPayload)
+                            await self.administration.refresh_daily_pass_table(command.payload.game_date)
+                            default_text = ""
+                            notifications_enabled = False
                         elif command.operation is Operation.STATISTICS:
                             if self.statistics is None:
                                 raise RuntimeError("statistics service is not configured")

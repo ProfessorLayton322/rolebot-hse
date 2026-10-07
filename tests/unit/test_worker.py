@@ -37,6 +37,7 @@ from larp_bot.domain.models import (
     Button,
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
+    DailyPassRefreshPayload,
     EmptyPayload,
     EnlistPayload,
     Event,
@@ -192,6 +193,37 @@ async def test_deadline_releases_in_progress_and_unstarted_batch_messages(event:
     assert consumer.deleted == ["receipt-0"]
     assert set(consumer.released) == {"receipt-1", "receipt-2"}
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_refresh_runs_in_worker_without_sending_a_message() -> None:
+    game_date = date(2026, 11, 14)
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=f"daily-passes:{game_date.isoformat()}",
+        operation=Operation.REFRESH_DAILY_PASS_TABLE,
+        platform=Platform.SYSTEM,
+        platform_user_id=0,
+        payload=DailyPassRefreshPayload(game_date=game_date),
+    )
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-refresh")])
+    administration = AsyncMock()
+    mutations = AsyncMock()
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        mutations,
+        MemoryUserRepository(),
+        transport,
+        max_seconds=2,
+        administration=administration,
+    )
+
+    assert await worker.run() == 1
+    administration.refresh_daily_pass_table.assert_awaited_once_with(game_date)
+    mutations.apply.assert_not_awaited()
+    assert transport.sent == []
+    assert consumer.deleted == ["receipt-refresh"]
 
 
 @pytest.mark.asyncio
