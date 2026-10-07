@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from io import BytesIO
 from uuid import uuid4
 
@@ -8,7 +9,12 @@ from openpyxl import load_workbook
 
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
 from larp_bot.adapters.yandex_disk.repository import PASS_TABLE_HEADERS, YandexDiskShowcaseRepository
-from larp_bot.application.services import EventAdministrationService, OrderedMutationService, RegistrationCatalog
+from larp_bot.application.services import (
+    EventAdministrationService,
+    OrderedMutationService,
+    RegistrationCatalog,
+    daily_pass_table_path,
+)
 from larp_bot.domain.models import (
     AttendanceStatus,
     BotIdentity,
@@ -363,3 +369,164 @@ async def test_archived_game_keeps_its_registration_and_pass_tables(disk_store: 
     assert stored_event.pass_table_resource_path in disk_store.files
     assert archived_event is not None and archived_event.status is EventStatus.CLOSED
     assert archived_event.archived_at is not None
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_table_deduplicates_same_day_players_and_keeps_its_url_current(
+    disk_store: MemoryDiskStore,
+    event,
+) -> None:
+    secret = "participant-secret"
+    game_date = date(2026, 11, 14)
+    first = event.model_copy(update={"game_date": game_date})
+    second = event.model_copy(
+        update={
+            "event_id": "event-b2",
+            "name": "Вторая игра",
+            "game_date": game_date,
+            "disk_resource_path": "disk:/larp-bot/events/event-b2-master.xlsx",
+            "public_registration_url": "https://disk.example/public/b2",
+        }
+    )
+    other_day = event.model_copy(
+        update={
+            "event_id": "event-c3",
+            "name": "Игра завтра",
+            "game_date": date(2026, 11, 15),
+            "disk_resource_path": "disk:/larp-bot/events/event-c3-master.xlsx",
+            "public_registration_url": "https://disk.example/public/c3",
+        }
+    )
+    users = MemoryUserRepository()
+    player = TelegramUser(
+        tg_id=11,
+        full_name="Иван Иванов",
+        vk_url="https://vk.com/ivan",
+        linked_vk_id=22,
+        telegram_handle="@ivan11",
+        crossplay=False,
+        larp_experience=True,
+        needs_pass=True,
+        pass_details=russian_pass(),
+    )
+    linked_player = VkUser(
+        vk_id=22,
+        telegram_handle="@ivan11",
+        full_name="Иван Иванов",
+        crossplay=False,
+        larp_experience=True,
+        needs_pass=False,
+    )
+    player.updated_at = linked_player.updated_at + timedelta(seconds=1)
+    tomorrow_player = TelegramUser(
+        tg_id=33,
+        full_name="Анна Ли",
+        vk_url="https://vk.com/anna",
+        crossplay=False,
+        larp_experience=True,
+        needs_pass=True,
+        pass_details=foreign_pass(),
+    )
+    await users.save(player)
+    await users.save(linked_player)
+    await users.save(tomorrow_player)
+    events = MemoryEventRepository([first, second, other_day])
+    registrations = MemoryRegistrationRepository(
+        [
+            Registration(
+                event_id=first.event_id,
+                participant_key=participant_key(secret, Platform.TELEGRAM, 11, first.event_id),
+                display_name="Иван Иванов",
+                wish_play="Без пожеланий",
+            ),
+            Registration(
+                event_id=second.event_id,
+                participant_key=participant_key(secret, Platform.VK, 22, second.event_id),
+                display_name="Иван Иванов",
+                wish_play="Без пожеланий",
+            ),
+            Registration(
+                event_id=other_day.event_id,
+                participant_key=participant_key(secret, Platform.TELEGRAM, 33, other_day.event_id),
+                display_name="Анна Ли",
+                wish_play="Без пожеланий",
+            ),
+        ]
+    )
+    workbooks = YandexDiskShowcaseRepository(disk_store)
+    for current in (first, second, other_day):
+        await workbooks.create_event_workbook(current.disk_resource_path)
+    catalog = RegistrationCatalog(events, registrations, workbooks)
+    administration = EventAdministrationService(events, workbooks, catalog, users, secret)
+
+    export = await administration.create_daily_pass_table(game_date)
+    path = daily_pass_table_path(game_date)
+
+    assert export.row_count == 1
+    assert export.public_url == disk_store.public_urls[path]
+    initial = load_workbook(BytesIO(disk_store.files[path]))
+    try:
+        assert initial.active.max_row == 2
+        assert initial.active["I2"].value == "ivan@example.com"
+    finally:
+        initial.close()
+
+    player.pass_details = russian_pass().model_copy(update={"email": "new@example.com"})
+    await users.save(player)
+    mutations = OrderedMutationService(events, catalog, users, secret)
+
+    def mutation(current, operation: Operation) -> OrderedRegistrationCommand:
+        return OrderedRegistrationCommand(
+            operation_id=str(uuid4()),
+            event_id=current.event_id,
+            operation=operation,
+            platform=Platform.TELEGRAM,
+            platform_user_id=11,
+            participant_key=participant_key(secret, Platform.TELEGRAM, 11, current.event_id),
+            payload=EmptyPayload(),
+        )
+
+    await mutations.apply(mutation(first, Operation.UPDATE_PROFILE))
+    updated = load_workbook(BytesIO(disk_store.files[path]))
+    try:
+        assert updated.active.max_row == 2
+        assert updated.active["I2"].value == "new@example.com"
+    finally:
+        updated.close()
+
+    await mutations.apply(mutation(first, Operation.CANCEL))
+    still_registered = load_workbook(BytesIO(disk_store.files[path]))
+    try:
+        assert still_registered.active.max_row == 2
+        assert still_registered.active["I2"].value == "new@example.com"
+    finally:
+        still_registered.close()
+
+    player.pass_details = None
+    player.needs_pass = False
+    player.updated_at += timedelta(seconds=1)
+    await users.save(player)
+    await administration.refresh_daily_pass_tables_for_user(Platform.TELEGRAM, player.tg_id)
+    no_longer_needs_pass = load_workbook(BytesIO(disk_store.files[path]))
+    try:
+        assert no_longer_needs_pass.active.max_row == 1
+    finally:
+        no_longer_needs_pass.close()
+
+    player.needs_pass = True
+    player.pass_details = russian_pass().model_copy(update={"email": "restored@example.com"})
+    player.updated_at += timedelta(seconds=1)
+    await users.save(player)
+    await administration.refresh_daily_pass_tables_for_user(Platform.TELEGRAM, player.tg_id)
+
+    await mutations.apply(mutation(second, Operation.CANCEL))
+    cancelled_everywhere = load_workbook(BytesIO(disk_store.files[path]))
+    try:
+        assert cancelled_everywhere.active.max_row == 1
+    finally:
+        cancelled_everywhere.close()
+
+    repeated = await administration.create_daily_pass_table(game_date)
+    assert repeated.public_url == export.public_url
+    assert disk_store.public_urls[path] == export.public_url
+    assert repeated.row_count == 0

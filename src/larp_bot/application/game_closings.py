@@ -20,7 +20,7 @@ from larp_bot.domain.models import (
 
 from .navigation import main_menu_button
 from .ports import DeferredTransport, EventRepository, OrderedCommandPublisher
-from .services import DomainError
+from .services import DomainError, EventAdministrationService
 from .statistics import StatisticsService
 
 LOGGER = logging.getLogger("larp_bot.application.game_closings")
@@ -94,11 +94,13 @@ class ScheduledGameClosingService:
         statistics: StatisticsService,
         transport: DeferredTransport,
         publisher: OrderedCommandPublisher,
+        administration: EventAdministrationService | None = None,
     ) -> None:
         self.events = events
         self.statistics = statistics
         self.transport = transport
         self.publisher = publisher
+        self.administration = administration
 
     @staticmethod
     def _recipient(identity_platform: Platform, identity_user_id: int) -> str:
@@ -201,6 +203,8 @@ class ScheduledGameClosingService:
         if refreshed is None:
             return "Игра удалена после запланированного закрытия"
         event = refreshed
+        if self.administration is not None:
+            await self.administration.refresh_daily_pass_table(event.game_date)
 
         leaders = await self.events.list_leaders(event.event_id)
         notified = set(event.scheduled_close_notified_recipients)

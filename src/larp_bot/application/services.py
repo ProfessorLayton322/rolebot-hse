@@ -217,6 +217,10 @@ def event_table_paths(event_id: str, name: str) -> tuple[str, str]:
     )
 
 
+def daily_pass_table_path(game_date: date) -> str:
+    return f"disk:/larp-bot/passes/daily-{game_date.isoformat()}.xlsx"
+
+
 def game_signup_token(name: str, game_date: date, *, random_suffix: str | None = None) -> str:
     """Build a readable token that is valid as a Telegram start parameter."""
 
@@ -403,6 +407,82 @@ async def _event_pass_profiles(
         if key in active_registration_keys or (platform, uid) in leader_keys:
             profiles.append(user.pass_details)
     return profiles
+
+
+async def _unarchived_events(events: EventRepository) -> list[Event]:
+    rows: list[Event] = []
+    after: tuple[datetime, str] | None = None
+    while True:
+        page = list(await events.list_page(after=after, archived=False, limit=MAX_EVENT_PAGE_SIZE))
+        rows.extend(page)
+        if len(page) < MAX_EVENT_PAGE_SIZE:
+            return rows
+        last = page[-1]
+        after = (last.created_at, last.event_id)
+
+
+def _user_identity(user: User) -> tuple[Platform, int]:
+    if isinstance(user, TelegramUser):
+        return Platform.TELEGRAM, user.tg_id
+    return Platform.VK, user.vk_id
+
+
+async def _daily_pass_profiles(
+    game_date: date,
+    events: EventRepository,
+    catalog: RegistrationCatalog,
+    users: UserRepository,
+    participant_secret: str,
+) -> tuple[list[Event], list[PassDetails]]:
+    day_events = [event for event in await _unarchived_events(events) if event.game_date == game_date]
+    if not day_events:
+        return [], []
+    day_events = list(await asyncio.gather(*(catalog.ensure_migrated(event) for event in day_events)))
+    registration_rows, leader_rows, user_rows = await asyncio.gather(
+        asyncio.gather(*(catalog.registrations.list_for_event(event.event_id) for event in day_events)),
+        asyncio.gather(*(events.list_leaders(event.event_id) for event in day_events)),
+        users.list_all(),
+    )
+    active_keys = [
+        {
+            registration.participant_key
+            for registration in rows
+            if registration.attendance_status is not AttendanceStatus.CANCELLED
+        }
+        for rows in registration_rows
+    ]
+    leader_keys = [{(leader.platform, leader.platform_user_id) for leader in rows} for rows in leader_rows]
+    local_users = list(user_rows)
+    linked_users = await asyncio.gather(*(users.find_linked(user) for user in local_users))
+    seen_identities: set[tuple[Platform, int]] = set()
+    profiles: list[PassDetails] = []
+    for user, linked in zip(local_users, linked_users, strict=True):
+        group = {
+            identity: profile
+            for profile in (user, linked)
+            if profile is not None
+            for identity in [_user_identity(profile)]
+        }
+        identities = set(group)
+        if identities & seen_identities:
+            continue
+        seen_identities.update(identities)
+        belongs_to_day = any(
+            identity in leaders
+            or participant_key(participant_secret, identity[0], identity[1], event.event_id) in registrations
+            for event, registrations, leaders in zip(day_events, active_keys, leader_keys, strict=True)
+            for identity in identities
+        )
+        if not belongs_to_day:
+            continue
+        current = max(
+            group.values(),
+            key=lambda profile: (profile.updated_at, *_user_identity(profile)),
+        )
+        if current.needs_pass is not True or current.pass_details is None:
+            continue
+        profiles.append(current.pass_details)
+    return day_events, profiles
 
 
 @dataclass(frozen=True)
@@ -1141,6 +1221,7 @@ class EventAdministrationService:
             signup_token=signup_token,
         )
         await self.events.create(event, leaders)
+        await self.refresh_daily_pass_table(game_date)
         return event
 
     async def ensure_event_tables(
@@ -1399,6 +1480,94 @@ class EventAdministrationService:
             raise EventNotFound("Игра не найдена")
         return await self.catalog.get(event, participant_key)
 
+    async def active_game_dates(self) -> list[date]:
+        return sorted(
+            {event.game_date for event in await _unarchived_events(self.events) if event.game_date is not None}
+        )
+
+    async def create_daily_pass_table(
+        self,
+        game_date: date,
+        *,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> PassTableExport:
+        day_events, profiles = await _daily_pass_profiles(
+            game_date,
+            self.events,
+            self.catalog,
+            self.users,
+            self.participant_secret,
+        )
+        if not day_events:
+            raise OperationNotAllowed("На выбранную дату нет активных неархивированных игр")
+        disk_path = daily_pass_table_path(game_date)
+        existed = await self.showcase.pass_table_exists(disk_path)
+        callback: dict[str, object] = {
+            "kind": "daily_passes",
+            "game_date": game_date.isoformat(),
+            "resource_path": disk_path,
+        }
+        if requester is not None:
+            callback["requester"] = {
+                "platform": requester.platform.value,
+                "user_id": reply_user_id or requester.platform_user_id,
+                "profile_user_id": requester.platform_user_id,
+            }
+        public_url = await self.showcase.upsert_published_pass_table(
+            disk_path,
+            profiles,
+            callback=callback,
+            before_invoke=before_invoke,
+        )
+        return PassTableExport(public_url, created=not existed, row_count=len(profiles))
+
+    async def refresh_daily_pass_table(self, game_date: date | None) -> None:
+        if game_date is None:
+            return
+        disk_path = daily_pass_table_path(game_date)
+        if not await self.showcase.pass_table_exists(disk_path):
+            return
+        _, profiles = await _daily_pass_profiles(
+            game_date,
+            self.events,
+            self.catalog,
+            self.users,
+            self.participant_secret,
+        )
+        await self.showcase.replace_pass_table(disk_path, profiles)
+
+    async def refresh_daily_pass_tables_for_user(self, platform: Platform, platform_user_id: int) -> None:
+        identities = await identities_for_local_user(self.users, platform, platform_user_id)
+        active_dates: set[date] = set()
+        for event in await _unarchived_events(self.events):
+            if event.game_date is None:
+                continue
+            registrations, leaders = await asyncio.gather(
+                self.catalog.registrations.list_for_event(event.event_id),
+                self.events.list_leaders(event.event_id),
+            )
+            active_registration_keys = {
+                registration.participant_key
+                for registration in registrations
+                if registration.attendance_status is not AttendanceStatus.CANCELLED
+            }
+            leader_keys = {(leader.platform, leader.platform_user_id) for leader in leaders}
+            if any(
+                (identity.platform, identity.platform_user_id) in leader_keys
+                or participant_key(
+                    self.participant_secret,
+                    identity.platform,
+                    identity.platform_user_id,
+                    event.event_id,
+                )
+                in active_registration_keys
+                for identity in identities
+            ):
+                active_dates.add(event.game_date)
+        await asyncio.gather(*(self.refresh_daily_pass_table(game_date) for game_date in active_dates))
+
     async def create_pass_table(
         self,
         event_id: str,
@@ -1460,17 +1629,17 @@ class EventAdministrationService:
         event = await self.events.get(event_id)
         if event is None:
             raise EventNotFound("Игра не найдена")
-        if event.pass_table_resource_path is None:
-            return
-        await self.catalog.ensure_migrated(event)
-        profiles = await _event_pass_profiles(
-            event,
-            self.events,
-            self.catalog.registrations,
-            self.users,
-            self.participant_secret,
-        )
-        await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+        if event.pass_table_resource_path is not None:
+            await self.catalog.ensure_migrated(event)
+            profiles = await _event_pass_profiles(
+                event,
+                self.events,
+                self.catalog.registrations,
+                self.users,
+                self.participant_secret,
+            )
+            await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+        await self.refresh_daily_pass_table(event.game_date)
 
     async def export_achievements(
         self,
@@ -2626,19 +2795,36 @@ class OrderedMutationService:
         event: Event,
         registration_rows: Sequence[Registration] | None = None,
     ) -> None:
-        if event.pass_table_resource_path is None:
+        if event.pass_table_resource_path is not None:
+            if self.users is None or self.participant_secret is None:
+                raise RuntimeError("pass table refresh requires users and participant secret")
+            profiles = await _event_pass_profiles(
+                event,
+                self.events,
+                self.catalog.registrations,
+                self.users,
+                self.participant_secret,
+                registration_rows,
+            )
+            await self.catalog.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+        await self._refresh_daily_pass_table(event.game_date)
+
+    async def _refresh_daily_pass_table(self, game_date: date | None) -> None:
+        if game_date is None:
+            return
+        disk_path = daily_pass_table_path(game_date)
+        if not await self.catalog.showcase.pass_table_exists(disk_path):
             return
         if self.users is None or self.participant_secret is None:
-            raise RuntimeError("pass table refresh requires users and participant secret")
-        profiles = await _event_pass_profiles(
-            event,
+            raise RuntimeError("daily pass table refresh requires users and participant secret")
+        _, profiles = await _daily_pass_profiles(
+            game_date,
             self.events,
-            self.catalog.registrations,
+            self.catalog,
             self.users,
             self.participant_secret,
-            registration_rows,
         )
-        await self.catalog.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+        await self.catalog.showcase.replace_pass_table(disk_path, profiles)
 
     async def _record_reserve_promotion(
         self,
@@ -2755,8 +2941,10 @@ class OrderedMutationService:
         if command.operation is Operation.UNARCHIVE_EVENT:
             await self._require_admin(command)
             if event.archived_at is None:
+                await self._refresh_daily_pass_table(event.game_date)
                 return MutationResult("Игра уже разархивирована")
             await self.events.unarchive(event.event_id, datetime.now(UTC))
+            await self._refresh_daily_pass_table(event.game_date)
             return MutationResult("Игра разархивирована; регистрация остаётся закрытой")
 
         if command.operation is Operation.DELETE_EVENT:
@@ -2768,6 +2956,7 @@ class OrderedMutationService:
 
         if event.archived_at is not None:
             if command.operation is Operation.ARCHIVE_EVENT:
+                await self._refresh_daily_pass_table(event.game_date)
                 return MutationResult("Игра уже архивирована")
             if command.operation in {
                 Operation.ENLIST,
@@ -2839,6 +3028,9 @@ class OrderedMutationService:
                 command.payload.name,
                 command.payload.game_date,
             )
+            await self._refresh_daily_pass_table(event.game_date)
+            if command.payload.game_date != event.game_date:
+                await self._refresh_daily_pass_table(command.payload.game_date)
             return MutationResult(
                 f"Название и дата игры изменены: {event_reference(command.payload.name, command.payload.game_date)}"
             )
@@ -2876,6 +3068,7 @@ class OrderedMutationService:
             return MutationResult(message, notifications_enabled=status_changed)
         if command.operation is Operation.ARCHIVE_EVENT:
             await self.catalog.archive(event)
+            await self._refresh_daily_pass_table(event.game_date)
             return MutationResult("Игра архивирована; таблицы и записи сохранены")
 
         event = await self.catalog.ensure_migrated(event)

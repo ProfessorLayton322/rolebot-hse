@@ -435,6 +435,17 @@ class RegistrationShowcaseRepository(Protocol):
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> str | None: ...
 
+    async def upsert_published_pass_table(
+        self,
+        disk_path: str,
+        profiles: Sequence[PassDetails],
+        *,
+        callback: dict[str, object],
+        before_invoke: Callable[[], Awaitable[None]] | None = None,
+    ) -> str | None: ...
+
+    async def pass_table_exists(self, disk_path: str) -> bool: ...
+
     async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None: ...
 
     async def delete_pass_table(self, disk_path: str) -> None: ...

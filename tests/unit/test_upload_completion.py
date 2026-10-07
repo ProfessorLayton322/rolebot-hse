@@ -10,6 +10,7 @@ from larp_bot.adapters.memory import (
     MemoryUserRepository,
     StaticAdminProvider,
 )
+from larp_bot.application.services import daily_pass_table_path
 from larp_bot.application.upload_completion import UploadCompletionService
 from larp_bot.domain.models import Event, Platform, TelegramUser
 
@@ -134,3 +135,32 @@ async def test_failed_upload_sends_retry_message_without_a_link() -> None:
 
     assert len(transport.sent) == 1
     assert transport.sent[0][3] == "Не удалось загрузить файл. Попробуйте повторить действие позже."
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_completion_sends_the_published_link_once_with_a_safe_admin_callback() -> None:
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=42))
+    transport = MemoryDeferredTransport()
+    service = UploadCompletionService(MemoryEventRepository(), users, StaticAdminProvider(), transport)
+    game_date = date(2026, 11, 14)
+    payload = {
+        "schema_version": 1,
+        "job_id": "12345678-1234-1234-1234-123456789abc",
+        "success": True,
+        "public_urls": {"pass": "https://disk.example/daily-passes"},
+        "callback": {
+            "kind": "daily_passes",
+            "game_date": game_date.isoformat(),
+            "resource_path": daily_pass_table_path(game_date),
+            "requester": {"platform": "telegram", "user_id": 42, "profile_user_id": 42},
+        },
+    }
+
+    await service.handle(payload)
+    await service.handle(payload)
+
+    assert len(transport.sent) == 1
+    assert transport.sent[0][3] == "Таблица пропусков на 14.11.26\n\nhttps://disk.example/daily-passes"
+    callback = transport.sent[0][4][0].value
+    assert 1 <= len(callback.encode("utf-8")) <= 64
