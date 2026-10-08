@@ -228,12 +228,13 @@ async def test_player_amount_change_is_retryable_and_moves_reserve_row_in_both_t
     showcase = YandexDiskShowcaseRepository(disk_store)
     await showcase.create_event_workbook(event.disk_resource_path, player_amount=event.player_amount)
     await showcase.create_public_event_workbook(public_path, player_amount=event.player_amount)
-    for index in range(3):
+    names = ("Иванов Иван", "Петров Пётр", "Сидоров Семён")
+    for index, name in enumerate(names):
         await tables.enlist(
             event.event_id,
             operation_id=f"enlist-{index}",
             participant_key=str(index) * 43,
-            display_name=f"Игрок {index + 1}",
+            display_name=name,
             wish_play="Без пожеланий",
         )
     mutations = OrderedMutationService(events, RegistrationCatalog(events, tables, showcase))
@@ -245,12 +246,13 @@ async def test_player_amount_change_is_retryable_and_moves_reserve_row_in_both_t
     stored_event = await events.get(event.event_id)
     assert stored_event is not None and stored_event.player_amount == 2
     assert result.text == "Количество игроков изменено: 2"
+    assert [row.display_name for row in await tables.list_for_event(event.event_id)] == list(names)
     for path in (event.disk_resource_path, public_path):
         workbook = load_workbook(BytesIO(disk_store.files[path]))
         try:
             assert workbook.active.cell(4, 1).value == "ЗАПАС"
             assert workbook.active.cell(5, 1).value == 3
-            assert workbook.active.cell(5, 2).value == "Игрок 3"
+            assert workbook.active.cell(5, 2).value == "Семён Сидоров"
         finally:
             workbook.close()
         assert disk_store.replace_count[path] == 2
@@ -431,7 +433,7 @@ async def test_profile_update_refreshes_registration_and_every_existing_game_tab
     public = load_workbook(BytesIO(disk_store.files[public_path]))
     passes = load_workbook(BytesIO(disk_store.files[pass_path]))
     try:
-        assert master.active["B2"].value == "Новиков Новый"
+        assert master.active["B2"].value == "Новый Новиков"
         assert master.active["C2"].value == "https://vk.com/new-profile"
         assert master.active["D2"].value == "https://t.me/new_profile"
         assert master.active["E2"].value == "Нет"
@@ -1280,11 +1282,12 @@ async def test_confirmed_reserve_player_swaps_with_last_waiting_main_player_and_
     base = datetime(2026, 1, 1, tzinfo=UTC)
     event.player_amount = 3
     keys = [character * 43 for character in "abcde"]
+    names = ("Иванов Иван", "Петров Пётр", "Сидоров Семён", "Орлов Олег", "Смирнова Анна")
     rows = [
         Registration(
             event_id=event.event_id,
             participant_key=key,
-            display_name=f"Player {index}",
+            display_name=names[index],
             wish_play="Anyone",
             attendance_status=(AttendanceStatus.WAITING if index in {1, 2} else AttendanceStatus.CONFIRMED),
             created_at=base + timedelta(seconds=index),
@@ -1305,12 +1308,13 @@ async def test_confirmed_reserve_player_swaps_with_last_waiting_main_player_and_
     )
 
     assert (await mutations.apply(promotion)).text == (
-        "Игрок «Player 4» перемещён в основной состав, игрок «Player 2» — в запас"
+        "Игрок «Смирнова Анна» перемещён в основной состав, игрок «Сидоров Семён» — в запас"
     )
     assert (await mutations.apply(promotion)).text == "Игрок уже перемещён в основной состав"
 
     reordered = await tables.list_for_event(event.event_id)
     assert [row.participant_key for row in reordered] == [keys[0], keys[1], keys[4], keys[3], keys[2]]
+    assert [row.display_name for row in reordered] == [names[index] for index in (0, 1, 4, 3, 2)]
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
     assert stored_event.participant_removal_keys == [
@@ -1320,11 +1324,11 @@ async def test_confirmed_reserve_player_swaps_with_last_waiting_main_player_and_
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         assert [workbook.active.cell(row, 2).value for row in (2, 3, 4, 6, 7)] == [
-            "Player 0",
-            "Player 1",
-            "Player 4",
-            "Player 3",
-            "Player 2",
+            "Иван Иванов",
+            "Пётр Петров",
+            "Анна Смирнова",
+            "Олег Орлов",
+            "Семён Сидоров",
         ]
     finally:
         workbook.close()
