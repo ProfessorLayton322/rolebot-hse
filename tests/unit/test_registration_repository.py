@@ -600,10 +600,10 @@ async def test_signups_after_sifting_preserve_main_and_reserve_order(returning: 
             attendance_status=status,
         )
         for key, name, created, status in [
-            ("c", "Waiting First", now - timedelta(days=2), AttendanceStatus.WAITING),
-            ("d", "Waiting Second", now, AttendanceStatus.WAITING),
-            ("b", "Confirmed Player", now - timedelta(days=1), AttendanceStatus.CONFIRMED),
-            ("a", "Returning Player", now - timedelta(days=3), AttendanceStatus.CANCELLED),
+            ("c", "Иванов Иван", now - timedelta(days=2), AttendanceStatus.WAITING),
+            ("d", "Петров Пётр", now, AttendanceStatus.WAITING),
+            ("b", "Сидоров Семён", now - timedelta(days=1), AttendanceStatus.CONFIRMED),
+            ("a", "Орлов Олег", now - timedelta(days=3), AttendanceStatus.CANCELLED),
         ]
     ]
     repository = MemoryRegistrationRepository(players if returning else players[:-1])
@@ -616,9 +616,10 @@ async def test_signups_after_sifting_preserve_main_and_reserve_order(returning: 
     ]
     assert before[-1].created_at > now
 
+    newcomer_names = {"a": "Орлов Олег", "e": "Смирнова Анна"}
     for key in ("a", "e"):
         kwargs = dict(
-            operation_id=f"enlist-{key}", participant_key=key * 43, display_name=f"New {key}", wish_play="Anyone"
+            operation_id=f"enlist-{key}", participant_key=key * 43, display_name=newcomer_names[key], wish_play="Anyone"
         )
         assert await repository.enlist("event-a1", **kwargs)
         assert not await repository.enlist("event-a1", **kwargs)
@@ -628,16 +629,24 @@ async def test_signups_after_sifting_preserve_main_and_reserve_order(returning: 
     assert rows[3].created_at > rows[2].created_at
     assert rows[4].created_at > rows[3].created_at
 
+    assert [row.display_name for row in rows] == [
+        "Сидоров Семён",
+        "Иванов Иван",
+        "Петров Пётр",
+        "Орлов Олег",
+        "Смирнова Анна",
+    ]
+
     # Both exported tables must retain the two main players and append newcomers in reserve.
     for render in (showcase_workbook_bytes, public_showcase_workbook_bytes):
         workbook = load_workbook(BytesIO(render(rows, player_amount=2)))
         sheet = workbook.active
         assert [sheet.cell(index, 2).value for index in (2, 3, 5, 6, 7)] == [
-            "Confirmed Player",
-            "Waiting First",
-            "Waiting Second",
-            "New a",
-            "New e",
+            "Семён Сидоров",
+            "Иван Иванов",
+            "Пётр Петров",
+            "Олег Орлов",
+            "Анна Смирнова",
         ]
         assert sheet.cell(4, 1).value == "ЗАПАС"
         workbook.close()
