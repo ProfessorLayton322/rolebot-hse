@@ -21,6 +21,8 @@ node_modules/
 cloudflare/*/.wrangler/
 function-package.zip
 *.xlsx
+# Local production database exports may contain sensitive user data.
+/local-dumps/
 # Local billing exports named by their report date range.
 /20??????-20??????.csv
 src/larp_bot/assets/roleclub_achievement_basic.pptx
