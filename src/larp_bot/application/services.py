@@ -1960,7 +1960,7 @@ def enlistment_success_text(
 
 
 class ConfirmationNotificationService:
-    """Delivers ordered, admin-triggered notifications to event participants."""
+    """Deliver event notifications to participants and game masters."""
 
     NOTIFICATION_OPERATIONS = frozenset(
         {
@@ -2293,6 +2293,81 @@ class ConfirmationNotificationService:
                 [main_menu_button()],
             )
         return len(links) if reached else 0
+
+    async def notify_masters_of_participation(self, command: OrderedRegistrationCommand) -> int:
+        """Report a persisted signup or confirmation once per operation and global master."""
+
+        if command.operation not in {Operation.ENLIST, Operation.CONFIRM}:
+            raise ValueError("command does not enlist or confirm participation")
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        if command.participant_key is None:
+            raise ValueError("participation command has no participant key")
+        registration = await self.catalog.registrations.get(event.event_id, command.participant_key)
+        if registration is None or registration.last_operation_id != command.operation_id:
+            return 0
+        expected = AttendanceStatus.WAITING if command.operation is Operation.ENLIST else AttendanceStatus.CONFIRMED
+        if registration.attendance_status is not expected:
+            return 0
+        rows = await self.catalog.registrations.list_for_event(event.event_id)
+        active = sorted(
+            (row for row in rows if row.attendance_status is not AttendanceStatus.CANCELLED),
+            key=lambda row: (row.created_at, row.participant_key),
+        )
+        position = next(
+            index for index, row in enumerate(active, 1) if row.participant_key == registration.participant_key
+        )
+        parts = registration.display_name.split()
+        surname = parts.pop(0) if parts else "не указан"
+        player_name = f"{parts[0]} {surname}" if parts else surname
+        if registration.nickname:
+            player_name += f" ({registration.nickname})"
+        action = "📝" if command.operation is Operation.ENLIST else "✅"
+        verb = "записался на игру" if command.operation is Operation.ENLIST else "подтвердил участие в игре"
+        roster = "Основной состав" if position <= event.player_amount else "Запас"
+        text = (
+            f"{action} {player_name} {verb} {event_reference(event.name, event.game_date)}.\n"
+            f"{roster}, место {position}."
+        )
+        buttons = [Button(label="Управление игрой", value=f"ag:manage:{event.event_id}")]
+        actor_identities = {
+            (item.platform, item.platform_user_id)
+            for item in await identities_for_local_user(self.users, command.platform, command.platform_user_id)
+        }
+        seen = set(actor_identities)
+        delivered = 0
+        records = await event_master_records(self.events, self.users, event.event_id)
+        records.sort(key=lambda record: (record[0].platform is not Platform.TELEGRAM, record[0].platform_user_id))
+        for identity, _ in records:
+            identities = {
+                (item.platform, item.platform_user_id)
+                for item in await identities_for_local_user(self.users, identity.platform, identity.platform_user_id)
+            }
+            if seen.intersection(identities):
+                continue
+            seen.update(identities)
+            # Stable for linked accounts even if the selected local recipient changes on retry.
+            recipient = min(f"{platform.value}:{user_id}" for platform, user_id in identities)
+            request_id = f"{command.operation_id}:master-participation:{recipient}"
+            if await self.catalog.registrations.participation_notification_delivered(
+                event.event_id, command.participant_key, request_id
+            ):
+                continue
+            reached = await self._deliver(
+                platform=identity.platform,
+                user_id=identity.platform_user_id,
+                request_id=request_id,
+                text=text,
+                buttons=buttons,
+            )
+            await self.catalog.registrations.mark_participation_notification_delivered(
+                event.event_id, command.participant_key, request_id
+            )
+            if reached:
+                await self.users.claim_delivery(identity.platform, identity.platform_user_id, request_id, buttons)
+                delivered += 1
+        return delivered
 
     async def _cancellation_masters(
         self,

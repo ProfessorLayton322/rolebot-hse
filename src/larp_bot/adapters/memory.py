@@ -713,10 +713,19 @@ class MemoryEventRepository:
 
 class MemoryRegistrationRepository:
     def __init__(self, registrations: Sequence[Registration] = ()) -> None:
+        self.participation_deliveries: set[tuple[str, str, str]] = set()
         self.rows = {
             (registration.event_id, registration.participant_key): deepcopy(registration)
             for registration in registrations
         }
+
+    async def participation_notification_delivered(self, event_id: str, participant_key: str, request_id: str) -> bool:
+        return (event_id, participant_key, request_id) in self.participation_deliveries
+
+    async def mark_participation_notification_delivered(
+        self, event_id: str, participant_key: str, request_id: str
+    ) -> None:
+        self.participation_deliveries.add((event_id, participant_key, request_id))
 
     async def get(self, event_id: str, participant_key: str) -> Registration | None:
         value = self.rows.get((event_id, participant_key))

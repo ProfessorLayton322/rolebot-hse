@@ -227,6 +227,15 @@ class OrderedWorker:
                             and self.notifications is not None
                         ):
                             await self.notifications.notify_capacity_promotions(command)
+                        if (
+                            notifications_enabled
+                            and command.operation in {Operation.ENLIST, Operation.CONFIRM}
+                            and self.notifications is not None
+                        ):
+                            if not command_response_delivered:
+                                await self._deliver_once(raw, text, buttons)
+                                command_response_delivered = True
+                            await self.notifications.notify_masters_of_participation(command)
                     except DomainError as exc:
                         text = command.reply_context.text_failure or f"❌ {exc}"
                     if notifications_enabled and not command_response_delivered:
