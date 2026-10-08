@@ -497,3 +497,29 @@ async def test_user_repository_persists_all_pass_identity_fields_in_ydb() -> Non
 
     params = executor.query.await_args.args[1]
     assert params["$pass_details"] == details.model_dump_json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous", [None, '["earlier"]', '["earlier","current"]'])
+async def test_participation_delivery_markers_append_in_a_serializable_transaction(previous: str | None) -> None:
+    executor = YdbExecutor.__new__(YdbExecutor)
+    executor.pool = MagicMock()
+    session = MagicMock()
+    transaction = session.transaction.return_value.begin.return_value
+    session.prepare.side_effect = ["prepared-select", "prepared-update"]
+    transaction.execute.side_effect = [
+        [SimpleNamespace(rows=[{"participation_notification_deliveries_json": previous}])],
+        [],
+    ]
+    executor.pool.retry_operation_sync.side_effect = lambda operation: operation(session)
+    await executor.mark_participation_notification_delivered("event-a1", "a" * 43, "current")
+    assert session.transaction.call_args.args[0].name == "serializable_read_write"
+    if previous == '["earlier","current"]':
+        transaction.commit.assert_called_once()
+        assert transaction.execute.call_count == 1
+    else:
+        update = transaction.execute.call_args
+        assert update.kwargs == {"commit_tx": True}
+        assert update.args[1]["$event_id"] == "event-a1"
+        assert update.args[1]["$participant_key"] == "a" * 43
+        assert update.args[1]["$delivered"] == ('["current"]' if previous is None else '["earlier","current"]')

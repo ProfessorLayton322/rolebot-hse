@@ -564,7 +564,7 @@ async def test_no_show_warning_is_sent_after_confirmation_but_not_signup(
         "https://vk.com/id77 https://vk.com/id42 https://t.me/anna_master . "
         "Если вы не придете на игру, ничего нам не сообщив, к вам могут быть применены санкции Ролевого Клуба"
     )
-    signup, confirmation = (sent[3] for sent in transport.sent)
+    signup, confirmation = (sent[3] for sent in transport.sent if sent[0:2] == (Platform.TELEGRAM, 1))
     assert signup.startswith(f"Вы записались на игру «{event.name}»!\n\nСейчас вы в основном составе.\n\n")
     assert signup.endswith(f"«🎭 Пожелания по игре».\n\n{masters}")
     assert confirmation_disclaimer not in signup
@@ -1636,7 +1636,7 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
         event.event_id,
         operation_id="enlist-player-7",
         participant_key=key,
-        display_name="Player 7",
+        display_name="Иванов Иван",
         wish_play="A",
     )
 
@@ -1704,6 +1704,7 @@ async def test_newly_confirmed_participant_receives_all_stored_notifications(
             player.tg_id,
             "Вы в основном составе игры «Лесной предел». Вступите в чат: https://t.me/+GameChat_123",
         ),
+        (1, f"✅ Иван Иванов подтвердил участие в игре «{event.name}».\nОсновной состав, место 1."),
     ]
     stored_event = await events.get(event.event_id)
     assert stored_event is not None
@@ -2012,4 +2013,9 @@ async def test_same_day_replacement_notifies_masters_of_the_replaced_game_exactl
     assert [(sent[0], sent[1], sent[3]) for sent in transport.sent if sent[1] != 1] == [
         (Platform.VK, 8, master_text),
         (Platform.TELEGRAM, 7, master_text),
+        (
+            Platform.TELEGRAM,
+            9,
+            f"✅ Иван Иванов подтвердил участие в игре «{event.name}» (14.11.26).\nОсновной состав, место 1.",
+        ),
     ]

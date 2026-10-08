@@ -119,6 +119,43 @@ class YdbExecutor:
 
         return cast(bool, await asyncio.to_thread(self.pool.retry_operation_sync, operation))
 
+    async def mark_participation_notification_delivered(
+        self, event_id: str, participant_key: str, request_id: str
+    ) -> None:
+        """Append a delivery marker without overwriting concurrent recipients."""
+
+        def operation(session: Any) -> None:
+            transaction = session.transaction(ydb.SerializableReadWrite()).begin()
+            params = {"$event_id": event_id, "$participant_key": participant_key}
+            rows = _rows(
+                transaction.execute(
+                    session.prepare(
+                        "DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8; "
+                        "SELECT participation_notification_deliveries_json FROM `registrations` "
+                        "WHERE event_id = $event_id AND participant_key = $participant_key;"
+                    ),
+                    params,
+                )
+            )
+            if not rows:
+                raise RuntimeError("registration disappeared during notification delivery")
+            delivered = json.loads(rows[0].get("participation_notification_deliveries_json") or "[]")
+            if request_id in delivered:
+                transaction.commit()
+                return
+            delivered.append(request_id)
+            transaction.execute(
+                session.prepare(
+                    "DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8; DECLARE $delivered AS Utf8; "
+                    "UPDATE `registrations` SET participation_notification_deliveries_json = $delivered "
+                    "WHERE event_id = $event_id AND participant_key = $participant_key;"
+                ),
+                {**params, "$delivered": json.dumps(delivered, separators=(",", ":"))},
+                commit_tx=True,
+            )
+
+        await asyncio.to_thread(self.pool.retry_operation_sync, operation)
+
     async def insert_if_absent(
         self,
         *,
@@ -2016,6 +2053,23 @@ class YdbRegistrationRepository:
 
     def __init__(self, executor: YdbExecutor) -> None:
         self.db = executor
+
+    async def participation_notification_delivered(self, event_id: str, participant_key: str, request_id: str) -> bool:
+        rows = await self.db.query(
+            "DECLARE $event_id AS Utf8; DECLARE $participant_key AS Utf8; "
+            "SELECT participation_notification_deliveries_json FROM `registrations` "
+            "WHERE event_id = $event_id AND participant_key = $participant_key;",
+            {"$event_id": event_id, "$participant_key": participant_key},
+            read_only=True,
+        )
+        return bool(
+            rows and request_id in json.loads(rows[0].get("participation_notification_deliveries_json") or "[]")
+        )
+
+    async def mark_participation_notification_delivered(
+        self, event_id: str, participant_key: str, request_id: str
+    ) -> None:
+        await self.db.mark_participation_notification_delivered(event_id, participant_key, request_id)
 
     @staticmethod
     def _from_row(row: dict[str, Any]) -> Registration:

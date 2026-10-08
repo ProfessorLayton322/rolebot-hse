@@ -250,6 +250,14 @@ class EventRepository(Protocol):
 
 
 class RegistrationRepository(Protocol):
+    async def participation_notification_delivered(
+        self, event_id: str, participant_key: str, request_id: str
+    ) -> bool: ...
+
+    async def mark_participation_notification_delivered(
+        self, event_id: str, participant_key: str, request_id: str
+    ) -> None: ...
+
     async def get(self, event_id: str, participant_key: str) -> Registration | None: ...
 
     async def find_by_telegram_profile(self, profile: str) -> Sequence[Registration]: ...

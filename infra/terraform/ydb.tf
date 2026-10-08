@@ -416,6 +416,10 @@ resource "yandex_ydb_table" "registrations" {
     type     = "Timestamp"
     not_null = true
   }
+  column {
+    name = "participation_notification_deliveries_json"
+    type = "Utf8"
+  }
   primary_key = ["event_id", "participant_key"]
 
   depends_on = [time_sleep.ydb_ready]
