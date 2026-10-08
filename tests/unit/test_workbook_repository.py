@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
@@ -150,12 +151,12 @@ async def test_public_showcase_omits_all_contact_columns_and_values(disk_store: 
 
     master = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]), data_only=False)
     try:
-        assert master.active["B2"].value == "Иванов Иван"
+        assert master.active["B2"].value == "Иван Иванов"
     finally:
         master.close()
 
 
-def test_public_showcase_falls_back_to_surname_and_name_without_nickname() -> None:
+def test_public_showcase_falls_back_to_name_and_surname_without_nickname() -> None:
     registration = Registration(
         event_id="event-a1",
         participant_key="a" * 43,
@@ -165,7 +166,7 @@ def test_public_showcase_falls_back_to_surname_and_name_without_nickname() -> No
 
     workbook = load_workbook(BytesIO(public_showcase_workbook_bytes([registration])))
     try:
-        assert workbook.active["B2"].value == "Петров Пётр"
+        assert workbook.active["B2"].value == "Пётр Петров"
     finally:
         workbook.close()
 
@@ -194,7 +195,7 @@ async def test_cancelled_registrations_are_omitted_from_showcase(disk_store: Mem
     workbook = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
-        assert rows[0] == (1, "Active player")
+        assert rows[0] == (1, "player Active")
         assert all(name is None for _, name in rows[1:])
         assert workbook.active.cell(event.player_amount + 2, 1).value == "ЗАПАС"
     finally:
@@ -238,7 +239,7 @@ async def test_showcase_orders_rows_by_first_signup_even_when_input_is_arbitrary
     try:
         rows = [tuple(row) for row in workbook.active.iter_rows(min_row=2, max_col=2, values_only=True)]
         assert rows[:3] == [
-            (1, "Oldest, updated"),
+            (1, "updated Oldest,"),
             (2, "Middle"),
             (3, "Newest"),
         ]
@@ -390,12 +391,12 @@ def test_ten_largest_wish_components_receive_tableau_10_colors() -> None:
         sheet = workbook.active
         name_cells = {sheet.cell(row, 2).value: sheet.cell(row, 2) for row in range(2, sheet.max_row + 1)}
         for name in largest_names:
-            assert name_cells[name].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+            assert name_cells[" ".join(reversed(name.split()))].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
         for index, pair in enumerate(pairs[:9], start=1):
             for name in pair:
-                assert name_cells[name].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[index]}"
+                assert name_cells[" ".join(reversed(name.split()))].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[index]}"
         for name in pairs[9]:
-            assert name_cells[name].fill.fill_type is None
+            assert name_cells[" ".join(reversed(name.split()))].fill.fill_type is None
     finally:
         workbook.close()
 
@@ -600,3 +601,30 @@ def test_legacy_timestamp_is_timezone_aware() -> None:
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     assert registration.created_at.tzinfo is UTC
+
+
+@pytest.mark.parametrize("render", [showcase_workbook_bytes, public_showcase_workbook_bytes])
+@pytest.mark.parametrize(
+    ("stored_name", "expected"),
+    [
+        ("Иванов Иван", "Иван Иванов"),
+        ("Петров Пётр Петрович", "Пётр Петров"),
+        ("  Семёнова-Звенигородская   Ева-Лотта  ", "Ева-Лотта Семёнова-Звенигородская"),
+        ("Smith John", "John Smith"),
+        ("Игрок", "Игрок"),
+    ],
+)
+def test_registration_tables_render_name_before_surname_in_roster_and_reserve(
+    render: Callable[..., bytes], stored_name: str, expected: str
+) -> None:
+    registrations = [
+        Registration(event_id="event-a1", participant_key=key * 43, display_name=stored_name, wish_play="Без пожеланий")
+        for key in ("a", "b")
+    ]
+    workbook = load_workbook(BytesIO(render(registrations, player_amount=1)))
+    try:
+        assert workbook.active["B2"].value == expected
+        assert workbook.active["B4"].value == expected
+        assert all(registration.display_name == stored_name for registration in registrations)
+    finally:
+        workbook.close()

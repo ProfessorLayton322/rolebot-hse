@@ -258,6 +258,12 @@ def _append_reserve_separator(sheet: Worksheet, *, player_amount: int, column_co
     cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
+def _registration_table_name(value: str) -> str:
+    """Display stored surname/name parts as name/surname without patronymic."""
+
+    return " ".join(reversed(value.split()[:2]))
+
+
 def showcase_workbook_bytes(
     registrations: Sequence[Registration] = (),
     *,
@@ -275,7 +281,7 @@ def showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(surname_and_name(registration.display_name)),
+                safe_cell(_registration_table_name(registration.display_name)),
                 safe_cell(registration.vk_profile),
                 safe_cell(registration.telegram_profile or ""),
                 _bool_cell(registration.larp_experience),
@@ -293,7 +299,7 @@ def showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(surname_and_name(registration.display_name)),
+                safe_cell(_registration_table_name(registration.display_name)),
                 safe_cell(registration.vk_profile),
                 safe_cell(registration.telegram_profile or ""),
                 _bool_cell(registration.larp_experience),
@@ -328,7 +334,7 @@ def public_showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(registration.nickname or surname_and_name(registration.display_name)),
+                safe_cell(registration.nickname or _registration_table_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 character_wish_cell(registration.character_wish),
@@ -343,7 +349,7 @@ def public_showcase_workbook_bytes(
         sheet.append(
             (
                 number,
-                safe_cell(registration.nickname or surname_and_name(registration.display_name)),
+                safe_cell(registration.nickname or _registration_table_name(registration.display_name)),
                 _bool_cell(registration.crossplay),
                 safe_cell(registration.wish_play),
                 character_wish_cell(registration.character_wish),
