@@ -229,7 +229,10 @@ async def test_empty_or_cancelled_roster_does_not_read_profiles(disk_store: Memo
 
 @pytest.mark.asyncio
 async def test_ydb_pass_projection_reads_only_small_fields_in_two_queries():
-    now = datetime.now(UTC)
+    now = datetime(2026, 10, 9, 12, 34, 56, 789012, tzinfo=UTC)
+    # The YDB Table SDK returns Timestamp values as microseconds since epoch,
+    # not as datetime instances.
+    ydb_updated_at = int(now.timestamp() * 1_000_000)
     db = AsyncMock()
 
     async def query(sql, params, *, read_only):
@@ -239,9 +242,15 @@ async def test_ydb_pass_projection_reads_only_small_fields_in_two_queries():
         assert not any(field in sql for field in ("pass_details_json", "dialog_context_json", "full_name", "email"))
         if "tg_users" in sql:
             return [
-                {"tg_id": 1, "needs_pass": False, "telegram_handle": "@player", "linked_vk_id": 2, "updated_at": now}
+                {
+                    "tg_id": 1,
+                    "needs_pass": False,
+                    "telegram_handle": "@player",
+                    "linked_vk_id": 2,
+                    "updated_at": ydb_updated_at,
+                }
             ]
-        return [{"vk_id": 2, "needs_pass": True, "telegram_handle": "@player", "updated_at": now}]
+        return [{"vk_id": 2, "needs_pass": True, "telegram_handle": "@player", "updated_at": ydb_updated_at}]
 
     db.query.side_effect = query
     profiles = await YdbUserRepository(cast(YdbExecutor, db)).list_pass_preferences()
@@ -250,6 +259,7 @@ async def test_ydb_pass_projection_reads_only_small_fields_in_two_queries():
         (Platform.TELEGRAM, 1, False),
         (Platform.VK, 2, True),
     ]
+    assert [row.updated_at for row in profiles] == [now, now]
 
 
 @pytest.mark.asyncio
