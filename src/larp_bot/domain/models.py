@@ -385,6 +385,17 @@ def normalize_vk_post_url(value: str) -> str:
     )
 
 
+class UserPassPreference(StrictModel):
+    """Small projection for resolving a global user without loading their questionnaire."""
+
+    platform: Platform
+    user_id: int
+    needs_pass: bool | None = None
+    telegram_handle: str | None = None
+    linked_vk_id: int | None = None
+    updated_at: datetime
+
+
 class UserBase(StrictModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=300)
     nickname: Nickname | None = None

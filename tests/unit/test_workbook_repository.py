@@ -41,7 +41,7 @@ async def test_new_workbook_is_a_visible_only_showcase(disk_store: MemoryDiskSto
         headers = tuple(cell.value for cell in workbook.active[1])
         assert headers == VISIBLE_HEADERS
         assert headers[2:4] == ("Профиль ВКонтакте", "Профиль в Telegram")
-        assert workbook.active.max_column == 9
+        assert workbook.active.max_column == 10
         assert not any(
             workbook.active.column_dimensions[column].hidden for column in ("A", "B", "C", "D", "E", "F", "G", "H", "I")
         )
@@ -80,7 +80,7 @@ async def test_showcase_is_regenerated_from_registration_rows(disk_store: Memory
             "Doctor",
             AttendanceStatus.CONFIRMED.value,
         )
-        assert workbook.active.max_column == 9
+        assert workbook.active.max_column == 10
     finally:
         workbook.close()
 
@@ -507,7 +507,7 @@ async def test_legacy_state_is_imported_once_then_removed_from_xlsx(
     rendered = load_workbook(BytesIO(disk_store.files[event.disk_resource_path]))
     try:
         assert tuple(cell.value for cell in rendered.active[1]) == VISIBLE_HEADERS
-        assert rendered.active.max_column == 9
+        assert rendered.active.max_column == 10
     finally:
         rendered.close()
     public_rendered = load_workbook(BytesIO(disk_store.files[stored_event.public_table_resource_path]))

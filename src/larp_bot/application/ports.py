@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from datetime import date, datetime
 from typing import Protocol
 
@@ -19,6 +19,7 @@ from larp_bot.domain.models import (
     ScheduledLifecycleEvent,
     TelegramUser,
     User,
+    UserPassPreference,
     VkUser,
 )
 
@@ -56,6 +57,8 @@ class UserRepository(Protocol):
     async def clear_privileged_role(self, platform: Platform, user_id: int, operation_id: str) -> None: ...
 
     async def list_all(self) -> Sequence[User]: ...
+
+    async def list_pass_preferences(self) -> Sequence[UserPassPreference]: ...
 
     async def claim_delivery(
         self,
@@ -398,7 +401,13 @@ class RegistrationShowcaseRepository(Protocol):
 
     async def read_legacy_registrations(self, event: Event) -> Sequence[Registration]: ...
 
-    async def replace(self, event: Event, registrations: Sequence[Registration]) -> None: ...
+    async def replace(
+        self,
+        event: Event,
+        registrations: Sequence[Registration],
+        *,
+        needs_pass_by_key: Mapping[str, bool | None] | None = None,
+    ) -> None: ...
 
     async def create_event_workbook(
         self,

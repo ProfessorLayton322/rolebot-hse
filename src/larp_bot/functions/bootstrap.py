@@ -106,7 +106,13 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
     telegram = CloudflareTelegramEgress(settings.telegram_egress_url, secrets["YANDEX_TO_CF_EGRESS_HMAC_SECRET"])
     vk = VkApiTransport(secrets["VK_ACCESS_TOKEN"])
     transport = MultiplexedDeferredTransport(telegram, vk)
-    catalog = RegistrationCatalog(events, registrations, showcase)
+    catalog = RegistrationCatalog(
+        events,
+        registrations,
+        showcase,
+        users=users,
+        participant_secret=secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+    )
     registration_service = RegistrationService(
         events,
         catalog,
