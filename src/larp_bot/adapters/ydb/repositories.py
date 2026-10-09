@@ -473,7 +473,7 @@ class YdbUserRepository:
                         needs_pass=row.get("needs_pass"),
                         telegram_handle=row.get("telegram_handle"),
                         linked_vk_id=row.get("linked_vk_id"),
-                        updated_at=row["updated_at"],
+                        updated_at=_dt(row["updated_at"]),
                     )
                     for row in rows
                 )
