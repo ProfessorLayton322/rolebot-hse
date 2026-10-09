@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -39,6 +39,7 @@ VISIBLE_HEADERS = (
     "С кем хочу играть",
     "Пожелания по персонажу",
     "Текущий статус",
+    "Нужен ли пропуск",
 )
 PUBLIC_HEADERS = (
     "№",
@@ -269,6 +270,7 @@ def _registration_table_name(value: str) -> str:
 def showcase_workbook_bytes(
     registrations: Sequence[Registration] = (),
     *,
+    needs_pass_by_key: Mapping[str, bool | None] | None = None,
     player_amount: int = DEFAULT_PLAYER_AMOUNT,
 ) -> bytes:
     workbook = Workbook()
@@ -291,6 +293,7 @@ def showcase_workbook_bytes(
                 safe_cell(registration.wish_play),
                 character_wish_cell(registration.character_wish),
                 registration.attendance_status.value,
+                _bool_cell((needs_pass_by_key or {}).get(registration.participant_key)),
             )
         )
         _paint_player_name(sheet, registration, component_colors)
@@ -309,10 +312,11 @@ def showcase_workbook_bytes(
                 safe_cell(registration.wish_play),
                 character_wish_cell(registration.character_wish),
                 registration.attendance_status.value,
+                _bool_cell((needs_pass_by_key or {}).get(registration.participant_key)),
             )
         )
         _paint_player_name(sheet, registration, component_colors)
-    _format_sheet(sheet, (8, 30, 32, 32, 25, 26, 35, 45, 18))
+    _format_sheet(sheet, (8, 30, 32, 32, 25, 26, 35, 45, 18, 24))
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -724,9 +728,20 @@ class YandexDiskShowcaseRepository:
         content = await self.store.download(event.disk_resource_path)
         return await asyncio.to_thread(_legacy_registrations, event.event_id, content)
 
-    async def replace(self, event: Event, registrations: Sequence[Registration]) -> None:
+    async def replace(
+        self,
+        event: Event,
+        registrations: Sequence[Registration],
+        *,
+        needs_pass_by_key: Mapping[str, bool | None] | None = None,
+    ) -> None:
         master_content, public_content = await asyncio.gather(
-            asyncio.to_thread(showcase_workbook_bytes, registrations, player_amount=event.player_amount),
+            asyncio.to_thread(
+                showcase_workbook_bytes,
+                registrations,
+                player_amount=event.player_amount,
+                needs_pass_by_key=needs_pass_by_key,
+            ),
             asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=event.player_amount),
         )
         uploads = [

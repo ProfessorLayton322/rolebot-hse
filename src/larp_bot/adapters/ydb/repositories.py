@@ -25,6 +25,7 @@ from larp_bot.domain.models import (
     ScheduledLifecycleEvent,
     TelegramUser,
     User,
+    UserPassPreference,
     VkUser,
 )
 
@@ -446,6 +447,42 @@ class YdbUserRepository:
                 "$updated_at": datetime.now(UTC),
             },
         )
+
+    async def list_pass_preferences(self) -> Sequence[UserPassPreference]:
+        # Keep each result small and complete; a growing user table must not
+        # silently lose participants to the table SDK's result-size limit.
+        page_size = 500
+
+        async def scan(platform: Platform) -> list[UserPassPreference]:
+            table, id_column, _ = self._location(platform)
+            link_column = ", linked_vk_id" if platform is Platform.TELEGRAM else ""
+            after = 0
+            profiles: list[UserPassPreference] = []
+            while True:
+                rows = await self.db.query(
+                    f"DECLARE $after AS Uint64; "
+                    f"SELECT {id_column}, needs_pass, telegram_handle{link_column}, updated_at "
+                    f"FROM `{table}` WHERE {id_column} > $after ORDER BY {id_column} LIMIT {page_size};",
+                    {"$after": after},
+                    read_only=True,
+                )
+                profiles.extend(
+                    UserPassPreference(
+                        platform=platform,
+                        user_id=int(row[id_column]),
+                        needs_pass=row.get("needs_pass"),
+                        telegram_handle=row.get("telegram_handle"),
+                        linked_vk_id=row.get("linked_vk_id"),
+                        updated_at=row["updated_at"],
+                    )
+                    for row in rows
+                )
+                if len(rows) < page_size:
+                    return profiles
+                after = int(rows[-1][id_column])
+
+        telegram, vk = await asyncio.gather(scan(Platform.TELEGRAM), scan(Platform.VK))
+        return [*telegram, *vk]
 
     async def list_all(self) -> Sequence[User]:
         telegram_rows, vk_rows = await asyncio.gather(

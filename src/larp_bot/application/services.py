@@ -48,6 +48,7 @@ from .confirmation_openings import ScheduledConfirmationOpeningDispatcher
 from .deadlines import MOSCOW_TIMEZONE, format_confirmation_deadline
 from .identity import global_users, identities_for_local_user
 from .navigation import confirmation_button, main_menu_button
+from .pass_preferences import event_pass_preferences
 from .ports import (
     AdminConfigProvider,
     DeferredTransport,
@@ -255,10 +256,17 @@ class RegistrationCatalog:
         events: EventRepository,
         registrations: RegistrationRepository,
         showcase: RegistrationShowcaseRepository,
+        *,
+        users: UserRepository | None = None,
+        participant_secret: str | None = None,
     ) -> None:
+        if users is not None and participant_secret is None:
+            raise ValueError("pass preferences require a participant secret")
         self.events = events
         self.registrations = registrations
         self.showcase = showcase
+        self.users = users
+        self.participant_secret = participant_secret
 
     async def ensure_migrated(self, event: Event) -> Event:
         if event.registrations_migrated_at is not None:
@@ -350,7 +358,17 @@ class RegistrationCatalog:
 
         rows = list(await self.registrations.list_for_event(event.event_id))
         event = await self.ensure_public_table(event, rows)
-        await self.showcase.replace(event, rows)
+        active_keys = {row.participant_key for row in rows if row.attendance_status is not AttendanceStatus.CANCELLED}
+        answers: dict[str, bool | None] = {}
+        if active_keys and self.users is not None:
+            assert self.participant_secret is not None
+            answers = event_pass_preferences(
+                await self.users.list_pass_preferences(),
+                event_id=event.event_id,
+                secret=self.participant_secret,
+                active_keys=active_keys,
+            )
+        await self.showcase.replace(event, rows, needs_pass_by_key=answers)
         return event, rows
 
     async def archive(self, event: Event) -> None:
@@ -936,6 +954,7 @@ class RegistrationService:
         receive the edited name, nickname or pass data.
         """
 
+        identities = await self._identities(platform, user_id)
         queued = 0
         after: tuple[datetime, str] | None = None
         semaphore = asyncio.Semaphore(concurrency)
@@ -944,30 +963,40 @@ class RegistrationService:
             if not events:
                 return queued
 
-            async def participation_for(event: Event) -> tuple[Event, Registration | None, bool]:
+            async def participation_for(event: Event) -> tuple[Event, list[BotIdentity]]:
                 async with semaphore:
-                    key = self.key(platform, user_id, event.event_id)
-                    registration, leaders = await asyncio.gather(
-                        self.catalog.get(event, key),
+                    await self.catalog.ensure_migrated(event)
+                    registrations, leaders = await asyncio.gather(
+                        asyncio.gather(
+                            *(
+                                self.catalog.registrations.get(
+                                    event.event_id,
+                                    self.key(identity.platform, identity.platform_user_id, event.event_id),
+                                )
+                                for identity in identities
+                            )
+                        ),
                         self.events.list_leaders(event.event_id),
                     )
-                    identity = BotIdentity(platform=platform, platform_user_id=user_id)
-                    return event, registration, identity in leaders
+                    return event, [
+                        identity
+                        for identity, registration in zip(identities, registrations, strict=True)
+                        if registration is not None or identity in leaders
+                    ]
 
             participations = await asyncio.gather(*(participation_for(event) for event in events))
-            for event, registration, is_leader in participations:
-                if registration is None and not is_leader:
-                    continue
-                await self.enqueue(
-                    operation=Operation.UPDATE_PROFILE,
-                    event_id=event.event_id,
-                    platform=platform,
-                    user_id=user_id,
-                    payload=EmptyPayload(),
-                    reply_context=ReplyContext(),
-                    idempotency_key=f"{idempotency_key}:{Operation.UPDATE_PROFILE.value}:{event.event_id}",
-                )
-                queued += 1
+            for event, participating_identities in participations:
+                for identity in participating_identities:
+                    await self.enqueue(
+                        operation=Operation.UPDATE_PROFILE,
+                        event_id=event.event_id,
+                        platform=identity.platform,
+                        user_id=identity.platform_user_id,
+                        payload=EmptyPayload(),
+                        reply_context=ReplyContext(),
+                        idempotency_key=f"{idempotency_key}:{Operation.UPDATE_PROFILE.value}:{event.event_id}",
+                    )
+                    queued += 1
 
             if len(events) < page_size:
                 return queued

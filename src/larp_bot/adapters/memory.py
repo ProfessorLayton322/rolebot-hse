@@ -18,6 +18,7 @@ from larp_bot.domain.models import (
     ScheduledLifecycleEvent,
     TelegramUser,
     User,
+    UserPassPreference,
 )
 
 
@@ -125,6 +126,19 @@ class MemoryUserRepository:
             user.privileged_role = None
             user.is_gamemaster = False
             user.gamemaster_grant_operation_id = operation_id
+
+    async def list_pass_preferences(self) -> Sequence[UserPassPreference]:
+        return [
+            UserPassPreference(
+                platform=platform,
+                user_id=user_id,
+                needs_pass=user.needs_pass,
+                telegram_handle=user.telegram_handle,
+                linked_vk_id=user.linked_vk_id if isinstance(user, TelegramUser) else None,
+                updated_at=user.updated_at,
+            )
+            for (platform, user_id), user in self.rows.items()
+        ]
 
     async def list_all(self) -> Sequence[User]:
         return deepcopy(list(self.rows.values()))
