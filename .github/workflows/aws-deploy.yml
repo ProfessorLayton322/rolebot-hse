@@ -1,0 +1,105 @@
+name: AWS standby deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DEPLOY_STANDBY to apply the disabled AWS stack
+        required: true
+        type: string
+      billing_guardrails_confirmed:
+        description: Payer-account budget and billing alerts were verified
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: aws-production-terraform
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: inputs.confirmation == 'DEPLOY_STANDBY' && inputs.billing_guardrails_confirmed
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: "1.15.9"
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Verify fixed AWS deployment identity
+        run: |
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          test "${account_id}" = "${{ vars.AWS_ACCOUNT_ID }}"
+      - name: Build inert standby packages
+        run: bash scripts/build_aws_standby_packages.sh
+      - name: Apply disabled AWS application stack
+        working-directory: infra/aws/application
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.AWS_TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.AWS_TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform plan -input=false -lock-timeout=5m -out=aws-production.tfplan
+          terraform apply -input=false -lock-timeout=5m aws-production.tfplan
+      - name: Populate Standard SecureString parameters
+        working-directory: infra/aws/application
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
+          CF_TO_AWS_HMAC_SECRET: ${{ secrets.CF_TO_AWS_HMAC_SECRET }}
+          AWS_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.AWS_TO_CF_EGRESS_HMAC_SECRET }}
+        run: |
+          set +x
+          parameter_names_json="$(terraform output -json runtime_parameter_names)"
+          put_secret() {
+            parameter_key="$1"
+            parameter_value="$2"
+            parameter_name="$(jq -er --arg key "${parameter_key}" '.[$key]' <<<"${parameter_names_json}")"
+            byte_count="$(LC_ALL=C printf '%s' "${parameter_value}" | wc -c)"
+            if [[ "${byte_count}" -lt 1 || "${byte_count}" -gt 4096 ]]; then
+              echo "${parameter_name} must contain between 1 and 4096 bytes" >&2
+              return 1
+            fi
+            aws ssm put-parameter \
+              --name "${parameter_name}" \
+              --type SecureString \
+              --tier Standard \
+              --value "${parameter_value}" \
+              --overwrite >/dev/null
+          }
+
+          put_secret tg_bot_token "${TG_BOT_TOKEN}"
+          put_secret tg_webhook_secret "${TG_WEBHOOK_SECRET}"
+          put_secret vk_access_token "${VK_ACCESS_TOKEN}"
+          put_secret vk_callback_secret "${VK_CALLBACK_SECRET}"
+          put_secret vk_confirmation_string "${VK_CONFIRMATION_STRING}"
+          put_secret yandex_disk_token "${YANDEX_DISK_TOKEN}"
+          put_secret google_service_account_json "${GOOGLE_SERVICE_ACCOUNT_JSON}"
+          put_secret participant_key_hmac_secret "${PARTICIPANT_KEY_HMAC_SECRET}"
+          put_secret cloudflare_ingress_hmac_secret "${CF_TO_AWS_HMAC_SECRET}"
+          put_secret cloudflare_egress_hmac_secret "${AWS_TO_CF_EGRESS_HMAC_SECRET}"
+      - name: Confirm standby controls
+        working-directory: infra/aws/application
+        run: |
+          test "$(terraform output -json standby_controls | jq -r .gateway_auth_type)" = "AWS_IAM"
+          test "$(terraform output -json standby_controls | jq -r .sqs_event_mapping_state)" = "false"
+          test "$(terraform output -json standby_controls | jq -r .scheduler_state)" = "DISABLED"
