@@ -30,6 +30,7 @@ locals {
     vk_access_token                = "/${var.project_name}/production/vk-access-token"
     vk_callback_secret             = "/${var.project_name}/production/vk-callback-secret"
     vk_confirmation_string         = "/${var.project_name}/production/vk-confirmation-string"
+    vk_group_id                    = "/${var.project_name}/production/vk-group-id"
     yandex_disk_token              = "/${var.project_name}/production/yandex-disk-token"
     google_service_account_json    = "/${var.project_name}/production/google-service-account-json"
     participant_key_hmac_secret    = "/${var.project_name}/production/participant-key-hmac-secret"
@@ -49,6 +50,9 @@ locals {
       "vk_access_token",
       "vk_callback_secret",
       "vk_confirmation_string",
+      "vk_group_id",
+      "yandex_disk_token",
+      "google_service_account_json",
       "participant_key_hmac_secret",
       "cloudflare_ingress_hmac_secret",
       "cloudflare_egress_hmac_secret",
@@ -59,57 +63,58 @@ locals {
       "google_service_account_json",
       "participant_key_hmac_secret",
       "cloudflare_egress_hmac_secret",
+      "yandex_disk_token",
     ]
     registration_notifier = [
-      "tg_bot_token",
       "vk_access_token",
-      "participant_key_hmac_secret",
       "cloudflare_egress_hmac_secret",
     ]
     disk_uploader = [
       "yandex_disk_token",
-      "cloudflare_egress_hmac_secret",
     ]
     upload_completion = [
       "tg_bot_token",
       "vk_access_token",
       "cloudflare_egress_hmac_secret",
+      "yandex_disk_token",
+      "google_service_account_json",
+      "participant_key_hmac_secret",
     ]
   }
 
   lambda_definitions = {
     gateway = {
       runtime     = "python3.12"
-      handler     = "handler.handler"
-      package     = var.python_standby_zip_path
+      handler     = "aws_gateway.handler"
+      package     = var.python_application_zip_path
       memory_size = 512
       timeout     = 30
     }
     ordered_worker = {
       runtime     = "python3.12"
-      handler     = "handler.handler"
-      package     = var.python_standby_zip_path
+      handler     = "aws_ordered_worker.handler"
+      package     = var.python_application_zip_path
       memory_size = 1024
       timeout     = 150
     }
     registration_notifier = {
       runtime     = "provided.al2023"
       handler     = "bootstrap"
-      package     = var.go_standby_zip_path
+      package     = var.registration_notifier_zip_path
       memory_size = 128
       timeout     = 60
     }
     disk_uploader = {
       runtime     = "provided.al2023"
       handler     = "bootstrap"
-      package     = var.go_standby_zip_path
+      package     = var.disk_uploader_zip_path
       memory_size = 128
       timeout     = 300
     }
     upload_completion = {
       runtime     = "python3.12"
-      handler     = "handler.handler"
-      package     = var.python_standby_zip_path
+      handler     = "aws_upload_completion.handler"
+      package     = var.python_application_zip_path
       memory_size = 512
       timeout     = 30
     }

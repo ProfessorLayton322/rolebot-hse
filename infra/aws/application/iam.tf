@@ -116,16 +116,6 @@ data "aws_iam_policy_document" "lambda" {
   }
 
   dynamic "statement" {
-    for_each = each.key == "disk_uploader" ? [1] : []
-    content {
-      sid       = "InvokeUploadCompletion"
-      effect    = "Allow"
-      actions   = ["lambda:InvokeFunction"]
-      resources = ["arn:aws:lambda:${var.aws_region}:${var.aws_account_id}:function:${local.function_names.upload_completion}"]
-    }
-  }
-
-  dynamic "statement" {
     for_each = contains(["gateway", "ordered_worker"], each.key) ? [1] : []
     content {
       sid       = "InvokeDiskUploader"

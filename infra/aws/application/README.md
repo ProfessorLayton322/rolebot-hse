@@ -1,22 +1,24 @@
-# AWS application stack — Phase 1 standby
+# AWS application stack — gated Phase 2 runtime
 
 This root owns only the new AWS application resources. It never owns the
 existing Yandex or Cloudflare resources and uses the dedicated state object
 `larp-bot/aws-production.tfstate` in the pre-existing AWS state bucket.
 
-Phase 1 is intentionally unusable for production traffic:
+The stack remains intentionally unusable for production traffic:
 
 - the Lambda Function URL uses `AWS_IAM`, so the unsigned Cloudflare Worker
   cannot call it;
-- every packaged handler is a non-mutating standby placeholder;
+- all Python and Go functions contain AWS-native adapters, but their runtime
+  gates reject application work unless both `APPLICATION_MODE=active` and
+  `MUTATIONS_ENABLED=true`;
 - `APPLICATION_MODE=standby` and `MUTATIONS_ENABLED=false` are fixed in the
   Lambda environment;
 - the SQS event source mapping is disabled;
 - the EventBridge Scheduler schedule is disabled;
 - no Cloudflare route or Yandex resource changes are part of this root.
 
-The five DynamoDB Standard tables and their four GSIs use a total of 9 RCUs and
-9 WCUs. Deletion protection and Terraform `prevent_destroy` are enabled, and
+The five DynamoDB Standard tables and their five GSIs use a total of 10 RCUs and
+10 WCUs. Deletion protection and Terraform `prevent_destroy` are enabled, and
 paid point-in-time recovery is deliberately disabled. SQS and S3 use AWS-owned
 encryption; no customer-managed KMS key, VPC, NAT Gateway, Secrets Manager
 secret, X-Ray tracing, or provisioned Lambda concurrency is created.
@@ -38,10 +40,18 @@ budget, Free Tier alerts, and CloudWatch billing alarm in
 completed. Phase 0 inspection found that they cannot be verified or configured
 from the managed member account.
 
-Before local validation, build deterministic placeholders:
+The Python package uses a separate pinned dependency closure that omits YDB,
+gRPC, and the AWS SDK already supplied by the Lambda Python runtime. The two Go
+packages compile as AWS Lambda `provided.al2023` bootstrap binaries with their
+AWS SDK dependencies linked in. Separate `aws.go.mod` files let CI build those
+binaries with pinned Go 1.26.9 without raising the module requirement of the
+Yandex `golang123` rollback functions. The build enforces Lambda package-size
+limits.
+
+Before local validation, build deterministic artifacts:
 
 ```bash
-bash scripts/build_aws_standby_packages.sh
+bash scripts/build_aws_application_packages.sh
 terraform -chdir=infra/aws/application init -backend=false
 terraform -chdir=infra/aws/application validate
 ```

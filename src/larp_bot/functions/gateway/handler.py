@@ -11,13 +11,15 @@ from typing import Any
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.telegram import parse_telegram_group_update, parse_telegram_update, telegram_inline_payload
 from larp_bot.adapters.vk import parse_vk_event
+from larp_bot.application.ports import AdminConfigProvider
 from larp_bot.domain.models import Platform
 from larp_bot.domain.security import constant_time_valid_signature, sign_request
-from larp_bot.functions.bootstrap import AppContainer, build_container, iam_token_from_context
+from larp_bot.functions.container import AppContainer, iam_token_from_context
+from larp_bot.functions.runtime_mode import RuntimeGate
 
 LOGGER = logging.getLogger("larp_bot.gateway")
 _container: AppContainer | None = None
-_confirmation_config: RuntimeConfigProvider | None = None
+_confirmation_config: AdminConfigProvider | None = None
 # AppContainer owns async HTTP clients and their keep-alive connections. A
 # persistent Runner keeps those resources on the same event loop for every
 # invocation handled by a warm Function process.
@@ -49,7 +51,14 @@ async def _container_instance(context: Any) -> AppContainer:
     global _container
     iam_token = iam_token_from_context(context)
     if _container is None:
-        _container = await build_container(iam_token=iam_token)
+        if os.getenv("CLOUD_PROVIDER") == "aws":
+            from larp_bot.functions.aws_bootstrap import build_aws_container
+
+            _container = await build_aws_container()
+        else:
+            from larp_bot.functions.bootstrap import build_container
+
+            _container = await build_container(iam_token=iam_token)
     elif iam_token is not None:
         _container.config.set_iam_token(iam_token)
         _container.disk_uploader.set_iam_token(iam_token)
@@ -66,7 +75,12 @@ def _verify_cloudflare(event: dict[str, Any], body: bytes, secret: str, *, now: 
     current = int(time.time()) if now is None else now
     if abs(current - int(timestamp)) > 60:
         raise PermissionError("stale transport request")
-    path = str(event.get("path") or event.get("requestContext", {}).get("http", {}).get("path") or "/webhooks/telegram")
+    path = str(
+        event.get("path")
+        or event.get("rawPath")
+        or event.get("requestContext", {}).get("http", {}).get("path")
+        or "/webhooks/telegram"
+    )
     expected = sign_request(secret, timestamp, request_id, "POST", path, body)
     if not constant_time_valid_signature(expected, supplied):
         raise PermissionError("invalid transport signature")
@@ -77,7 +91,8 @@ def _verify_cloudflare(event: dict[str, Any], body: bytes, secret: str, *, now: 
 
 
 async def _telegram(event: dict[str, Any], body: bytes, app: AppContainer) -> dict[str, Any]:
-    secret = await app.config.get_secret("CF_TO_YANDEX_HMAC_SECRET")
+    secret_key = "CF_TO_AWS_HMAC_SECRET" if os.getenv("CLOUD_PROVIDER") == "aws" else "CF_TO_YANDEX_HMAC_SECRET"
+    secret = await app.config.get_secret(secret_key)
     request_id, deadline_ms = _verify_cloudflare(event, body, secret)
     try:
         update = json.loads(body)
@@ -167,7 +182,7 @@ async def _vk(body: bytes, app: AppContainer) -> dict[str, Any]:
 
 async def _vk_confirmation_from_config(
     event: dict[str, Any],
-    config: RuntimeConfigProvider,
+    config: AdminConfigProvider,
 ) -> dict[str, Any]:
     expected_secret = await config.get_secret("VK_CALLBACK_SECRET")
     expected_group = int(await config.get_secret("VK_GROUP_ID"))
@@ -177,7 +192,7 @@ async def _vk_confirmation_from_config(
     return _response(200, confirmation)
 
 
-def _confirmation_config_instance(context: Any) -> RuntimeConfigProvider:
+def _confirmation_config_instance(context: Any) -> AdminConfigProvider:
     """Return the warm-process provider that answers VK confirmation callbacks.
 
     It stays independent of the application container so VK can confirm the server
@@ -188,6 +203,16 @@ def _confirmation_config_instance(context: Any) -> RuntimeConfigProvider:
     global _confirmation_config
     iam_token = iam_token_from_context(context)
     if _confirmation_config is None:
+        if os.getenv("CLOUD_PROVIDER") == "aws":
+            import boto3
+
+            from larp_bot.adapters.aws import SsmRuntimeConfigProvider
+
+            prefix = os.getenv("AWS_PARAMETER_PREFIX")
+            if not prefix:
+                raise RuntimeError("missing required runtime config: AWS_PARAMETER_PREFIX")
+            _confirmation_config = SsmRuntimeConfigProvider(boto3.client("ssm"), prefix)
+            return _confirmation_config
         required = {
             "config_url": "RUNTIME_CONFIG_URL",
             "audience": "RUNTIME_CONFIG_AUDIENCE",
@@ -205,7 +230,9 @@ def _confirmation_config_instance(context: Any) -> RuntimeConfigProvider:
             iam_token=iam_token,
         )
     elif iam_token is not None:
-        _confirmation_config.set_iam_token(iam_token)
+        set_iam_token = getattr(_confirmation_config, "set_iam_token", None)
+        if callable(set_iam_token):
+            set_iam_token(iam_token)
     return _confirmation_config
 
 
@@ -237,10 +264,12 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         body = _body(event)
         if len(body) > 256 * 1024:
             return _response(413, {"error": "body too large"})
-        method = str(event.get("httpMethod", "POST")).upper()
+        request_context = event.get("requestContext")
+        http_context = request_context.get("http", {}) if isinstance(request_context, dict) else {}
+        method = str(event.get("httpMethod") or http_context.get("method") or "POST").upper()
         if method != "POST":
             return _response(405, {"error": "method not allowed"})
-        path = str(event.get("path", ""))
+        path = str(event.get("path") or event.get("rawPath") or http_context.get("path") or "")
         if path.endswith("/telegram"):
             app = await _container_instance(context)
             return await _telegram(event, body, app)
@@ -263,4 +292,6 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    if os.getenv("CLOUD_PROVIDER") == "aws" and not RuntimeGate.from_environment().accepts_application_work:
+        return _response(503, {"error": "AWS backend is not active"})
     return _runner.run(async_handler(event, context))

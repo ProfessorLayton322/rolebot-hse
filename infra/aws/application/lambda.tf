@@ -9,7 +9,7 @@ resource "aws_lambda_function" "application" {
   for_each = local.lambda_definitions
 
   function_name = local.function_names[each.key]
-  description   = "Standby ${replace(each.key, "_", " ")} function; Phase 2 supplies AWS adapters"
+  description   = "Gated ${replace(each.key, "_", " ")} function; standby controls block production work"
   role          = aws_iam_role.lambda[each.key].arn
   runtime       = each.value.runtime
   handler       = each.value.handler
@@ -22,12 +22,25 @@ resource "aws_lambda_function" "application" {
 
   environment {
     variables = {
-      APP_LOG_LEVEL        = "INFO"
-      APPLICATION_MODE     = "standby"
-      MUTATIONS_ENABLED    = "false"
-      AWS_STORAGE_BUCKET   = aws_s3_bucket.application.id
-      AWS_FIFO_QUEUE_URL   = aws_sqs_queue.registration_commands.id
-      AWS_PARAMETER_PREFIX = "/${var.project_name}/production/"
+      APP_LOG_LEVEL                = "INFO"
+      APPLICATION_MODE             = "standby"
+      MUTATIONS_ENABLED            = "false"
+      CLOUD_PROVIDER               = "aws"
+      AWS_STORAGE_BUCKET           = aws_s3_bucket.application.id
+      AWS_FIFO_QUEUE_URL           = aws_sqs_queue.registration_commands.id
+      AWS_PARAMETER_PREFIX         = "/${var.project_name}/production/"
+      AWS_DISK_UPLOADER_FUNCTION   = local.function_names.disk_uploader
+      DYNAMODB_TG_USERS_TABLE      = local.table_names.tg_users
+      DYNAMODB_VK_USERS_TABLE      = local.table_names.vk_users
+      DYNAMODB_EVENTS_TABLE        = local.table_names.events
+      DYNAMODB_EVENT_LEADERS_TABLE = local.table_names.event_leaders
+      DYNAMODB_REGISTRATIONS_TABLE = local.table_names.registrations
+      TELEGRAM_EGRESS_URL          = "https://${var.project_name}-telegram-egress.${var.cloudflare_workers_subdomain}.workers.dev"
+      GOOGLE_FOLDER_ID             = var.google_folder_id
+      TG_ADMIN_IDS                 = var.tg_admin_ids
+      VK_ADMIN_IDS                 = var.vk_admin_ids
+      TG_GAMEMASTER_IDS            = var.tg_gamemaster_ids
+      VK_GAMEMASTER_IDS            = var.vk_gamemaster_ids
     }
   }
 

@@ -225,7 +225,11 @@ func newDirectNotifier(
 	env environment,
 	config runtimeConfiguration,
 ) (*directNotifier, error) {
-	telegramSecret, err := config.required("YANDEX_TO_CF_EGRESS_HMAC_SECRET")
+	secretName := "YANDEX_TO_CF_EGRESS_HMAC_SECRET"
+	if config.Values["AWS_TO_CF_EGRESS_HMAC_SECRET"] != "" {
+		secretName = "AWS_TO_CF_EGRESS_HMAC_SECRET"
+	}
+	telegramSecret, err := config.required(secretName)
 	if err != nil {
 		return nil, err
 	}
