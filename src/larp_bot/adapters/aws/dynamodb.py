@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
@@ -338,6 +339,12 @@ class DynamoUserRepository(_DynamoMemoryRepository[MemoryUserRepository]):
         return desired
 
 
+class _DynamoMemoryEventRepository(MemoryEventRepository):
+    def __init__(self, events: list[Event]) -> None:
+        super().__init__(events)
+        self.leader_created_at: dict[tuple[str, Platform, int], datetime] = {}
+
+
 class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
     def __init__(self, client: Any, *, events_table: str, leaders_table: str) -> None:
         super().__init__(client)
@@ -357,9 +364,20 @@ class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
             document=key | indexes | {"record_type": "event", "payload": event.model_dump_json()},
         )
 
-    def _leader_item(self, event_id: str, platform: Platform, user_id: int, revision: int = 0) -> _StoredItem:
+    def _leader_item(
+        self,
+        event_id: str,
+        platform: Platform,
+        user_id: int,
+        revision: int = 0,
+        *,
+        created_at: datetime | None = None,
+    ) -> _StoredItem:
         leader_key = f"{platform.value}:{user_id}"
         key = {"event_id": event_id, "leader_key": leader_key}
+        timestamp = created_at or datetime.now(UTC)
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ValueError("event leader creation time must include a timezone")
         return _StoredItem(
             table=self.leaders_table,
             key=key,
@@ -369,6 +387,7 @@ class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
                 "record_type": "event_leader",
                 "platform": platform.value,
                 "platform_user_id": str(user_id),
+                "created_at": timestamp.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
             },
         )
 
@@ -525,19 +544,22 @@ class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
             item = self._event_item(event, int(row.get("_revision", 0)))
             stored[("event", event.event_id)] = item
             events.append(event)
-        repository = MemoryEventRepository(events)
+        repository = _DynamoMemoryEventRepository(events)
         for row in leader_rows:
             if row.get("record_type") != "event_leader":
                 continue
             event_id = str(row["event_id"])
             platform = Platform(str(row["platform"]))
             user_id = int(row["platform_user_id"])
+            created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
             repository.leaders.setdefault(event_id, set()).add((platform, user_id))
+            repository.leader_created_at[(event_id, platform, user_id)] = created_at
             stored[("leader", event_id, platform.value, str(user_id))] = self._leader_item(
                 event_id,
                 platform,
                 user_id,
                 int(row.get("_revision", 0)),
+                created_at=created_at,
             )
         return repository, stored
 
@@ -549,10 +571,14 @@ class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
             if event_id not in repository.rows:
                 continue
             for platform, user_id in leaders:
+                leader_created_at = (
+                    repository.leader_created_at if isinstance(repository, _DynamoMemoryEventRepository) else {}
+                )
                 desired[("leader", event_id, platform.value, str(user_id))] = self._leader_item(
                     event_id,
                     platform,
                     user_id,
+                    created_at=leader_created_at.get((event_id, platform, user_id)),
                 )
         return desired
 
