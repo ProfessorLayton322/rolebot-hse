@@ -87,6 +87,12 @@
       "Resource": "arn:aws:lambda:eu-central-1:319215798726:function:larp-bot-prod-*"
     },
     {
+      "Sid": "ReadApplicationLambdaEventSourceMappings",
+      "Effect": "Allow",
+      "Action": "lambda:GetEventSourceMapping",
+      "Resource": "arn:aws:lambda:eu-central-1:319215798726:event-source-mapping:*"
+    },
+    {
       "Sid": "ReadApplicationScheduler",
       "Effect": "Allow",
       "Action": ["scheduler:GetSchedule", "scheduler:ListTagsForResource"],
