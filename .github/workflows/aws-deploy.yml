@@ -1,14 +1,19 @@
-name: AWS standby deploy
+name: AWS application deploy
 
 on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type DEPLOY_STANDBY to apply the disabled AWS stack
+        description: Type APPLY_AWS_CONTROLS to apply the repository runtime controls
         required: true
         type: string
       billing_guardrails_confirmed:
         description: Payer-account budget and billing alerts were verified
+        required: true
+        default: false
+        type: boolean
+      run_rehearsal_smoke:
+        description: Exercise signed HTTP, egress, scheduler target, and upload path against rehearsal tables
         required: true
         default: false
         type: boolean
@@ -23,7 +28,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: inputs.confirmation == 'DEPLOY_STANDBY' && inputs.billing_guardrails_confirmed
+    if: inputs.confirmation == 'APPLY_AWS_CONTROLS' && inputs.billing_guardrails_confirmed
     runs-on: ubuntu-latest
     environment: production
     env:
@@ -33,6 +38,12 @@ jobs:
       TF_VAR_vk_admin_ids: ${{ vars.VK_ADMIN_IDS }}
       TF_VAR_tg_gamemaster_ids: ${{ vars.TG_GAMEMASTER_IDS }}
       TF_VAR_vk_gamemaster_ids: ${{ vars.VK_GAMEMASTER_IDS }}
+      TF_VAR_application_mode: ${{ vars.AWS_APPLICATION_MODE || 'standby' }}
+      TF_VAR_mutations_enabled: ${{ vars.AWS_MUTATIONS_ENABLED || 'false' }}
+      TF_VAR_sqs_event_mapping_enabled: ${{ vars.AWS_SQS_EVENT_MAPPING_ENABLED || 'false' }}
+      TF_VAR_scheduler_enabled: ${{ vars.AWS_SCHEDULER_ENABLED || 'false' }}
+      TF_VAR_rehearsal_tables_enabled: ${{ vars.AWS_REHEARSAL_TABLES_ENABLED || 'false' }}
+      TF_VAR_runtime_table_target: ${{ vars.AWS_RUNTIME_TABLE_TARGET || 'production' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -52,7 +63,7 @@ jobs:
           test "${account_id}" = "${{ vars.AWS_ACCOUNT_ID }}"
       - name: Build gated AWS application packages
         run: bash scripts/build_aws_application_packages.sh
-      - name: Apply disabled AWS application stack
+      - name: Apply AWS application stack and runtime controls
         working-directory: infra/aws/application
         run: |
           terraform init \
@@ -106,9 +117,38 @@ jobs:
           put_secret participant_key_hmac_secret "${PARTICIPANT_KEY_HMAC_SECRET}"
           put_secret cloudflare_ingress_hmac_secret "${CF_TO_AWS_HMAC_SECRET}"
           put_secret cloudflare_egress_hmac_secret "${AWS_TO_CF_EGRESS_HMAC_SECRET}"
-      - name: Confirm standby controls
+      - name: Confirm reversible runtime controls
         working-directory: infra/aws/application
         run: |
-          test "$(terraform output -json standby_controls | jq -r .gateway_auth_type)" = "NONE"
-          test "$(terraform output -json standby_controls | jq -r .sqs_event_mapping_state)" = "false"
-          test "$(terraform output -json standby_controls | jq -r .scheduler_state)" = "DISABLED"
+          controls="$(terraform output -json standby_controls)"
+          test "$(jq -r .gateway_auth_type <<<"${controls}")" = "NONE"
+          test "$(jq -r .application_mode <<<"${controls}")" = "${TF_VAR_application_mode}"
+          test "$(jq -r .mutation_enabled <<<"${controls}")" = "${TF_VAR_mutations_enabled}"
+          test "$(jq -r .runtime_table_target <<<"${controls}")" = "${TF_VAR_runtime_table_target}"
+          test "$(jq -r .rehearsal_tables <<<"${controls}")" = "${TF_VAR_rehearsal_tables_enabled}"
+          test "$(jq -r .sqs_event_mapping_state <<<"${controls}")" = "${TF_VAR_sqs_event_mapping_enabled}"
+          if test "${TF_VAR_scheduler_enabled}" = "true"; then
+            test "$(jq -r .scheduler_state <<<"${controls}")" = "ENABLED"
+          else
+            test "$(jq -r .scheduler_state <<<"${controls}")" = "DISABLED"
+          fi
+      - name: Exercise standby AWS integrations with rehearsal data
+        if: inputs.run_rehearsal_smoke
+        working-directory: infra/aws/application
+        env:
+          CF_TO_AWS_HMAC_SECRET: ${{ secrets.CF_TO_AWS_HMAC_SECRET }}
+          AWS_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.AWS_TO_CF_EGRESS_HMAC_SECRET }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
+          TG_ADMIN_IDS: ${{ vars.TG_ADMIN_IDS }}
+        run: |
+          test "${TF_VAR_application_mode}" = "active"
+          test "${TF_VAR_mutations_enabled}" = "true"
+          test "${TF_VAR_runtime_table_target}" = "rehearsal"
+          test "${TF_VAR_rehearsal_tables_enabled}" = "true"
+          export AWS_GATEWAY_URL="$(terraform output -raw standby_gateway_url)"
+          export AWS_STORAGE_BUCKET="$(terraform output -raw application_bucket)"
+          export TELEGRAM_EGRESS_URL="$(terraform output -raw telegram_egress_url)"
+          python ../../../scripts/smoke_aws_rehearsal.py

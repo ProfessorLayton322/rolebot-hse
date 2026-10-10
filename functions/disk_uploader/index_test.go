@@ -15,6 +15,22 @@ import (
 	"time"
 )
 
+func TestYandexUploaderRuntimeGateDefaultsToEnabledAndHonorsMaintenance(t *testing.T) {
+	if !yandexUploaderEnabled() {
+		t.Fatal("legacy runtime without controls must remain enabled")
+	}
+	t.Setenv("APPLICATION_MODE", "maintenance")
+	t.Setenv("MUTATIONS_ENABLED", "false")
+	if yandexUploaderEnabled() {
+		t.Fatal("maintenance runtime accepted work")
+	}
+	t.Setenv("APPLICATION_MODE", "active")
+	t.Setenv("MUTATIONS_ENABLED", "true")
+	if !yandexUploaderEnabled() {
+		t.Fatal("active runtime rejected work")
+	}
+}
+
 func TestValidateJobRejectsObjectsOutsideItsStagingDirectory(t *testing.T) {
 	job := uploadJob{
 		SchemaVersion: 1,

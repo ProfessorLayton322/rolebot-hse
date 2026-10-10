@@ -20,6 +20,9 @@ var (
 
 // Handler is the Yandex Cloud Functions timer entry point.
 func Handler(ctx context.Context, _ []byte) ([]byte, error) {
+	if !yandexRuntimeEnabled() {
+		return json.Marshal(map[string]any{"processed": false})
+	}
 	env, err := loadEnvironment()
 	if err != nil {
 		return nil, err

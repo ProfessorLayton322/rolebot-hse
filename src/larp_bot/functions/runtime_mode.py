@@ -36,3 +36,8 @@ class RuntimeGate:
     @property
     def accepts_application_work(self) -> bool:
         return self.mode is ApplicationMode.ACTIVE and self.mutations_enabled
+
+
+def runtime_controls_configured(environment: Mapping[str, str] | None = None) -> bool:
+    values = os.environ if environment is None else environment
+    return "APPLICATION_MODE" in values or "MUTATIONS_ENABLED" in values

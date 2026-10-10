@@ -39,6 +39,15 @@ type environment struct {
 	TelegramEgressURL       string
 }
 
+func yandexRuntimeEnabled() bool {
+	mode, modeConfigured := os.LookupEnv("APPLICATION_MODE")
+	mutations, mutationsConfigured := os.LookupEnv("MUTATIONS_ENABLED")
+	if !modeConfigured && !mutationsConfigured {
+		return true
+	}
+	return mode == "active" && mutations == "true"
+}
+
 func loadEnvironment() (environment, error) {
 	env := environment{
 		YDBEndpoint:             os.Getenv("YDB_ENDPOINT"),

@@ -9,7 +9,7 @@ resource "aws_lambda_function" "application" {
   for_each = local.lambda_definitions
 
   function_name = local.function_names[each.key]
-  description   = "Gated ${replace(each.key, "_", " ")} function; standby controls block production work"
+  description   = "Gated ${replace(each.key, "_", " ")} function; runtime controls protect cutover and rollback"
   role          = aws_iam_role.lambda[each.key].arn
   runtime       = each.value.runtime
   handler       = each.value.handler
@@ -22,25 +22,29 @@ resource "aws_lambda_function" "application" {
 
   environment {
     variables = {
-      APP_LOG_LEVEL                = "INFO"
-      APPLICATION_MODE             = "standby"
-      MUTATIONS_ENABLED            = "false"
+      APP_LOG_LEVEL = "INFO"
+      APPLICATION_MODE = (
+        each.key == "registration_notifier" && !var.scheduler_enabled ? "standby" : var.application_mode
+      )
+      MUTATIONS_ENABLED = tostring(
+        each.key == "registration_notifier" && !var.scheduler_enabled ? false : var.mutations_enabled
+      )
       CLOUD_PROVIDER               = "aws"
       AWS_STORAGE_BUCKET           = aws_s3_bucket.application.id
       AWS_FIFO_QUEUE_URL           = aws_sqs_queue.registration_commands.id
       AWS_PARAMETER_PREFIX         = "/${var.project_name}/production/"
       AWS_DISK_UPLOADER_FUNCTION   = local.function_names.disk_uploader
-      DYNAMODB_TG_USERS_TABLE      = local.table_names.tg_users
-      DYNAMODB_VK_USERS_TABLE      = local.table_names.vk_users
-      DYNAMODB_EVENTS_TABLE        = local.table_names.events
-      DYNAMODB_EVENT_LEADERS_TABLE = local.table_names.event_leaders
-      DYNAMODB_REGISTRATIONS_TABLE = local.table_names.registrations
+      DYNAMODB_TG_USERS_TABLE      = local.runtime_table_names.tg_users
+      DYNAMODB_VK_USERS_TABLE      = local.runtime_table_names.vk_users
+      DYNAMODB_EVENTS_TABLE        = local.runtime_table_names.events
+      DYNAMODB_EVENT_LEADERS_TABLE = local.runtime_table_names.event_leaders
+      DYNAMODB_REGISTRATIONS_TABLE = local.runtime_table_names.registrations
       TELEGRAM_EGRESS_URL          = "https://${var.project_name}-telegram-egress.${var.cloudflare_workers_subdomain}.workers.dev"
       GOOGLE_FOLDER_ID             = var.google_folder_id
-      TG_ADMIN_IDS                 = var.tg_admin_ids
-      VK_ADMIN_IDS                 = var.vk_admin_ids
-      TG_GAMEMASTER_IDS            = var.tg_gamemaster_ids
-      VK_GAMEMASTER_IDS            = var.vk_gamemaster_ids
+      TG_ADMIN_IDS                 = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_admin_ids
+      VK_ADMIN_IDS                 = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_admin_ids
+      TG_GAMEMASTER_IDS            = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_gamemaster_ids
+      VK_GAMEMASTER_IDS            = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_gamemaster_ids
     }
   }
 
@@ -80,7 +84,7 @@ resource "aws_lambda_permission" "gateway_function_url_invoke" {
 resource "aws_lambda_event_source_mapping" "registration_commands" {
   event_source_arn                   = aws_sqs_queue.registration_commands.arn
   function_name                      = aws_lambda_function.application["ordered_worker"].arn
-  enabled                            = false
+  enabled                            = var.sqs_event_mapping_enabled
   batch_size                         = 10
   maximum_batching_window_in_seconds = 0
   function_response_types            = ["ReportBatchItemFailures"]

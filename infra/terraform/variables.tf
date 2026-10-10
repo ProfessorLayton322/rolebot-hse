@@ -70,6 +70,30 @@ variable "aws_backend_url" {
   }
 }
 
+variable "yandex_gateway_enabled" {
+  type        = bool
+  description = "Accept new application work at the Yandex gateway."
+  default     = true
+}
+
+variable "yandex_background_enabled" {
+  type        = bool
+  description = "Allow Yandex workers and upload handlers to finish background mutations."
+  default     = true
+}
+
+variable "yandex_notifier_enabled" {
+  type        = bool
+  description = "Allow the hourly Yandex notifier invocation to perform work."
+  default     = true
+}
+
+variable "ydb_rehearsal_enabled" {
+  type        = bool
+  description = "Create the disposable Phase 5 YDB reverse-migration target."
+  default     = false
+}
+
 variable "gateway_max_instances" {
   type    = number
   default = 3

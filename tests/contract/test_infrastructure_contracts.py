@@ -9,10 +9,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_ydb_tables_include_registration_source_of_truth() -> None:
-    terraform = "\n".join(path.read_text() for path in (ROOT / "infra/terraform").glob("*.tf"))
-    resources = re.findall(r'resource\s+"yandex_ydb_table"\s+"([^"]+)"', terraform)
-    assert sorted(resources) == ["event_leaders", "events", "registrations", "tg_users", "vk_users"]
     ydb = (ROOT / "infra/terraform/ydb.tf").read_text()
+    resources = re.findall(r'resource\s+"yandex_ydb_table"\s+"([^"]+)"', ydb)
+    assert sorted(resources) == ["event_leaders", "events", "registrations", "tg_users", "vk_users"]
     assert 'primary_key = ["event_id", "participant_key"]' in ydb
     assert 'name = "confirmation_deadline"' in ydb
     assert 'name = "confirmation_open_at"' in ydb
@@ -59,6 +58,17 @@ def test_ydb_tables_include_registration_source_of_truth() -> None:
     assert 'primary_key = ["event_id", "platform", "platform_user_id"]' in ydb
     assert ydb.count('name = "telegram_handle"') == 2
     assert ydb.count('name = "linked_vk_id"') == 1
+
+
+def test_disposable_ydb_rehearsal_target_is_separate_and_disabled_by_default() -> None:
+    rehearsal = (ROOT / "infra/terraform/ydb_rehearsal.tf").read_text()
+    variables = (ROOT / "infra/terraform/variables.tf").read_text()
+
+    assert 'name                = "${var.project_name}-rehearsal"' in rehearsal
+    assert "deletion_protection = false" in rehearsal
+    assert 'resource "yandex_ydb_table" "rehearsal"' in rehearsal
+    assert "for_each = var.ydb_rehearsal_enabled" in rehearsal
+    assert re.search(r'variable "ydb_rehearsal_enabled"[^}]+default\s+= false', variables, re.DOTALL)
 
 
 def test_identity_index_is_synchronous_and_ready_before_functions_deploy() -> None:

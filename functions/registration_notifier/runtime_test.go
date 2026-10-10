@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+func TestYandexRuntimeGateDefaultsToEnabledAndHonorsMaintenance(t *testing.T) {
+	if !yandexRuntimeEnabled() {
+		t.Fatal("legacy runtime without controls must remain enabled")
+	}
+	t.Setenv("APPLICATION_MODE", "maintenance")
+	t.Setenv("MUTATIONS_ENABLED", "false")
+	if yandexRuntimeEnabled() {
+		t.Fatal("maintenance runtime accepted work")
+	}
+	t.Setenv("APPLICATION_MODE", "active")
+	t.Setenv("MUTATIONS_ENABLED", "true")
+	if !yandexRuntimeEnabled() {
+		t.Fatal("active runtime rejected work")
+	}
+}
+
 func TestTelegramNotificationKeepsProductionSizedIDsAndCallbackWithinLimit(t *testing.T) {
 	const (
 		eventID = "12345678-1234-1234-1234-123456789abc"

@@ -26,6 +26,10 @@ jobs:
       TF_VAR_cloudflare_workers_subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
       TF_VAR_cloudflare_active_backend: ${{ vars.ACTIVE_BACKEND }}
       TF_VAR_aws_backend_url: ${{ vars.AWS_BACKEND_URL }}
+      TF_VAR_yandex_gateway_enabled: ${{ vars.YANDEX_GATEWAY_ENABLED || 'true' }}
+      TF_VAR_yandex_background_enabled: ${{ vars.YANDEX_BACKGROUND_ENABLED || 'true' }}
+      TF_VAR_yandex_notifier_enabled: ${{ vars.YANDEX_NOTIFIER_ENABLED || 'true' }}
+      TF_VAR_ydb_rehearsal_enabled: ${{ vars.YDB_REHEARSAL_ENABLED || 'false' }}
       TF_VAR_google_folder_id: ${{ vars.GOOGLE_FOLDER_ID }}
     steps:
       - uses: actions/checkout@v4

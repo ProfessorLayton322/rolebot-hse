@@ -1,7 +1,7 @@
 resource "aws_scheduler_schedule" "registration_notifications" {
   name        = "${local.name_prefix}-registration-notifications"
-  description = "Disabled hourly registration lifecycle notifier"
-  state       = "DISABLED"
+  description = "Gated hourly registration lifecycle notifier"
+  state       = var.scheduler_enabled ? "ENABLED" : "DISABLED"
 
   schedule_expression          = "cron(0 * * * ? *)"
   schedule_expression_timezone = "UTC"

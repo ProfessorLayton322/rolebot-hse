@@ -65,3 +65,18 @@ async def test_worker_does_not_acknowledge_kick_when_continuation_cannot_be_save
 
     container.publisher.continue_if_pending.side_effect = None
     assert await module._run(None) == {"processed": 5}
+
+
+@pytest.mark.asyncio
+async def test_yandex_worker_noops_when_background_mutations_are_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("larp_bot.functions.ordered_worker.handler")
+    container = SimpleNamespace(worker=AsyncMock(), publisher=AsyncMock())
+    monkeypatch.setattr(module, "_container", container)
+    monkeypatch.setenv("APPLICATION_MODE", "maintenance")
+    monkeypatch.setenv("MUTATIONS_ENABLED", "false")
+
+    assert await module._run(None) == {"processed": 0}
+    container.worker.run.assert_not_awaited()
+    container.publisher.continue_if_pending.assert_not_awaited()

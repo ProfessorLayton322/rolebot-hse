@@ -70,6 +70,8 @@ resource "yandex_function" "disk_uploader" {
   concurrency        = 1
   service_account_id = yandex_iam_service_account.disk_uploader.id
   environment = {
+    APPLICATION_MODE           = var.yandex_background_enabled ? "active" : "maintenance"
+    MUTATIONS_ENABLED          = tostring(var.yandex_background_enabled)
     DISK_STAGING_BUCKET        = yandex_storage_bucket.deployment.bucket
     RUNTIME_CONFIG_URL         = local.runtime_config_url
     RUNTIME_CONFIG_AUDIENCE    = local.runtime_config_url
@@ -114,6 +116,8 @@ resource "yandex_function" "gateway" {
   concurrency        = 1
   service_account_id = yandex_iam_service_account.gateway.id
   environment = merge(local.function_environment, {
+    APPLICATION_MODE           = var.yandex_gateway_enabled ? "active" : "maintenance"
+    MUTATIONS_ENABLED          = tostring(var.yandex_gateway_enabled)
     RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.gateway.id
   })
   tags      = ["production"]
@@ -155,6 +159,8 @@ resource "yandex_function" "ordered_worker" {
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
   environment = merge(local.function_environment, {
+    APPLICATION_MODE           = var.yandex_background_enabled ? "active" : "maintenance"
+    MUTATIONS_ENABLED          = tostring(var.yandex_background_enabled)
     RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
     # Statistics includes two Drive updates and a bounded profile fanout.
     # The application deadline leaves 30 seconds for lease cleanup.
@@ -199,6 +205,8 @@ resource "yandex_function" "registration_notifier" {
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
   environment = merge(local.base_function_environment, {
+    APPLICATION_MODE           = var.yandex_notifier_enabled ? "active" : "maintenance"
+    MUTATIONS_ENABLED          = tostring(var.yandex_notifier_enabled)
     RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
   })
   tags      = ["production"]
@@ -234,6 +242,8 @@ resource "yandex_function" "upload_completion" {
   concurrency        = 1
   service_account_id = yandex_iam_service_account.worker.id
   environment = merge(local.base_function_environment, {
+    APPLICATION_MODE           = var.yandex_background_enabled ? "active" : "maintenance"
+    MUTATIONS_ENABLED          = tostring(var.yandex_background_enabled)
     RUNTIME_SERVICE_ACCOUNT_ID = yandex_iam_service_account.worker.id
     DISK_STAGING_BUCKET        = yandex_storage_bucket.deployment.bucket
     # The completion handler never submits uploads; this non-routable value

@@ -1,0 +1,96 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StateBucketMetadata",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:GetEncryptionConfiguration",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::rolebot-terraform-state-319215798726-eu-central-1",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "larp-bot/aws-production.tfstate",
+            "larp-bot/aws-production.tfstate.tflock"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReadTerraformState",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": [
+        "arn:aws:s3:::rolebot-terraform-state-319215798726-eu-central-1/larp-bot/aws-production.tfstate",
+        "arn:aws:s3:::rolebot-terraform-state-319215798726-eu-central-1/larp-bot/aws-production.tfstate.tflock"
+      ]
+    },
+    {
+      "Sid": "ManageTerraformLock",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::rolebot-terraform-state-319215798726-eu-central-1/larp-bot/aws-production.tfstate.tflock"
+    },
+    {
+      "Sid": "ReadApplicationIAM",
+      "Effect": "Allow",
+      "Action": ["iam:GetRole", "iam:GetRolePolicy"],
+      "Resource": "arn:aws:iam::319215798726:role/larp-bot-*"
+    },
+    {
+      "Sid": "ReadApplicationAlarms",
+      "Effect": "Allow",
+      "Action": "cloudwatch:DescribeAlarms",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadApplicationBucketConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetAccelerateConfiguration",
+        "s3:GetAnalyticsConfiguration",
+        "s3:GetBucketAcl",
+        "s3:GetBucketCors",
+        "s3:GetBucketLogging",
+        "s3:GetBucketNotification",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketPolicyStatus",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketWebsite",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetIntelligentTieringConfiguration",
+        "s3:GetInventoryConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetMetricsConfiguration",
+        "s3:GetReplicationConfiguration"
+      ],
+      "Resource": "arn:aws:s3:::larp-bot-prod-storage-319215798726-eu-central-1"
+    },
+    {
+      "Sid": "ReadApplicationLambdaConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction",
+        "lambda:GetFunctionCodeSigningConfig",
+        "lambda:GetFunctionConcurrency",
+        "lambda:GetFunctionUrlConfig"
+      ],
+      "Resource": "arn:aws:lambda:eu-central-1:319215798726:function:larp-bot-prod-*"
+    },
+    {
+      "Sid": "ReadApplicationScheduler",
+      "Effect": "Allow",
+      "Action": ["scheduler:GetSchedule", "scheduler:ListTagsForResource"],
+      "Resource": "arn:aws:scheduler:eu-central-1:319215798726:schedule/default/larp-bot-prod-*"
+    }
+  ]
+}

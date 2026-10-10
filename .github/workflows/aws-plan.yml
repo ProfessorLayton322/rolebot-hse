@@ -20,6 +20,12 @@ jobs:
       TF_VAR_vk_admin_ids: ${{ vars.VK_ADMIN_IDS }}
       TF_VAR_tg_gamemaster_ids: ${{ vars.TG_GAMEMASTER_IDS }}
       TF_VAR_vk_gamemaster_ids: ${{ vars.VK_GAMEMASTER_IDS }}
+      TF_VAR_application_mode: ${{ vars.AWS_APPLICATION_MODE || 'standby' }}
+      TF_VAR_mutations_enabled: ${{ vars.AWS_MUTATIONS_ENABLED || 'false' }}
+      TF_VAR_sqs_event_mapping_enabled: ${{ vars.AWS_SQS_EVENT_MAPPING_ENABLED || 'false' }}
+      TF_VAR_scheduler_enabled: ${{ vars.AWS_SCHEDULER_ENABLED || 'false' }}
+      TF_VAR_rehearsal_tables_enabled: ${{ vars.AWS_REHEARSAL_TABLES_ENABLED || 'false' }}
+      TF_VAR_runtime_table_target: ${{ vars.AWS_RUNTIME_TABLE_TARGET || 'production' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
