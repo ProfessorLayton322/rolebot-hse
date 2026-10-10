@@ -180,6 +180,7 @@ def main() -> None:
         method="POST",
         headers={
             "Content-Type": "application/json",
+            "User-Agent": "rolebot-aws-rehearsal/1.0",
             "X-Timestamp": timestamp,
             "X-Request-Id": egress_request_id,
             "X-Signature": signature,
