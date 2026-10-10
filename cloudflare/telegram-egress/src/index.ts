@@ -34,6 +34,7 @@ const ALLOWED_METHODS = new Set([
   "editMessageText",
   "deleteMessage",
   "answerCallbackQuery",
+  "getMe",
   "getChatMember",
   "getChat",
   "exportChatInviteLink",

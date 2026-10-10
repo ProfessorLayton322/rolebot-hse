@@ -161,47 +161,37 @@ def main() -> None:
     if status != 200 or response_body.decode() != required("VK_CONFIRMATION_STRING"):
         raise RuntimeError(f"AWS VK rehearsal returned HTTP {status}")
 
-    admin_ids = json.loads(required("TG_ADMIN_IDS"))
     egress_url = required("TELEGRAM_EGRESS_URL").rstrip("/") + "/telegram/send"
     parsed_egress_url = urllib.parse.urlparse(egress_url)
     if parsed_egress_url.scheme != "https" or not parsed_egress_url.netloc:
         raise RuntimeError("Telegram egress URL must be HTTPS")
-    egress_statuses: list[int] = []
-    for index, admin_id in enumerate(admin_ids):
-        egress_request_id = f"phase5-egress-{suffix}-{index}"
-        egress_body = json.dumps(
-            {
-                "request_id": egress_request_id,
-                "method": "getChat",
-                "payload": {"chat_id": int(admin_id)},
-            },
-            separators=(",", ":"),
-        ).encode()
-        timestamp = str(int(time.time()))
-        canonical = "\n".join(
-            (timestamp, egress_request_id, "POST", "/telegram/send", hashlib.sha256(egress_body).hexdigest())
-        )
-        signature = hmac.new(egress_secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
-        request = urllib.request.Request(  # noqa: S310
-            egress_url,
-            data=egress_body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Timestamp": timestamp,
-                "X-Request-Id": egress_request_id,
-                "X-Signature": signature,
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-                egress_statuses.append(response.status)
-                if response.status == 200 and json.loads(response.read()).get("ok") is True:
-                    break
-        except urllib.error.HTTPError as exc:
-            egress_statuses.append(exc.code)
-    else:
-        raise RuntimeError(f"AWS-signed Cloudflare egress rehearsal failed with statuses {egress_statuses}")
+    egress_request_id = f"phase5-egress-{suffix}"
+    egress_body = json.dumps(
+        {"request_id": egress_request_id, "method": "getMe", "payload": {}}, separators=(",", ":")
+    ).encode()
+    timestamp = str(int(time.time()))
+    canonical = "\n".join(
+        (timestamp, egress_request_id, "POST", "/telegram/send", hashlib.sha256(egress_body).hexdigest())
+    )
+    signature = hmac.new(egress_secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+    request = urllib.request.Request(  # noqa: S310
+        egress_url,
+        data=egress_body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Timestamp": timestamp,
+            "X-Request-Id": egress_request_id,
+            "X-Signature": signature,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            response_body = response.read()
+            if response.status != 200 or json.loads(response_body).get("ok") is not True:
+                raise RuntimeError("AWS-signed Cloudflare egress rehearsal failed")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"AWS-signed Cloudflare egress rehearsal returned HTTP {exc.code}") from exc
 
     notifier_result = invoke(lambda_client, "larp-bot-prod-registration-notifier", {"source": "phase5-rehearsal"})
     if notifier_result.get("processed") is not False:
