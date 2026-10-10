@@ -126,6 +126,16 @@ data "aws_iam_policy_document" "lambda" {
   }
 
   dynamic "statement" {
+    for_each = each.key == "disk_uploader" ? [1] : []
+    content {
+      sid       = "InspectApplicationStorage"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket"]
+      resources = [aws_s3_bucket.application.arn]
+    }
+  }
+
+  dynamic "statement" {
     for_each = contains(["gateway", "ordered_worker"], each.key) ? [1] : []
     content {
       sid       = "InvokeDiskUploader"
