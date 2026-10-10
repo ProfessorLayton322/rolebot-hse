@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from larp_bot.functions.bootstrap import AppContainer, build_container, iam_token_from_context
+from larp_bot.functions.bootstrap import build_container
+from larp_bot.functions.container import AppContainer, iam_token_from_context
 
 _container: AppContainer | None = None
 # The cached container includes async transports. Reuse one event loop for the

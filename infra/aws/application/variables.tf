@@ -32,14 +32,50 @@ variable "environment" {
   default     = "prod"
 }
 
-variable "python_standby_zip_path" {
-  description = "Standby-only Python package built by scripts/build_aws_standby_packages.sh."
+variable "python_application_zip_path" {
+  description = "Gated Python application package built by scripts/build_aws_application_packages.sh."
   type        = string
-  default     = "../../../dist/aws-standby-python.zip"
+  default     = "../../../dist/aws-application-python.zip"
 }
 
-variable "go_standby_zip_path" {
-  description = "Standby-only Go bootstrap package built by scripts/build_aws_standby_packages.sh."
+variable "registration_notifier_zip_path" {
+  description = "AWS-native Go registration notifier package."
   type        = string
-  default     = "../../../dist/aws-standby-go.zip"
+  default     = "../../../dist/aws-registration-notifier.zip"
+}
+
+variable "disk_uploader_zip_path" {
+  description = "AWS-native Go disk uploader package."
+  type        = string
+  default     = "../../../dist/aws-disk-uploader.zip"
+}
+
+variable "cloudflare_workers_subdomain" {
+  description = "Existing Cloudflare workers.dev account subdomain."
+  type        = string
+}
+
+variable "google_folder_id" {
+  description = "Existing Google Drive folder used by statistics exports."
+  type        = string
+}
+
+variable "tg_admin_ids" {
+  description = "JSON array of Telegram administrators."
+  type        = string
+}
+
+variable "vk_admin_ids" {
+  description = "JSON array of VK administrators."
+  type        = string
+}
+
+variable "tg_gamemaster_ids" {
+  description = "JSON array of Telegram gamemasters."
+  type        = string
+}
+
+variable "vk_gamemaster_ids" {
+  description = "JSON array of VK gamemasters."
+  type        = string
 }

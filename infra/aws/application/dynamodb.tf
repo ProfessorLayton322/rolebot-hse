@@ -38,6 +38,18 @@ resource "aws_dynamodb_table" "tg_users" {
     }
   }
 
+  global_secondary_index {
+    name            = "telegram-handle"
+    projection_type = "ALL"
+    read_capacity   = 1
+    write_capacity  = 1
+
+    key_schema {
+      attribute_name = "telegram_handle"
+      key_type       = "HASH"
+    }
+  }
+
   deletion_protection_enabled = true
 
   point_in_time_recovery {

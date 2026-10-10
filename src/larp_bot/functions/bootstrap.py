@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
-
 import boto3
 
 from larp_bot.adapters.google_drive import GoogleDriveRestClient, GoogleDriveStatisticsRepository
@@ -12,10 +9,7 @@ from larp_bot.adapters.transports import (
     MultiplexedDeferredTransport,
     VkApiTransport,
 )
-from larp_bot.adapters.yandex_disk.repository import (
-    YandexDiskRestClient,
-    YandexDiskShowcaseRepository,
-)
+from larp_bot.adapters.yandex_disk.repository import YandexDiskRestClient, YandexDiskShowcaseRepository
 from larp_bot.adapters.yandex_disk.uploader import StagedYandexDiskUploader
 from larp_bot.adapters.ydb import YdbEventRepository, YdbExecutor, YdbRegistrationRepository, YdbUserRepository
 from larp_bot.adapters.ymq import YmqCommandPublisher, YmqFifoConsumer
@@ -34,29 +28,9 @@ from larp_bot.application.upload_completion import UploadCompletionService
 from larp_bot.application.worker import OrderedWorker
 from larp_bot.config import Settings
 from larp_bot.config.logging import configure_logging
+from larp_bot.functions.container import AppContainer, iam_token_from_context
 
-
-@dataclass
-class AppContainer:
-    settings: Settings
-    config: RuntimeConfigProvider
-    users: YdbUserRepository
-    events: YdbEventRepository
-    registrations: YdbRegistrationRepository
-    showcase: YandexDiskShowcaseRepository
-    disk_uploader: StagedYandexDiskUploader
-    publisher: YmqCommandPublisher
-    transport: MultiplexedDeferredTransport
-    telegram_chat_management: TelegramChatManagementService
-    conversation: ConversationEngine
-    worker: OrderedWorker
-    upload_completion: UploadCompletionService
-
-
-def iam_token_from_context(context: Any) -> str | None:
-    token = getattr(context, "token", None)
-    access_token = token.get("access_token") if isinstance(token, dict) else getattr(token, "access_token", None)
-    return access_token if isinstance(access_token, str) and access_token else None
+__all__ = ["AppContainer", "build_container", "iam_token_from_context"]
 
 
 async def build_container(*, iam_token: str | None = None) -> AppContainer:

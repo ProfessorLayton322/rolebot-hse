@@ -26,11 +26,18 @@ jobs:
     if: inputs.confirmation == 'DEPLOY_STANDBY' && inputs.billing_guardrails_confirmed
     runs-on: ubuntu-latest
     environment: production
+    env:
+      TF_VAR_cloudflare_workers_subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+      TF_VAR_google_folder_id: ${{ vars.GOOGLE_FOLDER_ID }}
+      TF_VAR_tg_admin_ids: ${{ vars.TG_ADMIN_IDS }}
+      TF_VAR_vk_admin_ids: ${{ vars.VK_ADMIN_IDS }}
+      TF_VAR_tg_gamemaster_ids: ${{ vars.TG_GAMEMASTER_IDS }}
+      TF_VAR_vk_gamemaster_ids: ${{ vars.VK_GAMEMASTER_IDS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.9"
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: "1.15.9"
@@ -43,8 +50,8 @@ jobs:
         run: |
           account_id="$(aws sts get-caller-identity --query Account --output text)"
           test "${account_id}" = "${{ vars.AWS_ACCOUNT_ID }}"
-      - name: Build inert standby packages
-        run: bash scripts/build_aws_standby_packages.sh
+      - name: Build gated AWS application packages
+        run: bash scripts/build_aws_application_packages.sh
       - name: Apply disabled AWS application stack
         working-directory: infra/aws/application
         run: |
@@ -62,6 +69,7 @@ jobs:
           VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
           VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
           VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
           YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
@@ -92,6 +100,7 @@ jobs:
           put_secret vk_access_token "${VK_ACCESS_TOKEN}"
           put_secret vk_callback_secret "${VK_CALLBACK_SECRET}"
           put_secret vk_confirmation_string "${VK_CONFIRMATION_STRING}"
+          put_secret vk_group_id "${VK_GROUP_ID}"
           put_secret yandex_disk_token "${YANDEX_DISK_TOKEN}"
           put_secret google_service_account_json "${GOOGLE_SERVICE_ACCOUNT_JSON}"
           put_secret participant_key_hmac_secret "${PARTICIPANT_KEY_HMAC_SECRET}"

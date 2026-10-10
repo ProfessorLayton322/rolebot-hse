@@ -35,7 +35,21 @@ and versioned Object Storage bucket were observed read-only. Cloudflare was not
 changed; the local Wrangler session had expired, and Phase 1 does not depend on
 a Cloudflare change.
 
-## Billing guardrail gap
+## Billing guardrail completion and first standby deployment
+
+The payer-account administrator confirmed on 2026-10-10 that the alert setup
+below was completed. The managed member account still cannot independently
+enumerate those payer-owned settings, so this is an operator attestation rather
+than a member-account API assertion.
+
+After that confirmation, GitHub Actions run
+[`38013678685`](https://github.com/ProfessorLayton322/rolebot-hse/actions/runs/38013678685)
+successfully applied the Phase 1 standby stack and populated its Standard
+SecureString parameters. The workflow then asserted that the Function URL used
+`AWS_IAM`, the SQS event source mapping was disabled, and the EventBridge
+schedule was disabled. Yandex and Cloudflare routing were not changed.
+
+## Payer-account procedure used
 
 The workload account has no account-local AWS Budget and no CloudWatch alarm
 for the `AWS/Billing` namespace in `us-east-1`. The managed account denies the
@@ -44,7 +58,8 @@ no member-account data. Those settings therefore require the payer/management
 account console and cannot be safely inferred or repaired with the application
 deployment role.
 
-Complete the following before manually running `AWS standby deploy`:
+The following is the retained procedure for future audits or replacement alert
+destinations:
 
 1. Sign in to the AWS payer/management account and open **Billing and Cost
    Management**.

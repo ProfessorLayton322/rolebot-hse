@@ -47,10 +47,10 @@ def test_dynamodb_mirror_is_protected_and_within_free_tier_capacity() -> None:
     assert dynamodb.count("deletion_protection_enabled = true") == 5
     assert dynamodb.count("prevent_destroy = true") == 5
     assert dynamodb.count("enabled = false") == 5
-    assert dynamodb.count("global_secondary_index") == 4
-    # Five tables plus four GSIs at one unit each stay below 25 RCUs/WCUs.
-    assert dynamodb.count("read_capacity") == 9
-    assert dynamodb.count("write_capacity") == 9
+    assert dynamodb.count("global_secondary_index") == 5
+    # Five tables plus five GSIs at one unit each stay below 25 RCUs/WCUs.
+    assert dynamodb.count("read_capacity") == 10
+    assert dynamodb.count("write_capacity") == 10
 
 
 def test_phase_one_standby_controls_cannot_accept_production_traffic() -> None:
@@ -67,8 +67,8 @@ def test_phase_one_standby_controls_cannot_accept_production_traffic() -> None:
     assert 'authorization_type = "AWS_IAM"' in lambda_config
     assert re.search(r"aws_lambda_event_source_mapping[^}]+enabled\s+= false", lambda_config, re.DOTALL)
     assert 'state       = "DISABLED"' in scheduler
-    assert 'APPLICATION_MODE     = "standby"' in lambda_config
-    assert 'MUTATIONS_ENABLED    = "false"' in lambda_config
+    assert 'APPLICATION_MODE             = "standby"' in lambda_config
+    assert 'MUTATIONS_ENABLED            = "false"' in lambda_config
     assert placeholders.count("standby") >= 2
     assert "vpc_config" not in terraform
     assert "provisioned_concurrent" not in terraform
@@ -102,7 +102,8 @@ def test_ssm_secrets_never_flow_through_terraform_inputs() -> None:
     assert "aws ssm put-parameter" in workflow
     assert "terraform output -json runtime_parameter_names" in workflow
     assert '"${byte_count}" -gt 4096' in workflow
-    assert "TF_VAR_" not in workflow
+    assert "TF_VAR_CF_TO_AWS_HMAC_SECRET" not in workflow
+    assert "TF_VAR_AWS_TO_CF_EGRESS_HMAC_SECRET" not in workflow
 
 
 def test_aws_workflows_use_oidc_and_deploy_only_manually() -> None:
@@ -122,11 +123,68 @@ def test_aws_workflows_use_oidc_and_deploy_only_manually() -> None:
     assert "billing_guardrails_confirmed" in deploy
 
 
-def test_go_standby_package_is_built_as_linux_bootstrap() -> None:
-    build = (ROOT / "scripts/build_aws_standby_packages.sh").read_text()
+def test_go_aws_packages_are_built_as_linux_bootstraps() -> None:
+    build = (ROOT / "scripts/build_aws_application_packages.sh").read_text()
     lambda_config = (APPLICATION / "locals.tf").read_text()
 
-    assert "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build" in build
-    assert '"${go_build_dir}/bootstrap"' in build
+    assert build.count("CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go") == 2
+    assert '"${notifier_build_dir}/bootstrap"' in build
+    assert '"${uploader_build_dir}/bootstrap"' in build
+    assert build.count("-tags=aws") == 2
+    assert build.count("-modfile=aws.go.mod") == 2
+    assert "aws-registration-notifier.zip" in build
+    assert "aws-disk-uploader.zip" in build
     assert lambda_config.count('runtime     = "provided.al2023"') == 2
     assert lambda_config.count('handler     = "bootstrap"') == 2
+
+    workflows = "\n".join(
+        (ROOT / path).read_text()
+        for path in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/aws-plan.yml",
+            ".github/workflows/aws-deploy.yml",
+        )
+    )
+    assert 'go-version: "1.26.9"' in workflows
+
+
+def test_phase_two_handlers_remain_hard_gated_in_standby() -> None:
+    lambda_config = (APPLICATION / "lambda.tf").read_text()
+    locals_config = (APPLICATION / "locals.tf").read_text()
+    runtime_gate = (ROOT / "src/larp_bot/functions/runtime_mode.py").read_text()
+    build = (ROOT / "scripts/build_aws_application_packages.sh").read_text()
+
+    assert 'APPLICATION_MODE             = "standby"' in lambda_config
+    assert 'MUTATIONS_ENABLED            = "false"' in lambda_config
+    assert 'CLOUD_PROVIDER               = "aws"' in lambda_config
+    assert 'handler     = "aws_gateway.handler"' in locals_config
+    assert 'handler     = "aws_ordered_worker.handler"' in locals_config
+    assert 'handler     = "aws_upload_completion.handler"' in locals_config
+    assert "mode is ApplicationMode.ACTIVE and self.mutations_enabled" in runtime_gate
+    assert "requirements-aws.txt" in build
+    assert "50 * 1024 * 1024" in build
+    assert "250 * 1024 * 1024" in build
+
+
+def test_phase_two_go_ports_use_aws_services_and_runtime_gates() -> None:
+    notifier = (ROOT / "functions/registration_notifier/aws_main.go").read_text()
+    uploader = (ROOT / "functions/disk_uploader/aws_main.go").read_text()
+
+    assert "dynamodb.NewFromConfig" in notifier
+    assert "sqs.NewFromConfig" in notifier
+    assert "ssm.NewFromConfig" in notifier
+    assert 'os.Getenv("APPLICATION_MODE") == "active"' in notifier
+    assert "s3.NewFromConfig" in uploader
+    assert "upload-completions/" in uploader
+    assert 'os.Getenv("APPLICATION_MODE") == "active"' in uploader
+
+
+def test_phase_two_runtime_parameters_and_function_url_stay_private() -> None:
+    locals_config = (APPLICATION / "locals.tf").read_text()
+    lambda_config = (APPLICATION / "lambda.tf").read_text()
+    deploy = (ROOT / ".github/workflows/aws-deploy.yml").read_text()
+
+    assert "vk_group_id" in locals_config
+    assert 'authorization_type = "AWS_IAM"' in lambda_config
+    assert 'put_secret vk_group_id "${VK_GROUP_ID}"' in deploy
+    assert "CF_TO_AWS_HMAC_SECRET" in deploy

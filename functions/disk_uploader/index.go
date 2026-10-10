@@ -174,7 +174,10 @@ func validateJob(job *uploadJob) error {
 			return errors.New("upload file roles must be valid and unique")
 		}
 		seen[file.Role] = true
-		if !strings.HasPrefix(file.ObjectKey, stagingPrefix+job.JobID+"/") || strings.Contains(file.ObjectKey, "..") {
+		legacyPrefix := stagingPrefix + job.JobID + "/"
+		awsPrefix := "uploads/" + job.JobID + "/"
+		if (!strings.HasPrefix(file.ObjectKey, legacyPrefix) && !strings.HasPrefix(file.ObjectKey, awsPrefix)) ||
+			strings.Contains(file.ObjectKey, "..") {
 			return errors.New("upload object key is outside the job staging directory")
 		}
 		if len(file.ObjectVersion) > 1024 || strings.ContainsAny(file.ObjectVersion, "\r\n") {
