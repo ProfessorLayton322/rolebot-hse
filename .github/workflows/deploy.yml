@@ -10,6 +10,11 @@ on:
         required: true
         default: false
         type: boolean
+      verify_vk_callback_route:
+        description: Require VK's confirmed callback server to use the stable Cloudflare URL
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -181,6 +186,38 @@ jobs:
           TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
           TELEGRAM_INGRESS_URL: ${{ steps.outputs.outputs.telegram_ingress_url }}
         run: bash scripts/configure_telegram_webhook.sh
+      - name: Verify VK stable callback registration
+        if: inputs.verify_vk_callback_route
+        env:
+          VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          VK_CALLBACK_URL: ${{ steps.outputs.outputs.vk_callback_url }}
+        run: |
+          response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --data-urlencode "access_token=${VK_ACCESS_TOKEN}" \
+            --data-urlencode 'v=5.199' \
+            --data-urlencode "group_id=${VK_GROUP_ID}" \
+            --output "${response_file}" \
+            'https://api.vk.com/method/groups.getCallbackServers'
+          python - "${response_file}" "${VK_CALLBACK_URL}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              payload = json.load(stream)
+          if "error" in payload:
+              error = payload["error"]
+              raise SystemExit(f"VK API error {error.get('error_code')}: {error.get('error_msg')}")
+          expected = sys.argv[2].rstrip("/")
+          items = payload.get("response", {}).get("items", [])
+          configured = [(str(item.get("url", "")).rstrip("/"), item.get("status")) for item in items]
+          if (expected, "ok") not in configured:
+              raise SystemExit(f"VK callback is not confirmed at {expected}; configured URL/status values: {configured}")
+          print(f"VK callback is confirmed at the stable Cloudflare URL: {expected}")
+          PY
       - name: Smoke test
         if: vars.ACTIVE_BACKEND == 'yandex'
         env:
