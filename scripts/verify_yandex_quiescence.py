@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import boto3
@@ -16,6 +17,7 @@ QUEUE_ATTRIBUTES = (
     "ApproximateNumberOfMessagesDelayed",
 )
 PENDING_PREFIXES = ("larp-bot/uploads/", "larp-bot/upload-locks/")
+ABANDONED_UPLOAD_AGE = timedelta(hours=1)
 
 
 def required_environment(name: str) -> str:
@@ -30,9 +32,20 @@ def queue_depth(client: Any, queue_url: str) -> int:
     return sum(int(response.get("Attributes", {}).get(name, "0")) for name in QUEUE_ATTRIBUTES)
 
 
-def visible_objects(client: Any, bucket: str, prefix: str) -> int:
+def object_counts(client: Any, bucket: str, prefix: str, *, cutoff: datetime) -> tuple[int, int]:
     paginator = client.get_paginator("list_objects_v2")
-    return sum(page.get("KeyCount", 0) for page in paginator.paginate(Bucket=bucket, Prefix=prefix))
+    pending = 0
+    abandoned = 0
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for item in page.get("Contents", []):
+            last_modified = item.get("LastModified")
+            if not isinstance(last_modified, datetime):
+                pending += 1
+            elif last_modified.astimezone(UTC) >= cutoff:
+                pending += 1
+            else:
+                abandoned += 1
+    return pending, abandoned
 
 
 def main() -> None:
@@ -62,9 +75,21 @@ def main() -> None:
     while time.monotonic() < deadline:
         fifo_depth = queue_depth(sqs, fifo_url)
         kick_depth = queue_depth(sqs, kick_url)
-        pending_uploads = sum(visible_objects(storage, bucket, prefix) for prefix in PENDING_PREFIXES)
+        upload_counts = [
+            object_counts(
+                storage,
+                bucket,
+                prefix,
+                cutoff=datetime.now(UTC) - ABANDONED_UPLOAD_AGE,
+            )
+            for prefix in PENDING_PREFIXES
+        ]
+        pending_uploads = sum(pending for pending, _ in upload_counts)
+        abandoned_uploads = sum(abandoned for _, abandoned in upload_counts)
         print(
-            f"Yandex quiescence: fifo={fifo_depth}, kick={kick_depth}, pending_uploads={pending_uploads}",
+            "Yandex quiescence: "
+            f"fifo={fifo_depth}, kick={kick_depth}, pending_uploads={pending_uploads}, "
+            f"abandoned_uploads={abandoned_uploads}",
             flush=True,
         )
         if fifo_depth == 0 and kick_depth == 0 and pending_uploads == 0:
