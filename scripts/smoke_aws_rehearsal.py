@@ -147,7 +147,9 @@ def main() -> None:
     job_id = str(uuid4())
     object_key = f"uploads/{job_id}/rehearsal.xlsx"
     disk_path = f"disk:/larp-bot/migration-rehearsal/{job_id}.xlsx"
-    state_key = f"larp-bot/upload-state/{hashlib.sha256(disk_path.encode()).hexdigest()}.txt"
+    disk_path_hash = hashlib.sha256(disk_path.encode()).hexdigest()
+    state_key = f"larp-bot/upload-state/{disk_path_hash}.txt"
+    lock_key = f"larp-bot/upload-locks/{disk_path_hash}.lock"
     dynamodb = boto3.client("dynamodb")
     lambda_client = boto3.client("lambda")
     s3 = boto3.client("s3")
@@ -158,6 +160,7 @@ def main() -> None:
             lambda: delete_disk_file(disk_path, required("YANDEX_DISK_TOKEN")),
             lambda: delete_all_versions(s3, bucket, object_key),
             lambda: delete_all_versions(s3, bucket, state_key),
+            lambda: delete_all_versions(s3, bucket, lock_key),
             lambda: dynamodb.delete_item(
                 TableName="larp-bot-rehearsal-tg-users", Key={"tg_id": {"S": str(synthetic_id)}}
             ),
@@ -254,16 +257,18 @@ def main() -> None:
 
     content = minimal_workbook()
     workbook_content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    generation = f"{time.time_ns():020d}-{job_id}"
+    content_hash = hashlib.sha256(content).hexdigest()
     put = s3.put_object(
         Bucket=bucket,
         Key=object_key,
         Body=BytesIO(content),
         ContentType=workbook_content_type,
+        Metadata={"sha256": content_hash, "generation": generation},
     )
     version_id = put.get("VersionId")
     if not version_id:
         raise RuntimeError("versioned rehearsal upload returned no S3 version ID")
-    generation = f"{time.time_ns():020d}-{job_id}"
     upload_result = invoke(
         lambda_client,
         "larp-bot-prod-disk-uploader",
@@ -278,7 +283,7 @@ def main() -> None:
                     "object_version": version_id,
                     "disk_path": disk_path,
                     "content_type": workbook_content_type,
-                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "sha256": content_hash,
                     "generation": generation,
                     "overwrite": True,
                     "publish": False,

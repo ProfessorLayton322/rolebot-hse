@@ -116,6 +116,7 @@ data "aws_iam_policy_document" "lambda" {
       effect = "Allow"
       actions = [
         "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
         "s3:GetObject",
         "s3:GetObjectVersion",
         "s3:PutObject",
