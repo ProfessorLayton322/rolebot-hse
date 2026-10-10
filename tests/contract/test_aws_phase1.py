@@ -57,6 +57,7 @@ def test_standby_controls_cannot_accept_production_traffic() -> None:
     terraform = _application_terraform()
     lambda_config = (APPLICATION / "lambda.tf").read_text()
     scheduler = (APPLICATION / "scheduler.tf").read_text()
+    variables = (APPLICATION / "variables.tf").read_text()
     placeholders = "\n".join(
         [
             (APPLICATION / "standby/python/handler.py").read_text(),
@@ -67,10 +68,14 @@ def test_standby_controls_cannot_accept_production_traffic() -> None:
     assert 'authorization_type = "NONE"' in lambda_config
     assert 'action                 = "lambda:InvokeFunctionUrl"' in lambda_config
     assert "invoked_via_function_url = true" in lambda_config
-    assert re.search(r"aws_lambda_event_source_mapping[^}]+enabled\s+= false", lambda_config, re.DOTALL)
-    assert 'state       = "DISABLED"' in scheduler
-    assert 'APPLICATION_MODE             = "standby"' in lambda_config
-    assert 'MUTATIONS_ENABLED            = "false"' in lambda_config
+    assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
+    assert 'state       = var.scheduler_enabled ? "ENABLED" : "DISABLED"' in scheduler
+    assert "APPLICATION_MODE = (" in lambda_config
+    assert "var.application_mode" in lambda_config
+    assert "var.mutations_enabled" in lambda_config
+    assert re.search(r'variable "application_mode"[^}]+default\s+= "standby"', variables, re.DOTALL)
+    for control in ("mutations_enabled", "sqs_event_mapping_enabled", "scheduler_enabled"):
+        assert re.search(rf'variable "{control}"[^}}]+default\s+= false', variables, re.DOTALL)
     assert placeholders.count("standby") >= 2
     assert "vpc_config" not in terraform
     assert "provisioned_concurrent" not in terraform
@@ -88,7 +93,7 @@ def test_fifo_has_a_fifo_dlq_and_disabled_partial_batch_consumer() -> None:
     assert "maxReceiveCount     = 5" in queues
     assert "sqs_managed_sse_enabled     = true" in queues
     assert 'function_response_types            = ["ReportBatchItemFailures"]' in lambda_config
-    assert "enabled                            = false" in lambda_config
+    assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
 
 
 def test_ssm_secrets_never_flow_through_terraform_inputs() -> None:
@@ -121,7 +126,7 @@ def test_aws_workflows_use_oidc_and_deploy_only_manually() -> None:
     assert "workflow_dispatch:" in deploy
     assert "pull_request:" not in deploy
     assert "push:" not in deploy
-    assert "DEPLOY_STANDBY" in deploy
+    assert "APPLY_AWS_CONTROLS" in deploy
     assert "billing_guardrails_confirmed" in deploy
 
 
@@ -155,9 +160,12 @@ def test_phase_two_handlers_remain_hard_gated_in_standby() -> None:
     locals_config = (APPLICATION / "locals.tf").read_text()
     runtime_gate = (ROOT / "src/larp_bot/functions/runtime_mode.py").read_text()
     build = (ROOT / "scripts/build_aws_application_packages.sh").read_text()
+    variables = (APPLICATION / "variables.tf").read_text()
 
-    assert 'APPLICATION_MODE             = "standby"' in lambda_config
-    assert 'MUTATIONS_ENABLED            = "false"' in lambda_config
+    assert "var.application_mode" in lambda_config
+    assert "var.mutations_enabled" in lambda_config
+    assert re.search(r'variable "application_mode"[^}]+default\s+= "standby"', variables, re.DOTALL)
+    assert re.search(r'variable "mutations_enabled"[^}]+default\s+= false', variables, re.DOTALL)
     assert 'CLOUD_PROVIDER               = "aws"' in lambda_config
     assert 'handler     = "aws_gateway.handler"' in locals_config
     assert 'handler     = "aws_ordered_worker.handler"' in locals_config
@@ -185,12 +193,14 @@ def test_phase_four_function_url_is_hmac_reachable_but_runtime_stays_gated() -> 
     locals_config = (APPLICATION / "locals.tf").read_text()
     lambda_config = (APPLICATION / "lambda.tf").read_text()
     deploy = (ROOT / ".github/workflows/aws-deploy.yml").read_text()
+    variables = (APPLICATION / "variables.tf").read_text()
 
     assert "vk_group_id" in locals_config
     assert 'authorization_type = "NONE"' in lambda_config
     assert 'function_url_auth_type = "NONE"' in lambda_config
     assert "gateway_function_url_invoke" in lambda_config
-    assert 'APPLICATION_MODE             = "standby"' in lambda_config
-    assert 'MUTATIONS_ENABLED            = "false"' in lambda_config
+    assert "var.application_mode" in lambda_config
+    assert "var.mutations_enabled" in lambda_config
+    assert re.search(r'variable "application_mode"[^}]+default\s+= "standby"', variables, re.DOTALL)
     assert 'put_secret vk_group_id "${VK_GROUP_ID}"' in deploy
     assert "CF_TO_AWS_HMAC_SECRET" in deploy

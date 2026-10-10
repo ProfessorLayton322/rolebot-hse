@@ -15,7 +15,7 @@ from larp_bot.application.ports import AdminConfigProvider
 from larp_bot.domain.models import Platform
 from larp_bot.domain.security import constant_time_valid_signature, sign_request
 from larp_bot.functions.container import AppContainer, iam_token_from_context
-from larp_bot.functions.runtime_mode import RuntimeGate
+from larp_bot.functions.runtime_mode import RuntimeGate, runtime_controls_configured
 
 LOGGER = logging.getLogger("larp_bot.gateway")
 _container: AppContainer | None = None
@@ -331,6 +331,8 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    if os.getenv("CLOUD_PROVIDER") == "aws" and not RuntimeGate.from_environment().accepts_application_work:
-        return _response(503, {"error": "AWS backend is not active"})
+    if (
+        os.getenv("CLOUD_PROVIDER") == "aws" or runtime_controls_configured()
+    ) and not RuntimeGate.from_environment().accepts_application_work:
+        return _response(503, {"error": "backend is not active"})
     return _runner.run(async_handler(event, context))

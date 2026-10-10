@@ -140,6 +140,15 @@ func loadEnvironment() (environment, error) {
 	return env, nil
 }
 
+func yandexUploaderEnabled() bool {
+	mode, modeConfigured := os.LookupEnv("APPLICATION_MODE")
+	mutations, mutationsConfigured := os.LookupEnv("MUTATIONS_ENABLED")
+	if !modeConfigured && !mutationsConfigured {
+		return true
+	}
+	return mode == "active" && mutations == "true"
+}
+
 func serviceFromEnvironment() (*uploaderService, error) {
 	defaultServiceMu.Lock()
 	defer defaultServiceMu.Unlock()
@@ -910,6 +919,9 @@ func (service *uploaderService) process(ctx context.Context, job uploadJob) erro
 // Handler is the Yandex Cloud Functions entry point. Async raw invocation
 // passes the original JSON request body directly as this byte slice.
 func Handler(ctx context.Context, body []byte) ([]byte, error) {
+	if !yandexUploaderEnabled() {
+		return json.Marshal(map[string]any{"processed": false})
+	}
 	var job uploadJob
 	if err := json.Unmarshal(body, &job); err != nil {
 		return nil, fmt.Errorf("decode upload job: %w", err)

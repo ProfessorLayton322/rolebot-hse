@@ -4,6 +4,17 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      verify_yandex_quiescence:
+        description: Drain YMQ and require no pending Yandex upload objects
+        required: true
+        default: false
+        type: boolean
+      verify_vk_callback_route:
+        description: Require VK's confirmed callback server to use the stable Cloudflare URL
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -31,6 +42,10 @@ jobs:
       TF_VAR_cloudflare_workers_subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
       TF_VAR_cloudflare_active_backend: ${{ vars.ACTIVE_BACKEND }}
       TF_VAR_aws_backend_url: ${{ vars.AWS_BACKEND_URL }}
+      TF_VAR_yandex_gateway_enabled: ${{ vars.YANDEX_GATEWAY_ENABLED || 'true' }}
+      TF_VAR_yandex_background_enabled: ${{ vars.YANDEX_BACKGROUND_ENABLED || 'true' }}
+      TF_VAR_yandex_notifier_enabled: ${{ vars.YANDEX_NOTIFIER_ENABLED || 'true' }}
+      TF_VAR_ydb_rehearsal_enabled: ${{ vars.YDB_REHEARSAL_ENABLED || 'false' }}
       TF_VAR_google_folder_id: ${{ vars.GOOGLE_FOLDER_ID }}
     steps:
       - uses: actions/checkout@v4
@@ -121,6 +136,8 @@ jobs:
             echo "vk_callback_url=$(terraform output -raw vk_callback_url)"
             echo "yandex_vk_rollback_url=$(terraform output -raw yandex_vk_rollback_url)"
             echo "ymq_kick_url=$(terraform output -raw ymq_kick_url)"
+            echo "ymq_fifo_url=$(terraform output -raw ymq_fifo_url)"
+            echo "deployment_bucket=$(terraform output -raw deployment_bucket)"
           } >>"${GITHUB_OUTPUT}"
       - name: Inject Cloudflare Worker secrets
         env:
@@ -147,16 +164,62 @@ jobs:
           EGRESS_WORKER_NAME: larp-bot-telegram-egress
         run: bash scripts/update_cloudflare_secrets.sh
       - name: Wake ordered worker after deployment
+        if: vars.YANDEX_BACKGROUND_ENABLED != 'false'
         env:
           YMQ_KICK_URL: ${{ steps.outputs.outputs.ymq_kick_url }}
         run: python scripts/wake_ordered_worker.py
+      - name: Drain YMQ and verify pending uploads are complete
+        if: inputs.verify_yandex_quiescence
+        env:
+          YMQ_FIFO_URL: ${{ steps.outputs.outputs.ymq_fifo_url }}
+          YMQ_KICK_URL: ${{ steps.outputs.outputs.ymq_kick_url }}
+          YANDEX_STORAGE_BUCKET: ${{ steps.outputs.outputs.deployment_bucket }}
+        run: |
+          test "${{ vars.ACTIVE_BACKEND }}" = "maintenance"
+          test "${{ vars.YANDEX_GATEWAY_ENABLED }}" = "false"
+          test "${{ vars.YANDEX_NOTIFIER_ENABLED }}" = "false"
+          test "${{ vars.YANDEX_BACKGROUND_ENABLED }}" != "false"
+          python scripts/verify_yandex_quiescence.py --timeout-seconds 600
       - name: Configure Telegram webhook
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
           TELEGRAM_INGRESS_URL: ${{ steps.outputs.outputs.telegram_ingress_url }}
         run: bash scripts/configure_telegram_webhook.sh
+      - name: Verify VK stable callback registration
+        if: inputs.verify_vk_callback_route
+        env:
+          VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          VK_CALLBACK_URL: ${{ steps.outputs.outputs.vk_callback_url }}
+        run: |
+          response_file="$(mktemp)"
+          trap 'rm -f "${response_file}"' EXIT
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --data-urlencode "access_token=${VK_ACCESS_TOKEN}" \
+            --data-urlencode 'v=5.199' \
+            --data-urlencode "group_id=${VK_GROUP_ID}" \
+            --output "${response_file}" \
+            'https://api.vk.com/method/groups.getCallbackServers'
+          python - "${response_file}" "${VK_CALLBACK_URL}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              payload = json.load(stream)
+          if "error" in payload:
+              error = payload["error"]
+              raise SystemExit(f"VK API error {error.get('error_code')}: {error.get('error_msg')}")
+          expected = sys.argv[2].rstrip("/")
+          items = payload.get("response", {}).get("items", [])
+          configured = [(str(item.get("url", "")).rstrip("/"), item.get("status")) for item in items]
+          if (expected, "ok") not in configured:
+              raise SystemExit(f"VK callback is not confirmed at {expected}; configured URL/status values: {configured}")
+          print(f"VK callback is confirmed at the stable Cloudflare URL: {expected}")
+          PY
       - name: Smoke test
+        if: vars.ACTIVE_BACKEND == 'yandex'
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
@@ -173,6 +236,36 @@ jobs:
           VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
           VK_ADMIN_IDS: ${{ vars.VK_ADMIN_IDS }}
         run: bash scripts/smoke_test.sh
+      - name: Maintenance routing smoke test
+        if: vars.ACTIVE_BACKEND == 'maintenance'
+        env:
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          TELEGRAM_INGRESS_URL: ${{ steps.outputs.outputs.telegram_ingress_url }}
+          VK_CALLBACK_URL: ${{ steps.outputs.outputs.vk_callback_url }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+        run: bash scripts/smoke_maintenance.sh
+      - name: AWS routing smoke test
+        if: vars.ACTIVE_BACKEND == 'aws'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          TG_ADMIN_IDS: ${{ vars.TG_ADMIN_IDS }}
+          TELEGRAM_INGRESS_URL: ${{ steps.outputs.outputs.telegram_ingress_url }}
+          TELEGRAM_EGRESS_URL: ${{ steps.outputs.outputs.telegram_egress_url }}
+          AWS_BACKEND_URL: ${{ vars.AWS_BACKEND_URL }}
+          CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_AWS_HMAC_SECRET }}
+          YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.AWS_TO_CF_EGRESS_HMAC_SECRET }}
+          VK_CALLBACK_URL: ${{ steps.outputs.outputs.vk_callback_url }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
+          VK_ADMIN_IDS: ${{ vars.VK_ADMIN_IDS }}
+        run: |
+          export YANDEX_GATEWAY_URL="${AWS_BACKEND_URL%/}/webhooks/telegram"
+          bash scripts/smoke_test.sh
       - name: Deployment endpoints
         run: |
           echo "Telegram ingress: ${{ steps.outputs.outputs.telegram_ingress_url }}"

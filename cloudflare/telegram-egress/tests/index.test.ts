@@ -99,6 +99,13 @@ describe("telegram egress", () => {
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain("api.telegram.org/bot123:token/promoteChatMember");
   });
 
+  it("forwards the read-only bot identity method used by migration rehearsal", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true, result: { id: 123 } })));
+    const response = await handle(await signedRequest("getMe"), env);
+    expect(response.status).toBe(200);
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain("api.telegram.org/bot123:token/getMe");
+  });
+
   it("accepts the AWS egress signature during migration", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true })));
     const response = await handle(

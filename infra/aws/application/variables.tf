@@ -79,3 +79,71 @@ variable "vk_gamemaster_ids" {
   description = "JSON array of VK gamemasters."
   type        = string
 }
+
+variable "application_mode" {
+  description = "AWS runtime mode. Production work is accepted only in active mode."
+  type        = string
+  default     = "standby"
+
+  validation {
+    condition     = contains(["standby", "active", "maintenance"], var.application_mode)
+    error_message = "application_mode must be standby, active, or maintenance."
+  }
+}
+
+variable "mutations_enabled" {
+  description = "Allow the AWS runtime to mutate application state."
+  type        = bool
+  default     = false
+}
+
+variable "sqs_event_mapping_enabled" {
+  description = "Enable the ordered-worker SQS event source mapping."
+  type        = bool
+  default     = false
+}
+
+variable "scheduler_enabled" {
+  description = "Enable the hourly EventBridge registration notifier schedule."
+  type        = bool
+  default     = false
+}
+
+variable "rehearsal_tables_enabled" {
+  description = "Create temporary larp-bot-rehearsal DynamoDB tables for Phase 5."
+  type        = bool
+  default     = false
+}
+
+variable "runtime_table_target" {
+  description = "DynamoDB table set used by the AWS Lambdas."
+  type        = string
+  default     = "production"
+
+  validation {
+    condition     = contains(["production", "rehearsal"], var.runtime_table_target)
+    error_message = "runtime_table_target must be production or rehearsal."
+  }
+}
+
+check "safe_runtime_controls" {
+  assert {
+    condition     = !var.mutations_enabled || var.application_mode == "active"
+    error_message = "mutations_enabled requires application_mode=active."
+  }
+
+  assert {
+    condition     = !var.sqs_event_mapping_enabled || var.mutations_enabled
+    error_message = "the SQS event mapping requires mutations_enabled=true."
+  }
+
+  assert {
+    condition     = !var.scheduler_enabled || var.mutations_enabled
+    error_message = "the scheduler requires mutations_enabled=true."
+  }
+
+  assert {
+    condition     = var.runtime_table_target != "rehearsal" || var.rehearsal_tables_enabled
+    error_message = "runtime_table_target=rehearsal requires rehearsal_tables_enabled=true."
+  }
+}

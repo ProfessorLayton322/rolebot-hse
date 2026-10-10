@@ -26,7 +26,16 @@ locals {
     aws_dynamodb_table.registrations.arn,
   ]
   dynamodb_index_arns = [for arn in local.dynamodb_table_arns : "${arn}/index/*"]
-  dynamodb_resources  = concat(local.dynamodb_table_arns, local.dynamodb_index_arns)
+  rehearsal_dynamodb_table_arns = var.rehearsal_tables_enabled ? [
+    for name in values(local.rehearsal_table_names) : "arn:aws:dynamodb:${var.aws_region}:${var.aws_account_id}:table/${name}"
+  ] : []
+  rehearsal_dynamodb_index_arns = [for arn in local.rehearsal_dynamodb_table_arns : "${arn}/index/*"]
+  dynamodb_resources = concat(
+    local.dynamodb_table_arns,
+    local.dynamodb_index_arns,
+    local.rehearsal_dynamodb_table_arns,
+    local.rehearsal_dynamodb_index_arns,
+  )
 
   dynamodb_read_actions = [
     "dynamodb:BatchGetItem",
@@ -107,11 +116,22 @@ data "aws_iam_policy_document" "lambda" {
       effect = "Allow"
       actions = [
         "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
         "s3:GetObject",
         "s3:GetObjectVersion",
         "s3:PutObject",
       ]
       resources = ["${aws_s3_bucket.application.arn}/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = each.key == "disk_uploader" ? [1] : []
+    content {
+      sid       = "InspectApplicationStorage"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket"]
+      resources = [aws_s3_bucket.application.arn]
     }
   }
 

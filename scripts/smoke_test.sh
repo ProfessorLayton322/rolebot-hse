@@ -67,12 +67,25 @@ actual = payload.get("result", {}).get("url")
 assert actual == sys.argv[2], f"Telegram webhook is {actual!r}, expected {sys.argv[2]!r}"
 PY
 
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
-  --request POST \
-  --header 'Content-Type: application/json' \
-  --data '{}' \
-  "${TELEGRAM_INGRESS_URL}")"
-test "${status}" = "403" || unexpected_response "Telegram ingress authentication probe" "${status}"
+# A new Worker version and its separately injected secret bindings can take a
+# few seconds to converge at every Cloudflare edge. Wait for the secret-backed
+# authentication layer before sending either signed or user-visible probes.
+ingress_ready=false
+for attempt in $(seq 1 12); do
+  status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --data '{}' \
+    "${TELEGRAM_INGRESS_URL}")"
+  if test "${status}" = "403"; then
+    ingress_ready=true
+    break
+  fi
+  if test "${attempt}" -lt 12; then
+    sleep 5
+  fi
+done
+test "${ingress_ready}" = true || unexpected_response "Telegram ingress authentication probe" "${status}"
 
 # IAM binding and Function-version propagation can briefly outlive Terraform
 # apply. An unsigned direct request reaches runtime configuration before HMAC

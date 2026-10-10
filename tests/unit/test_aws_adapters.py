@@ -15,7 +15,7 @@ from larp_bot.domain.models import EmptyPayload, Operation, OrderedRegistrationC
 from larp_bot.functions import aws_upload_completion
 from larp_bot.functions.gateway.handler import async_handler
 from larp_bot.functions.gateway.handler import handler as gateway_handler
-from larp_bot.functions.runtime_mode import ApplicationMode, RuntimeGate
+from larp_bot.functions.runtime_mode import ApplicationMode, RuntimeGate, runtime_controls_configured
 
 
 def _command(operation_id: str = "11111111-1111-4111-8111-111111111111") -> OrderedRegistrationCommand:
@@ -236,6 +236,8 @@ def test_runtime_gate_requires_active_mode_and_explicit_mutations() -> None:
     assert active.accepts_application_work
     with pytest.raises(RuntimeError, match="only in active mode"):
         RuntimeGate.from_environment({"APPLICATION_MODE": "maintenance", "MUTATIONS_ENABLED": "true"})
+    assert not runtime_controls_configured({})
+    assert runtime_controls_configured({"MUTATIONS_ENABLED": "false"})
 
 
 def test_aws_gateway_rejects_work_before_constructing_the_application(
@@ -247,6 +249,19 @@ def test_aws_gateway_rejects_work_before_constructing_the_application(
 
     response = gateway_handler(
         {"rawPath": "/webhooks/telegram", "requestContext": {"http": {"method": "POST"}}},
+        None,
+    )
+
+    assert response["statusCode"] == 503
+
+
+def test_yandex_gateway_honors_maintenance_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLOUD_PROVIDER", raising=False)
+    monkeypatch.setenv("APPLICATION_MODE", "maintenance")
+    monkeypatch.setenv("MUTATIONS_ENABLED", "false")
+
+    response = gateway_handler(
+        {"path": "/webhooks/telegram", "httpMethod": "POST"},
         None,
     )
 

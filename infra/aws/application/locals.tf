@@ -16,6 +16,16 @@ locals {
     registrations = "${local.name_prefix}-registrations"
   }
 
+  rehearsal_table_names = {
+    tg_users      = "${var.project_name}-rehearsal-tg-users"
+    vk_users      = "${var.project_name}-rehearsal-vk-users"
+    events        = "${var.project_name}-rehearsal-events"
+    event_leaders = "${var.project_name}-rehearsal-event-leaders"
+    registrations = "${var.project_name}-rehearsal-registrations"
+  }
+
+  runtime_table_names = var.runtime_table_target == "rehearsal" ? local.rehearsal_table_names : local.table_names
+
   function_names = {
     gateway               = "${local.name_prefix}-gateway"
     ordered_worker        = "${local.name_prefix}-ordered-worker"

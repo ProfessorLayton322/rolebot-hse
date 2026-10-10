@@ -18,18 +18,30 @@ output "application_bucket" {
   value       = aws_s3_bucket.application.id
 }
 
+output "telegram_egress_url" {
+  description = "Existing dual-signature Cloudflare Telegram egress endpoint."
+  value       = "https://${var.project_name}-telegram-egress.${var.cloudflare_workers_subdomain}.workers.dev"
+}
+
 output "runtime_parameter_names" {
   description = "Stable SSM names populated by the manual deployment workflow."
   value       = local.parameter_names
 }
 
 output "standby_controls" {
-  description = "Controls that remain disabled until the production cutover sequence."
+  description = "Current reversible runtime and event-source controls."
   value = {
-    application_mode        = "standby"
-    mutation_enabled        = false
+    application_mode        = var.application_mode
+    mutation_enabled        = var.mutations_enabled
+    runtime_table_target    = var.runtime_table_target
+    rehearsal_tables        = var.rehearsal_tables_enabled
     gateway_auth_type       = aws_lambda_function_url.gateway.authorization_type
     sqs_event_mapping_state = aws_lambda_event_source_mapping.registration_commands.enabled
     scheduler_state         = aws_scheduler_schedule.registration_notifications.state
   }
+}
+
+output "rehearsal_table_prefix" {
+  description = "Temporary DynamoDB prefix when Phase 5 tables are enabled."
+  value       = var.rehearsal_tables_enabled ? "${var.project_name}-rehearsal" : null
 }

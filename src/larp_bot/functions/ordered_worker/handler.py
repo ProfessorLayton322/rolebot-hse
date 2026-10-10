@@ -5,6 +5,7 @@ from typing import Any
 
 from larp_bot.functions.bootstrap import build_container
 from larp_bot.functions.container import AppContainer, iam_token_from_context
+from larp_bot.functions.runtime_mode import RuntimeGate, runtime_controls_configured
 
 _container: AppContainer | None = None
 # The cached container includes async transports. Reuse one event loop for the
@@ -14,6 +15,8 @@ _runner = asyncio.Runner()
 
 async def _run(context: Any) -> dict[str, int]:
     global _container
+    if runtime_controls_configured() and not RuntimeGate.from_environment().accepts_application_work:
+        return {"processed": 0}
     iam_token = iam_token_from_context(context)
     if _container is None:
         _container = await build_container(iam_token=iam_token)
