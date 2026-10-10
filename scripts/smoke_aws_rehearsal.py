@@ -12,6 +12,7 @@ import urllib.request
 from io import BytesIO
 from typing import Any
 from uuid import uuid4
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import boto3
 
@@ -86,6 +87,56 @@ def delete_disk_file(path: str, token: str) -> None:
             raise
 
 
+def minimal_workbook() -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>",
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="xl/workbook.xml"/>'
+            "</Relationships>",
+        )
+        archive.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Rehearsal" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+            'Target="worksheets/sheet1.xml"/>'
+            "</Relationships>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>AWS rehearsal</t></is></c></row></sheetData>'
+            "</worksheet>",
+        )
+    return output.getvalue()
+
+
 def main() -> None:
     gateway_url = required("AWS_GATEWAY_URL")
     ingress_secret = required("CF_TO_AWS_HMAC_SECRET")
@@ -94,8 +145,8 @@ def main() -> None:
     suffix = uuid4().hex
     synthetic_id = 8_000_000_000_000 + int(suffix[:8], 16)
     job_id = str(uuid4())
-    object_key = f"uploads/{job_id}/rehearsal.txt"
-    disk_path = f"disk:/larp-bot/migration-rehearsal/{job_id}.txt"
+    object_key = f"uploads/{job_id}/rehearsal.xlsx"
+    disk_path = f"disk:/larp-bot/migration-rehearsal/{job_id}.xlsx"
     state_key = f"larp-bot/upload-state/{hashlib.sha256(disk_path.encode()).hexdigest()}.txt"
     dynamodb = boto3.client("dynamodb")
     lambda_client = boto3.client("lambda")
@@ -201,8 +252,14 @@ def main() -> None:
     if notifier_result.get("processed") is not False:
         raise RuntimeError("disabled scheduler target did not no-op during rehearsal")
 
-    content = b"rolebot AWS upload rehearsal\n"
-    put = s3.put_object(Bucket=bucket, Key=object_key, Body=BytesIO(content), ContentType="text/plain")
+    content = minimal_workbook()
+    workbook_content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    put = s3.put_object(
+        Bucket=bucket,
+        Key=object_key,
+        Body=BytesIO(content),
+        ContentType=workbook_content_type,
+    )
     version_id = put.get("VersionId")
     if not version_id:
         raise RuntimeError("versioned rehearsal upload returned no S3 version ID")
@@ -220,7 +277,7 @@ def main() -> None:
                     "object_key": object_key,
                     "object_version": version_id,
                     "disk_path": disk_path,
-                    "content_type": "text/plain",
+                    "content_type": workbook_content_type,
                     "sha256": hashlib.sha256(content).hexdigest(),
                     "generation": generation,
                     "overwrite": True,
