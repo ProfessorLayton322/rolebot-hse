@@ -77,6 +77,27 @@ async def test_read_only_query_uses_snapshot_transaction() -> None:
 
 
 @pytest.mark.asyncio
+async def test_multi_table_snapshot_uses_one_transaction_and_commits_last_read() -> None:
+    executor = YdbExecutor.__new__(YdbExecutor)
+    executor.pool = MagicMock()
+    session = MagicMock()
+    transaction = session.transaction.return_value.begin.return_value
+    session.prepare.side_effect = ["prepared-one", "prepared-two"]
+    transaction.execute.side_effect = [
+        [SimpleNamespace(rows=[{"id": "one"}])],
+        [SimpleNamespace(rows=[{"id": "two"}])],
+    ]
+    executor.pool.retry_operation_sync.side_effect = lambda operation: operation(session)
+
+    result = await executor.snapshot(["SELECT one;", "SELECT two;"])
+
+    assert result == [[{"id": "one"}], [{"id": "two"}]]
+    assert session.transaction.call_args.args[0].name == "snapshot_read_only"
+    transaction.execute.assert_any_call("prepared-one", {}, commit_tx=False)
+    transaction.execute.assert_any_call("prepared-two", {}, commit_tx=True)
+
+
+@pytest.mark.asyncio
 async def test_mutating_query_keeps_serializable_transaction() -> None:
     executor = YdbExecutor.__new__(YdbExecutor)
     executor.pool = MagicMock()

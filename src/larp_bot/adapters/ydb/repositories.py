@@ -72,6 +72,26 @@ class YdbExecutor:
 
         return await asyncio.to_thread(self.pool.retry_operation_sync, operation)
 
+    async def snapshot(self, queries: Sequence[str]) -> list[list[dict[str, Any]]]:
+        """Read several tables from one consistent snapshot transaction."""
+
+        if not queries:
+            return []
+
+        def operation(session: Any) -> list[list[dict[str, Any]]]:
+            transaction = session.transaction(ydb.SnapshotReadOnly()).begin()
+            snapshots: list[list[dict[str, Any]]] = []
+            for index, query in enumerate(queries):
+                result_sets = transaction.execute(
+                    session.prepare(query),
+                    {},
+                    commit_tx=index == len(queries) - 1,
+                )
+                snapshots.append(_rows(result_sets))
+            return snapshots
+
+        return await asyncio.to_thread(self.pool.retry_operation_sync, operation)
+
     async def claim_delivery(
         self,
         *,
