@@ -1,5 +1,9 @@
 # AWS migration Phase 2 status
 
+Phase 4 supersedes this document's Function URL isolation detail: the URL now
+uses `NONE` so Cloudflare can reach the application-HMAC routes, while the
+runtime, SQS consumer, and scheduler remain in standby.
+
 Phase 2 is being delivered in disabled slices so no incomplete runtime can
 receive production traffic. Yandex remains production and the AWS application
 stack retains all Phase 1 standby controls.
@@ -52,7 +56,8 @@ existing Yandex `golang123` source-module contract.
 
 ## Controls that remain disabled
 
-- Function URL authorization: `AWS_IAM`.
+- Function URL authorization after Phase 4: `NONE`, with backend-specific HMAC
+  verification and the unchanged standby runtime gate.
 - Application mode: `standby`.
 - Mutations: disabled.
 - SQS event source mapping: disabled.

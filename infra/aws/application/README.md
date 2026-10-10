@@ -1,4 +1,4 @@
-# AWS application stack — gated Phase 2 runtime
+# AWS application stack — Cloudflare-routable standby runtime
 
 This root owns only the new AWS application resources. It never owns the
 existing Yandex or Cloudflare resources and uses the dedicated state object
@@ -6,8 +6,8 @@ existing Yandex or Cloudflare resources and uses the dedicated state object
 
 The stack remains intentionally unusable for production traffic:
 
-- the Lambda Function URL uses `AWS_IAM`, so the unsigned Cloudflare Worker
-  cannot call it;
+- the Lambda Function URL uses `NONE` so Cloudflare can reach it, but Telegram
+  and VK use only the backend-specific HMAC-authenticated application routes;
 - all Python and Go functions contain AWS-native adapters, but their runtime
   gates reject application work unless both `APPLICATION_MODE=active` and
   `MUTATIONS_ENABLED=true`;
@@ -15,7 +15,13 @@ The stack remains intentionally unusable for production traffic:
   Lambda environment;
 - the SQS event source mapping is disabled;
 - the EventBridge Scheduler schedule is disabled;
-- no Cloudflare route or Yandex resource changes are part of this root.
+- no Cloudflare or Yandex resource is owned by this root.
+
+The URL becoming public does not activate AWS. The fixed standby gate returns
+503 before constructing the application, and the queue consumer and schedule
+remain disabled. The existing Yandex/Cloudflare Terraform root owns the Worker
+code and installs `AWS_BACKEND_URL`; a later maintenance-window change selects
+AWS only after the data transfer and runtime activation steps are complete.
 
 The five DynamoDB Standard tables and their five GSIs use a total of 10 RCUs and
 10 WCUs. Deletion protection and Terraform `prevent_destroy` are enabled, and

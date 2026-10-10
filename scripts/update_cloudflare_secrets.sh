@@ -4,7 +4,9 @@ set -euo pipefail
 : "${TG_WEBHOOK_SECRET:?TG_WEBHOOK_SECRET is required}"
 : "${TG_BOT_TOKEN:?TG_BOT_TOKEN is required}"
 : "${CF_TO_YANDEX_HMAC_SECRET:?CF_TO_YANDEX_HMAC_SECRET is required}"
+: "${CF_TO_AWS_HMAC_SECRET:?CF_TO_AWS_HMAC_SECRET is required}"
 : "${YANDEX_TO_CF_EGRESS_HMAC_SECRET:?YANDEX_TO_CF_EGRESS_HMAC_SECRET is required}"
+: "${AWS_TO_CF_EGRESS_HMAC_SECRET:?AWS_TO_CF_EGRESS_HMAC_SECRET is required}"
 : "${YANDEX_DISK_TOKEN:?YANDEX_DISK_TOKEN is required}"
 : "${GOOGLE_SERVICE_ACCOUNT_JSON:?GOOGLE_SERVICE_ACCOUNT_JSON is required}"
 : "${VK_ACCESS_TOKEN:?VK_ACCESS_TOKEN is required}"
@@ -20,7 +22,6 @@ set -euo pipefail
 : "${YMQ_SECRET_ACCESS_KEY:?YMQ_SECRET_ACCESS_KEY is required}"
 : "${YANDEX_OIDC_AUDIENCE:?YANDEX_OIDC_AUDIENCE is required}"
 : "${YANDEX_SERVICE_ACCOUNT_IDS:?YANDEX_SERVICE_ACCOUNT_IDS is required}"
-: "${YANDEX_GATEWAY_URL:?YANDEX_GATEWAY_URL is required}"
 : "${INGRESS_WORKER_NAME:?INGRESS_WORKER_NAME is required}"
 : "${EGRESS_WORKER_NAME:?EGRESS_WORKER_NAME is required}"
 
@@ -50,9 +51,19 @@ telegram_bot_username="$(curl --fail-with-body --silent --show-error \
 
 jq -n \
   --arg webhook "${TG_WEBHOOK_SECRET}" \
-  --arg hmac "${CF_TO_YANDEX_HMAC_SECRET}" \
-  --arg gateway "${YANDEX_GATEWAY_URL}" \
-  '{TG_WEBHOOK_SECRET:$webhook,CF_TO_YANDEX_HMAC_SECRET:$hmac,YANDEX_GATEWAY_URL:$gateway}' \
+  --arg vk_secret "${VK_CALLBACK_SECRET}" \
+  --arg vk_confirmation "${VK_CONFIRMATION_STRING}" \
+  --arg vk_group "${VK_GROUP_ID}" \
+  --arg yandex_hmac "${CF_TO_YANDEX_HMAC_SECRET}" \
+  --arg aws_hmac "${CF_TO_AWS_HMAC_SECRET}" \
+  '{
+    TG_WEBHOOK_SECRET:$webhook,
+    VK_CALLBACK_SECRET:$vk_secret,
+    VK_CONFIRMATION_STRING:$vk_confirmation,
+    VK_GROUP_ID:$vk_group,
+    CF_TO_YANDEX_HMAC_SECRET:$yandex_hmac,
+    CF_TO_AWS_HMAC_SECRET:$aws_hmac
+  }' \
   | npx --yes wrangler@4.125.0 secret bulk \
       --config cloudflare/telegram-ingress/wrangler.toml \
       --name "${INGRESS_WORKER_NAME}"
@@ -60,7 +71,8 @@ jq -n \
 jq -n \
   --arg token "${TG_BOT_TOKEN}" \
   --arg telegram_username "${telegram_bot_username}" \
-  --arg hmac "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
+  --arg yandex_hmac "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
+  --arg aws_hmac "${AWS_TO_CF_EGRESS_HMAC_SECRET}" \
   --arg disk "${YANDEX_DISK_TOKEN}" \
   --arg google_service_account "${GOOGLE_SERVICE_ACCOUNT_JSON}" \
   --arg vk_token "${VK_ACCESS_TOKEN}" \
@@ -80,7 +92,8 @@ jq -n \
   '{
     TG_BOT_TOKEN:$token,
     TG_BOT_USERNAME:$telegram_username,
-    YANDEX_TO_CF_EGRESS_HMAC_SECRET:$hmac,
+    YANDEX_TO_CF_EGRESS_HMAC_SECRET:$yandex_hmac,
+    AWS_TO_CF_EGRESS_HMAC_SECRET:$aws_hmac,
     YANDEX_DISK_TOKEN:$disk,
     GOOGLE_SERVICE_ACCOUNT_JSON:$google_service_account,
     VK_ACCESS_TOKEN:$vk_token,

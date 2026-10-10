@@ -109,6 +109,6 @@ jobs:
       - name: Confirm standby controls
         working-directory: infra/aws/application
         run: |
-          test "$(terraform output -json standby_controls | jq -r .gateway_auth_type)" = "AWS_IAM"
+          test "$(terraform output -json standby_controls | jq -r .gateway_auth_type)" = "NONE"
           test "$(terraform output -json standby_controls | jq -r .sqs_event_mapping_state)" = "false"
           test "$(terraform output -json standby_controls | jq -r .scheduler_state)" = "DISABLED"

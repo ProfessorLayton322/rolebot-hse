@@ -1,5 +1,5 @@
 output "standby_gateway_url" {
-  description = "IAM-protected Lambda URL; not routable by Cloudflare in Phase 1."
+  description = "Public Lambda URL protected by application HMAC and fixed standby runtime controls."
   value       = aws_lambda_function_url.gateway.function_url
 }
 
@@ -24,7 +24,7 @@ output "runtime_parameter_names" {
 }
 
 output "standby_controls" {
-  description = "Controls that must remain disabled throughout Phase 1."
+  description = "Controls that remain disabled until the production cutover sequence."
   value = {
     application_mode        = "standby"
     mutation_enabled        = false

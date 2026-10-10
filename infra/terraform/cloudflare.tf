@@ -23,18 +23,36 @@ resource "cloudflare_worker_version" "telegram_ingress" {
     content_type = "application/javascript+module"
   }]
 
-  # Per-sender Telegram update limit. namespace_id is account-wide: any other
-  # Worker binding the same ID would share these counters. `wrangler secret bulk`
-  # patches only secrets, so this binding carries over to the secret upload.
-  bindings = [{
-    type         = "ratelimit"
-    name         = "TG_USER_RATE_LIMITER"
-    namespace_id = "731001"
-    simple = {
-      limit  = var.telegram_user_rate_limit_per_minute
-      period = 60
+  # Routing values are non-secret so Terraform can switch them atomically with
+  # the Worker code. The rate-limit namespace is account-wide: another Worker
+  # binding the same ID would share these counters. `wrangler secret bulk`
+  # patches only secrets, so every binding below carries over to that upload.
+  bindings = [
+    {
+      type = "plain_text"
+      name = "ACTIVE_BACKEND"
+      text = var.cloudflare_active_backend
+    },
+    {
+      type = "plain_text"
+      name = "YANDEX_BACKEND_URL"
+      text = "https://${yandex_api_gateway.bot.domain}"
+    },
+    {
+      type = "plain_text"
+      name = "AWS_BACKEND_URL"
+      text = var.aws_backend_url
+    },
+    {
+      type         = "ratelimit"
+      name         = "TG_USER_RATE_LIMITER"
+      namespace_id = "731001"
+      simple = {
+        limit  = var.telegram_user_rate_limit_per_minute
+        period = 60
+      }
     }
-  }]
+  ]
 }
 
 resource "cloudflare_workers_deployment" "telegram_ingress" {

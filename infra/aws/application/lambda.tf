@@ -50,13 +50,31 @@ resource "aws_lambda_function" "application" {
   ]
 }
 
-# Phase 1 creates a stable endpoint but keeps it private. Cloudflare cannot
-# reach AWS until a later phase adds application HMAC verification and changes
-# this auth mode deliberately.
+# The URL is intentionally public at the AWS edge so Cloudflare can reach it.
+# Both accepted routes verify the backend-specific HMAC before application work,
+# while the fixed standby runtime gate continues to reject production traffic.
 resource "aws_lambda_function_url" "gateway" {
   function_name      = aws_lambda_function.application["gateway"].function_name
-  authorization_type = "AWS_IAM"
+  authorization_type = "NONE"
   invoke_mode        = "BUFFERED"
+}
+
+resource "aws_lambda_permission" "gateway_function_url" {
+  statement_id           = "AllowCloudflareFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.application["gateway"].function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
+# AWS requires both permissions for newly created public Function URLs. This
+# second statement remains restricted to invocations arriving through the URL.
+resource "aws_lambda_permission" "gateway_function_url_invoke" {
+  statement_id             = "AllowCloudflareFunctionUrlInvoke"
+  action                   = "lambda:InvokeFunction"
+  function_name            = aws_lambda_function.application["gateway"].function_name
+  principal                = "*"
+  invoked_via_function_url = true
 }
 
 resource "aws_lambda_event_source_mapping" "registration_commands" {

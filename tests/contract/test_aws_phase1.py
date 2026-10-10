@@ -53,7 +53,7 @@ def test_dynamodb_mirror_is_protected_and_within_free_tier_capacity() -> None:
     assert dynamodb.count("write_capacity") == 10
 
 
-def test_phase_one_standby_controls_cannot_accept_production_traffic() -> None:
+def test_standby_controls_cannot_accept_production_traffic() -> None:
     terraform = _application_terraform()
     lambda_config = (APPLICATION / "lambda.tf").read_text()
     scheduler = (APPLICATION / "scheduler.tf").read_text()
@@ -64,7 +64,9 @@ def test_phase_one_standby_controls_cannot_accept_production_traffic() -> None:
         ]
     )
 
-    assert 'authorization_type = "AWS_IAM"' in lambda_config
+    assert 'authorization_type = "NONE"' in lambda_config
+    assert 'action                 = "lambda:InvokeFunctionUrl"' in lambda_config
+    assert "invoked_via_function_url = true" in lambda_config
     assert re.search(r"aws_lambda_event_source_mapping[^}]+enabled\s+= false", lambda_config, re.DOTALL)
     assert 'state       = "DISABLED"' in scheduler
     assert 'APPLICATION_MODE             = "standby"' in lambda_config
@@ -179,12 +181,16 @@ def test_phase_two_go_ports_use_aws_services_and_runtime_gates() -> None:
     assert 'os.Getenv("APPLICATION_MODE") == "active"' in uploader
 
 
-def test_phase_two_runtime_parameters_and_function_url_stay_private() -> None:
+def test_phase_four_function_url_is_hmac_reachable_but_runtime_stays_gated() -> None:
     locals_config = (APPLICATION / "locals.tf").read_text()
     lambda_config = (APPLICATION / "lambda.tf").read_text()
     deploy = (ROOT / ".github/workflows/aws-deploy.yml").read_text()
 
     assert "vk_group_id" in locals_config
-    assert 'authorization_type = "AWS_IAM"' in lambda_config
+    assert 'authorization_type = "NONE"' in lambda_config
+    assert 'function_url_auth_type = "NONE"' in lambda_config
+    assert "gateway_function_url_invoke" in lambda_config
+    assert 'APPLICATION_MODE             = "standby"' in lambda_config
+    assert 'MUTATIONS_ENABLED            = "false"' in lambda_config
     assert 'put_secret vk_group_id "${VK_GROUP_ID}"' in deploy
     assert "CF_TO_AWS_HMAC_SECRET" in deploy

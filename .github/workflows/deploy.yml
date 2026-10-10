@@ -29,6 +29,8 @@ jobs:
       TF_VAR_function_package_bucket: ${{ vars.TF_STATE_BUCKET }}
       TF_VAR_cloudflare_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TF_VAR_cloudflare_workers_subdomain: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+      TF_VAR_cloudflare_active_backend: ${{ vars.ACTIVE_BACKEND }}
+      TF_VAR_aws_backend_url: ${{ vars.AWS_BACKEND_URL }}
       TF_VAR_google_folder_id: ${{ vars.GOOGLE_FOLDER_ID }}
     steps:
       - uses: actions/checkout@v4
@@ -113,9 +115,11 @@ jobs:
           {
             echo "runtime_service_account_ids=$(terraform output -raw runtime_service_account_ids)"
             echo "yandex_gateway_url=$(terraform output -raw yandex_gateway_url)"
+            echo "yandex_backend_url=$(terraform output -raw yandex_backend_url)"
             echo "telegram_ingress_url=$(terraform output -raw telegram_ingress_url)"
             echo "telegram_egress_url=$(terraform output -raw telegram_egress_url)"
             echo "vk_callback_url=$(terraform output -raw vk_callback_url)"
+            echo "yandex_vk_rollback_url=$(terraform output -raw yandex_vk_rollback_url)"
             echo "ymq_kick_url=$(terraform output -raw ymq_kick_url)"
           } >>"${GITHUB_OUTPUT}"
       - name: Inject Cloudflare Worker secrets
@@ -123,7 +127,9 @@ jobs:
           TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
+          CF_TO_AWS_HMAC_SECRET: ${{ secrets.CF_TO_AWS_HMAC_SECRET }}
           YANDEX_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.YANDEX_TO_CF_EGRESS_HMAC_SECRET }}
+          AWS_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.AWS_TO_CF_EGRESS_HMAC_SECRET }}
           YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
@@ -135,7 +141,6 @@ jobs:
           TG_GAMEMASTER_IDS: ${{ vars.TG_GAMEMASTER_IDS }}
           VK_GAMEMASTER_IDS: ${{ vars.VK_GAMEMASTER_IDS }}
           PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
-          YANDEX_GATEWAY_URL: ${{ steps.outputs.outputs.yandex_gateway_url }}
           YANDEX_OIDC_AUDIENCE: ${{ steps.outputs.outputs.telegram_egress_url }}/runtime/config
           YANDEX_SERVICE_ACCOUNT_IDS: ${{ steps.outputs.outputs.runtime_service_account_ids }}
           INGRESS_WORKER_NAME: larp-bot-telegram-ingress
@@ -172,3 +177,4 @@ jobs:
         run: |
           echo "Telegram ingress: ${{ steps.outputs.outputs.telegram_ingress_url }}"
           echo "VK callback: ${{ steps.outputs.outputs.vk_callback_url }}"
+          echo "Yandex VK rollback: ${{ steps.outputs.outputs.yandex_vk_rollback_url }}"
