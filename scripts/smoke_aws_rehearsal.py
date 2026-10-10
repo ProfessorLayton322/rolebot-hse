@@ -191,7 +191,10 @@ def main() -> None:
             if response.status != 200 or json.loads(response_body).get("ok") is not True:
                 raise RuntimeError("AWS-signed Cloudflare egress rehearsal failed")
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"AWS-signed Cloudflare egress rehearsal returned HTTP {exc.code}") from exc
+        response_body = exc.read(512).decode(errors="replace")
+        raise RuntimeError(
+            f"AWS-signed Cloudflare egress rehearsal returned HTTP {exc.code}: {response_body!r}"
+        ) from exc
 
     notifier_result = invoke(lambda_client, "larp-bot-prod-registration-notifier", {"source": "phase5-rehearsal"})
     if notifier_result.get("processed") is not False:
