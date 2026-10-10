@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import hashlib
 import hmac
 import json
@@ -73,6 +74,18 @@ def delete_all_versions(s3: Any, bucket: str, key: str) -> None:
         s3.delete_objects(Bucket=bucket, Delete={"Objects": objects, "Quiet": True})
 
 
+def delete_disk_file(path: str, token: str) -> None:
+    disk_url = "https://cloud-api.yandex.net/v1/disk/resources?" + urllib.parse.urlencode({"path": path})
+    request = urllib.request.Request(disk_url, method="DELETE", headers={"Authorization": f"OAuth {token}"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            if response.status not in {202, 204}:
+                raise RuntimeError("could not remove the rehearsal Yandex Disk file")
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+
+
 def main() -> None:
     gateway_url = required("AWS_GATEWAY_URL")
     ingress_secret = required("CF_TO_AWS_HMAC_SECRET")
@@ -80,9 +93,33 @@ def main() -> None:
     bucket = required("AWS_STORAGE_BUCKET")
     suffix = uuid4().hex
     synthetic_id = 8_000_000_000_000 + int(suffix[:8], 16)
+    job_id = str(uuid4())
+    object_key = f"uploads/{job_id}/rehearsal.txt"
+    disk_path = f"disk:/larp-bot/migration-rehearsal/{job_id}.txt"
+    state_key = f"larp-bot/upload-state/{hashlib.sha256(disk_path.encode()).hexdigest()}.txt"
     dynamodb = boto3.client("dynamodb")
     lambda_client = boto3.client("lambda")
     s3 = boto3.client("s3")
+
+    def cleanup() -> None:
+        failures: list[Exception] = []
+        actions = (
+            lambda: delete_disk_file(disk_path, required("YANDEX_DISK_TOKEN")),
+            lambda: delete_all_versions(s3, bucket, object_key),
+            lambda: delete_all_versions(s3, bucket, state_key),
+            lambda: dynamodb.delete_item(
+                TableName="larp-bot-rehearsal-tg-users", Key={"tg_id": {"S": str(synthetic_id)}}
+            ),
+        )
+        for action in actions:
+            try:
+                action()
+            except Exception as exc:  # Preserve best-effort cleanup of the remaining resources.
+                failures.append(exc)
+        if failures:
+            raise RuntimeError(f"AWS rehearsal cleanup failed in {len(failures)} action(s)") from failures[0]
+
+    atexit.register(cleanup)
 
     telegram_body = json.dumps(
         {
@@ -125,47 +162,52 @@ def main() -> None:
         raise RuntimeError(f"AWS VK rehearsal returned HTTP {status}")
 
     admin_ids = json.loads(required("TG_ADMIN_IDS"))
-    egress_request_id = f"phase5-egress-{suffix}"
-    egress_body = json.dumps(
-        {
-            "request_id": egress_request_id,
-            "method": "getChat",
-            "payload": {"chat_id": int(admin_ids[0])},
-        },
-        separators=(",", ":"),
-    ).encode()
-    timestamp = str(int(time.time()))
-    canonical = "\n".join(
-        (timestamp, egress_request_id, "POST", "/telegram/send", hashlib.sha256(egress_body).hexdigest())
-    )
-    signature = hmac.new(egress_secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
     egress_url = required("TELEGRAM_EGRESS_URL").rstrip("/") + "/telegram/send"
     parsed_egress_url = urllib.parse.urlparse(egress_url)
     if parsed_egress_url.scheme != "https" or not parsed_egress_url.netloc:
         raise RuntimeError("Telegram egress URL must be HTTPS")
-    request = urllib.request.Request(  # noqa: S310
-        egress_url,
-        data=egress_body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Timestamp": timestamp,
-            "X-Request-Id": egress_request_id,
-            "X-Signature": signature,
-        },
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-        if response.status != 200 or json.loads(response.read()).get("ok") is not True:
-            raise RuntimeError("AWS-signed Cloudflare egress rehearsal failed")
+    egress_statuses: list[int] = []
+    for index, admin_id in enumerate(admin_ids):
+        egress_request_id = f"phase5-egress-{suffix}-{index}"
+        egress_body = json.dumps(
+            {
+                "request_id": egress_request_id,
+                "method": "getChat",
+                "payload": {"chat_id": int(admin_id)},
+            },
+            separators=(",", ":"),
+        ).encode()
+        timestamp = str(int(time.time()))
+        canonical = "\n".join(
+            (timestamp, egress_request_id, "POST", "/telegram/send", hashlib.sha256(egress_body).hexdigest())
+        )
+        signature = hmac.new(egress_secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+        request = urllib.request.Request(  # noqa: S310
+            egress_url,
+            data=egress_body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Timestamp": timestamp,
+                "X-Request-Id": egress_request_id,
+                "X-Signature": signature,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+                egress_statuses.append(response.status)
+                if response.status == 200 and json.loads(response.read()).get("ok") is True:
+                    break
+        except urllib.error.HTTPError as exc:
+            egress_statuses.append(exc.code)
+    else:
+        raise RuntimeError(f"AWS-signed Cloudflare egress rehearsal failed with statuses {egress_statuses}")
 
     notifier_result = invoke(lambda_client, "larp-bot-prod-registration-notifier", {"source": "phase5-rehearsal"})
     if notifier_result.get("processed") is not False:
         raise RuntimeError("disabled scheduler target did not no-op during rehearsal")
 
     content = b"rolebot AWS upload rehearsal\n"
-    job_id = str(uuid4())
-    object_key = f"uploads/{job_id}/rehearsal.txt"
-    disk_path = f"disk:/larp-bot/migration-rehearsal/{job_id}.txt"
     put = s3.put_object(Bucket=bucket, Key=object_key, Body=BytesIO(content), ContentType="text/plain")
     version_id = put.get("VersionId")
     if not version_id:
@@ -197,24 +239,8 @@ def main() -> None:
     if upload_result.get("processed") is not True:
         raise RuntimeError("AWS disk uploader did not process the rehearsal file")
 
-    disk_url = "https://cloud-api.yandex.net/v1/disk/resources?" + urllib.parse.urlencode({"path": disk_path})
-    delete_request = urllib.request.Request(
-        disk_url,
-        method="DELETE",
-        headers={"Authorization": f"OAuth {required('YANDEX_DISK_TOKEN')}"},
-    )
-    try:
-        with urllib.request.urlopen(delete_request, timeout=30) as response:  # noqa: S310
-            if response.status not in {202, 204}:
-                raise RuntimeError("could not remove the rehearsal Yandex Disk file")
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404:
-            raise
-
-    state_key = f"larp-bot/upload-state/{hashlib.sha256(disk_path.encode()).hexdigest()}.txt"
-    delete_all_versions(s3, bucket, object_key)
-    delete_all_versions(s3, bucket, state_key)
-    dynamodb.delete_item(TableName="larp-bot-rehearsal-tg-users", Key={"tg_id": {"S": str(synthetic_id)}})
+    cleanup()
+    atexit.unregister(cleanup)
     print("AWS rehearsal HTTP, VK, egress, scheduler target, and upload checks passed")
 
 

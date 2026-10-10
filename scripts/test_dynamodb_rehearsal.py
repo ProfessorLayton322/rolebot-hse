@@ -60,7 +60,7 @@ async def exercise(prefix: str) -> None:
 
     try:
         users = DynamoUserRepository(dynamodb, telegram_table=tables.tg_users, vk_table=tables.vk_users)
-        await users.save(TelegramUser(tg_id=tg_id, telegram_handle=f"@rehearsal_{suffix}"))
+        await users.save(TelegramUser(tg_id=tg_id, telegram_handle=f"@rh_{suffix[:20]}"))
         remember(tables.tg_users, serialized(tg_id=str(tg_id)))
         assert await users.claim_delivery(Platform.TELEGRAM, tg_id, f"delivery-{suffix}")
         assert not await users.claim_delivery(Platform.TELEGRAM, tg_id, f"delivery-{suffix}")
@@ -69,7 +69,7 @@ async def exercise(prefix: str) -> None:
         event = Event(
             event_id=event_id,
             name="AWS migration rehearsal",
-            disk_resource_path=f"disk:/larp-bot/rehearsal/{suffix}.xlsx",
+            disk_resource_path=f"disk:/larp-bot/events/rehearsal-{suffix}.xlsx",
             public_registration_url=f"https://example.invalid/{suffix}",
             signup_token=signup_token,
             telegram_chat_id=int(chat_id),
