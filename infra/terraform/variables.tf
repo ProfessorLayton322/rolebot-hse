@@ -49,6 +49,27 @@ variable "cloudflare_workers_subdomain" {
   description = "Account workers.dev subdomain, without .workers.dev."
 }
 
+variable "cloudflare_active_backend" {
+  type        = string
+  description = "Backend selected by the stable Cloudflare ingress Worker."
+  default     = "yandex"
+
+  validation {
+    condition     = contains(["yandex", "aws", "maintenance"], var.cloudflare_active_backend)
+    error_message = "cloudflare_active_backend must be yandex, aws, or maintenance."
+  }
+}
+
+variable "aws_backend_url" {
+  type        = string
+  description = "HTTPS Lambda Function URL owned by the separate AWS application state."
+
+  validation {
+    condition     = can(regex("^https://[^/@?#]+(?::[0-9]+)?(?:/[^?#]*)?$", var.aws_backend_url))
+    error_message = "aws_backend_url must be an absolute HTTPS URL without credentials, query, or fragment."
+  }
+}
+
 variable "gateway_max_instances" {
   type    = number
   default = 3

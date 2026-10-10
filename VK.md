@@ -242,12 +242,15 @@ Value: []
 Ответственный за развёртывание запускает GitHub Action **Deploy production**. После успешного выполнения он должен передать вам URL вида:
 
 ```text
-https://<домен-api-gateway>/webhooks/vk
+https://larp-bot-telegram-ingress.<поддомен-workers>.workers.dev/vk
 ```
 
 В журнале GitHub Actions он выводится в шаге **Deployment endpoints** как `VK callback`.
 
 `VK_CALLBACK_URL` не является секретом и не должен добавляться в GitHub Secrets.
+Это стабильный адрес Cloudflare: при переключении между Yandex и AWS менять
+сервер в VK не нужно. Прямой адрес Yandex выводится отдельно как
+`Yandex VK rollback` и используется только по плану отката.
 
 ## 10. Подключить сервер Callback API
 
@@ -306,7 +309,8 @@ VK отправит на указанный адрес событие `confirmat
 - секретный ключ в VK полностью совпадает с `VK_CALLBACK_SECRET`;
 - строка в GitHub полностью совпадает с `VK_CONFIRMATION_STRING`;
 - после изменения GitHub Secrets повторно выполнен **Deploy production**;
-- URL заканчивается на `/webhooks/vk`;
+- URL заканчивается на `/vk` и относится к Worker
+  `larp-bot-telegram-ingress`;
 - сервер доступен по HTTPS.
 
 ## Ротация и отзыв доступа

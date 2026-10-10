@@ -34,7 +34,18 @@ resource "yandex_api_gateway" "bot" {
             payload_format_version: "1.0"
           responses:
             "200":
-              description: VK callback acknowledgement
+              description: Direct VK callback acknowledgement retained for Yandex rollback
+      /webhooks/vk-cloudflare:
+        post:
+          x-yc-apigateway-integration:
+            type: cloud_functions
+            function_id: ${yandex_function.gateway.id}
+            tag: production
+            service_account_id: ${yandex_iam_service_account.api_gateway.id}
+            payload_format_version: "1.0"
+          responses:
+            "200":
+              description: Cloudflare-authenticated VK callback acknowledgement
   YAML
 
   depends_on = [

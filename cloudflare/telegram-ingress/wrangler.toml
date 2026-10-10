@@ -6,8 +6,11 @@ workers_dev = true
 [secrets]
 required = [
   "TG_WEBHOOK_SECRET",
+  "VK_CALLBACK_SECRET",
+  "VK_CONFIRMATION_STRING",
+  "VK_GROUP_ID",
   "CF_TO_YANDEX_HMAC_SECRET",
-  "YANDEX_GATEWAY_URL"
+  "CF_TO_AWS_HMAC_SECRET"
 ]
 
 [vars]

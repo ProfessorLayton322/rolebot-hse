@@ -2,6 +2,7 @@ export interface Env {
   TG_BOT_TOKEN: string;
   TG_BOT_USERNAME: string;
   YANDEX_TO_CF_EGRESS_HMAC_SECRET: string;
+  AWS_TO_CF_EGRESS_HMAC_SECRET?: string;
   YANDEX_DISK_TOKEN: string;
   GOOGLE_SERVICE_ACCOUNT_JSON: string;
   VK_ACCESS_TOKEN: string;
@@ -238,8 +239,15 @@ async function handle(request: Request, env: Env): Promise<Response> {
   }
   const bodyHash = await digest(body);
   const canonical = [timestamp, requestId, "POST", "/telegram/send", bodyHash].join("\n");
-  const expected = await sign(env.YANDEX_TO_CF_EGRESS_HMAC_SECRET, canonical);
-  if (!requestId || !constantTimeEqual(supplied, expected)) {
+  const expectedYandex = await sign(env.YANDEX_TO_CF_EGRESS_HMAC_SECRET, canonical);
+  const expectedAws = env.AWS_TO_CF_EGRESS_HMAC_SECRET
+    ? await sign(env.AWS_TO_CF_EGRESS_HMAC_SECRET, canonical)
+    : undefined;
+  // Always compare both candidates so the accepted backend cannot be inferred
+  // from signature-check timing during the migration window.
+  const validYandex = constantTimeEqual(supplied, expectedYandex);
+  const validAws = expectedAws !== undefined && constantTimeEqual(supplied, expectedAws);
+  if (!requestId || (!validYandex && !validAws)) {
     return new Response("Forbidden", { status: 403 });
   }
 

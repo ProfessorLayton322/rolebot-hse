@@ -19,6 +19,7 @@ from larp_bot.domain.security import sign_request
 from larp_bot.functions.gateway.handler import (
     _telegram,
     _verify_cloudflare,
+    _verify_cloudflare_transport,
     _vk,
     _vk_confirmation,
     _vk_confirmation_from_config,
@@ -30,6 +31,7 @@ class FakeConfig:
     def __init__(self) -> None:
         self.values = {
             "CF_TO_YANDEX_HMAC_SECRET": "transport-secret",
+            "CF_TO_AWS_HMAC_SECRET": "aws-transport-secret",
             "VK_CALLBACK_SECRET": "vk-secret",
             "VK_GROUP_ID": "42",
             "VK_CONFIRMATION_STRING": "confirmation-value",
@@ -169,11 +171,17 @@ def test_vk_ref_does_not_turn_an_empty_message_into_a_game_start() -> None:
     assert inbound.has_unsupported_content
 
 
-def signed_event(body: bytes, *, deadline_ms: int, timestamp: int | None = None) -> dict[str, Any]:
+def signed_event(
+    body: bytes,
+    *,
+    deadline_ms: int,
+    timestamp: int | None = None,
+    path: str = "/webhooks/telegram",
+    secret: str | None = None,
+) -> dict[str, Any]:
     request_id = "request-1"
     stamp = str(timestamp or int(time.time()))
-    path = "/webhooks/telegram"
-    signature = sign_request("transport-secret", stamp, request_id, "POST", path, body)
+    signature = sign_request(secret or "transport-secret", stamp, request_id, "POST", path, body)
     return {
         "path": path,
         "headers": {
@@ -217,6 +225,14 @@ def test_body_integrity_is_verified() -> None:
         _verify_cloudflare(event, body + b" ", "transport-secret")
 
 
+def test_non_telegram_cloudflare_transport_does_not_require_an_inline_deadline() -> None:
+    body = json.dumps({"type": "message_new"}).encode()
+    event = signed_event(body, deadline_ms=1, path="/webhooks/vk-cloudflare")
+    del event["headers"]["X-Telegram-Inline-Deadline-Ms"]
+
+    assert _verify_cloudflare_transport(event, body, "transport-secret") == "request-1"
+
+
 @pytest.mark.asyncio
 async def test_fast_response_is_inline_only() -> None:
     body = telegram_body()
@@ -226,6 +242,23 @@ async def test_fast_response_is_inline_only() -> None:
     contract = json.loads(result["body"])
     assert contract["delivery"] == "inline"
     assert app.transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_aws_telegram_uses_the_distinct_cloudflare_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLOUD_PROVIDER", "aws")
+    body = telegram_body()
+    app = fake_app(BotResponse(text="hello"))
+    event = signed_event(
+        body,
+        deadline_ms=int(time.time() * 1000) + 10_000,
+        secret="aws-transport-secret",
+    )
+
+    result = await _telegram(event, body, app)
+
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"])["delivery"] == "inline"
 
 
 @pytest.mark.asyncio
@@ -342,6 +375,73 @@ async def test_vk_confirmation_route_does_not_initialize_container() -> None:
 
     assert result == confirmation_response
     confirmation.assert_awaited_once()
+    container_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_vk_route_requires_transport_signature_before_application() -> None:
+    body = json.dumps(
+        {
+            "type": "message_new",
+            "event_id": "event-1",
+            "group_id": 42,
+            "secret": "vk-secret",
+            "object": {"message": {"from_id": 1, "peer_id": 1, "text": "/start"}},
+        }
+    ).encode()
+    event = signed_event(body, deadline_ms=1, path="/webhooks/vk-cloudflare")
+    del event["headers"]["X-Telegram-Inline-Deadline-Ms"]
+    event.update({"httpMethod": "POST", "body": body.decode(), "isBase64Encoded": False})
+
+    with (
+        patch("larp_bot.functions.gateway.handler._confirmation_config_instance", return_value=FakeConfig()),
+        patch(
+            "larp_bot.functions.gateway.handler._container_instance",
+            new_callable=AsyncMock,
+            return_value=fake_app(BotResponse(text="hello")),
+        ) as container_instance,
+    ):
+        result = await async_handler(event, SimpleNamespace(token={}))
+
+    assert result["statusCode"] == 200
+    assert result["body"] == "ok"
+    container_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_vk_route_rejects_a_wrong_backend_signature() -> None:
+    body = json.dumps({"type": "message_new", "group_id": 42, "secret": "vk-secret"}).encode()
+    event = signed_event(body, deadline_ms=1, path="/webhooks/vk-cloudflare", secret="wrong")
+    del event["headers"]["X-Telegram-Inline-Deadline-Ms"]
+    event.update({"httpMethod": "POST", "body": body.decode(), "isBase64Encoded": False})
+
+    with (
+        patch("larp_bot.functions.gateway.handler._confirmation_config_instance", return_value=FakeConfig()),
+        patch("larp_bot.functions.gateway.handler._container_instance", new_callable=AsyncMock) as container_instance,
+    ):
+        result = await async_handler(event, SimpleNamespace(token={}))
+
+    assert result["statusCode"] == 403
+    container_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aws_rejects_the_unsigned_direct_vk_rollback_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLOUD_PROVIDER", "aws")
+    event = {
+        "httpMethod": "POST",
+        "path": "/webhooks/vk",
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"type": "confirmation", "group_id": 42, "secret": "vk-secret"}),
+        "isBase64Encoded": False,
+    }
+    with patch(
+        "larp_bot.functions.gateway.handler._container_instance",
+        new_callable=AsyncMock,
+    ) as container_instance:
+        result = await async_handler(event, SimpleNamespace(token={}))
+
+    assert result["statusCode"] == 404
     container_instance.assert_not_awaited()
 
 

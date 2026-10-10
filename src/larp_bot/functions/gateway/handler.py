@@ -65,7 +65,13 @@ async def _container_instance(context: Any) -> AppContainer:
     return _container
 
 
-def _verify_cloudflare(event: dict[str, Any], body: bytes, secret: str, *, now: int | None = None) -> tuple[str, int]:
+def _verify_cloudflare_transport(
+    event: dict[str, Any],
+    body: bytes,
+    secret: str,
+    *,
+    now: int | None = None,
+) -> str:
     headers = _headers(event)
     timestamp = headers.get("x-gateway-timestamp", "")
     request_id = headers.get("x-gateway-request-id", "")
@@ -84,6 +90,12 @@ def _verify_cloudflare(event: dict[str, Any], body: bytes, secret: str, *, now: 
     expected = sign_request(secret, timestamp, request_id, "POST", path, body)
     if not constant_time_valid_signature(expected, supplied):
         raise PermissionError("invalid transport signature")
+    return request_id
+
+
+def _verify_cloudflare(event: dict[str, Any], body: bytes, secret: str, *, now: int | None = None) -> tuple[str, int]:
+    request_id = _verify_cloudflare_transport(event, body, secret, now=now)
+    headers = _headers(event)
     deadline = headers.get("x-telegram-inline-deadline-ms", "")
     if not deadline.isdigit():
         raise PermissionError("missing inline deadline")
@@ -240,6 +252,18 @@ async def _vk_confirmation(event: dict[str, Any], context: Any) -> dict[str, Any
     return await _vk_confirmation_from_config(event, _confirmation_config_instance(context))
 
 
+async def _verify_cloudflare_vk(
+    event: dict[str, Any],
+    body: bytes,
+    context: Any,
+) -> AdminConfigProvider:
+    config = _confirmation_config_instance(context)
+    secret_key = "CF_TO_AWS_HMAC_SECRET" if os.getenv("CLOUD_PROVIDER") == "aws" else "CF_TO_YANDEX_HMAC_SECRET"
+    secret = await config.get_secret(secret_key)
+    _verify_cloudflare_transport(event, body, secret)
+    return config
+
+
 def _reject_obviously_unauthenticated_vk(body: bytes) -> dict[str, Any] | None:
     """Reject requests that cannot possibly satisfy the VK callback contract.
 
@@ -273,11 +297,26 @@ async def async_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         if path.endswith("/telegram"):
             app = await _container_instance(context)
             return await _telegram(event, body, app)
-        if path.endswith("/vk"):
+        if path.endswith("/vk-cloudflare"):
             rejected = _reject_obviously_unauthenticated_vk(body)
             if rejected is not None:
                 return rejected
             vk_event: dict[str, Any] = json.loads(body)
+            config = await _verify_cloudflare_vk(event, body, context)
+            if vk_event.get("type") == "confirmation":
+                return await _vk_confirmation_from_config(vk_event, config)
+            app = await _container_instance(context)
+            return await _vk(body, app)
+        if path.endswith("/vk"):
+            # The direct route remains only as the Yandex rollback target while
+            # VK is moved to Cloudflare. AWS accepts VK exclusively through the
+            # separately signed Cloudflare path.
+            if os.getenv("CLOUD_PROVIDER") == "aws":
+                return _response(404, {"error": "not found"})
+            rejected = _reject_obviously_unauthenticated_vk(body)
+            if rejected is not None:
+                return rejected
+            vk_event = json.loads(body)
             if vk_event.get("type") == "confirmation":
                 return await _vk_confirmation(vk_event, context)
             app = await _container_instance(context)

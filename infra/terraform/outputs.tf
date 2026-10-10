@@ -3,9 +3,19 @@ output "yandex_gateway_url" {
   description = "Internal Telegram target used only by Cloudflare ingress."
 }
 
+output "yandex_backend_url" {
+  value       = "https://${yandex_api_gateway.bot.domain}"
+  description = "Yandex backend base URL used by the reversible Cloudflare router."
+}
+
 output "vk_callback_url" {
+  value       = "${local.telegram_ingress_url}/vk"
+  description = "Stable Cloudflare URL to configure in VK Callback API."
+}
+
+output "yandex_vk_rollback_url" {
   value       = "https://${yandex_api_gateway.bot.domain}/webhooks/vk"
-  description = "Configure this URL in VK Callback API."
+  description = "Direct Yandex VK callback retained only as a rollback target."
 }
 
 output "telegram_ingress_url" {

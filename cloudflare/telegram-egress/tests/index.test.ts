@@ -5,6 +5,7 @@ const env: Env = {
   TG_BOT_TOKEN: "123:token",
   TG_BOT_USERNAME: "rolebot_test_bot",
   YANDEX_TO_CF_EGRESS_HMAC_SECRET: "egress-secret",
+  AWS_TO_CF_EGRESS_HMAC_SECRET: "aws-egress-secret",
   YANDEX_DISK_TOKEN: "disk-token",
   GOOGLE_SERVICE_ACCOUNT_JSON: '{"type":"service_account"}',
   VK_ACCESS_TOKEN: "vk-token",
@@ -62,14 +63,18 @@ async function identityRequest(subject = "gateway-service-account"): Promise<Req
   });
 }
 
-async function signedRequest(method = "sendMessage", offsetSeconds = 0): Promise<Request> {
+async function signedRequest(
+  method = "sendMessage",
+  offsetSeconds = 0,
+  secret = env.YANDEX_TO_CF_EGRESS_HMAC_SECRET,
+): Promise<Request> {
   const requestId = "operation-id";
   const body = JSON.stringify({ request_id: requestId, method, payload: { chat_id: 1, text: "hello" } });
   const bytes = new TextEncoder().encode(body);
   const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
   const hash = [...new Uint8Array(hashBuffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   const timestamp = String(Math.floor(Date.now() / 1000) + offsetSeconds);
-  const signature = await sign(env.YANDEX_TO_CF_EGRESS_HMAC_SECRET, [timestamp, requestId, "POST", "/telegram/send", hash].join("\n"));
+  const signature = await sign(secret, [timestamp, requestId, "POST", "/telegram/send", hash].join("\n"));
   return new Request("https://egress.example/telegram/send", {
     method: "POST",
     body,
@@ -92,6 +97,25 @@ describe("telegram egress", () => {
     const response = await handle(await signedRequest("promoteChatMember"), env);
     expect(response.status).toBe(200);
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain("api.telegram.org/bot123:token/promoteChatMember");
+  });
+
+  it("accepts the AWS egress signature during migration", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true })));
+    const response = await handle(
+      await signedRequest("sendMessage", 0, env.AWS_TO_CF_EGRESS_HMAC_SECRET),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Yandex egress available while the AWS secret is first installed", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true })));
+    const rolloutEnv = { ...env };
+    delete rolloutEnv.AWS_TO_CF_EGRESS_HMAC_SECRET;
+    const response = await handle(await signedRequest(), rolloutEnv);
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("rejects unsupported methods", async () => {
