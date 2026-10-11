@@ -160,11 +160,12 @@ class OrderedWorker:
                                 or command.reply_context.peer_id
                                 or command.platform_user_id
                             )
-                            event = await self.administration.refresh_event_tables(
-                                event.event_id,
-                                requester=requester,
-                                reply_user_id=reply_user_id,
-                            )
+                            if event.public_table_public_url is None or event.pass_table_public_url is None:
+                                event = await self.administration.refresh_event_tables(
+                                    event.event_id,
+                                    requester=requester,
+                                    reply_user_id=reply_user_id,
+                                )
                             if event.public_table_public_url is None or event.pass_table_public_url is None:
                                 default_text = ""
                                 notifications_enabled = False

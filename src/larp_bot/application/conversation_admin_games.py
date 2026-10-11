@@ -626,6 +626,11 @@ class AdministrationGamesMixin(ConversationContext):
         if action == "tables":
             await self._clear(user)
             pending_buttons = [game_files_button(event.event_id)]
+            if event.public_table_public_url is not None and event.pass_table_public_url is not None:
+                return BotResponse(
+                    text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(event)}"),
+                    buttons=pending_buttons,
+                )
             if can_manage:
                 identity = self._identity(user)
                 await self.registrations.enqueue(
@@ -647,17 +652,9 @@ class AdministrationGamesMixin(ConversationContext):
                     deferred=True,
                     command_enqueued=True,
                 )
-            refreshed = await self.events.get(event.event_id)
-            if refreshed is None:
-                return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
-            if refreshed.public_table_public_url is None or refreshed.pass_table_public_url is None:
-                return BotResponse(
-                    text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
-                    buttons=[game_files_button(event.event_id)],
-                )
             return BotResponse(
-                text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(refreshed)}"),
-                buttons=[game_files_button(event.event_id)],
+                text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
+                buttons=pending_buttons,
             )
         if action == "achievements":
             await self._clear(user)
