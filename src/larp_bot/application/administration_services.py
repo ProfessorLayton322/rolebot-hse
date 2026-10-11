@@ -181,10 +181,13 @@ class EventAdministrationService:
             player_amount=player_amount,
             disk_resource_path=master_path,
             public_registration_url=urls["master"],
+            master_table_google_url=urls.get("google:master"),
             public_table_resource_path=public_path,
             public_table_public_url=urls["public"],
+            public_table_google_url=urls.get("google:public"),
             pass_table_resource_path=pass_path,
             pass_table_public_url=urls["pass"],
+            pass_table_google_url=urls.get("google:pass"),
             registration_open_at=registration_open_at,
             confirmation_open_at=confirmation_open_at,
             confirmation_deadline=confirmation_deadline,
@@ -218,8 +221,8 @@ class EventAdministrationService:
         self,
         event_id: str,
         *,
-        requester: BotIdentity,
-        reply_user_id: int,
+        requester: BotIdentity | None = None,
+        reply_user_id: int | None = None,
     ) -> Event:
         event = await self.events.get(event_id)
         if event is None:
@@ -592,32 +595,30 @@ class EventAdministrationService:
         )
 
         disk_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
-        public_url = await self.showcase.create_pass_table(
-            disk_path,
-            profiles,
-            callback={
+        callback: dict[str, object] | None = None
+        if requester is not None:
+            callback = {
                 "kind": "event_tables",
                 "event_id": event.event_id,
                 "resource_path": disk_path,
                 "component": "pass",
-                **(
-                    {
-                        "requester": {
-                            "platform": requester.platform.value,
-                            "user_id": reply_user_id or requester.platform_user_id,
-                            "profile_user_id": requester.platform_user_id,
-                        }
-                    }
-                    if requester is not None
-                    else {}
-                ),
-            },
+                "requester": {
+                    "platform": requester.platform.value,
+                    "user_id": reply_user_id or requester.platform_user_id,
+                    "profile_user_id": requester.platform_user_id,
+                },
+            }
+        public_url = await self.showcase.create_pass_table(
+            disk_path,
+            profiles,
+            callback=callback,
             before_invoke=before_invoke,
         )
         if public_url is None:
             return PassTableExport(None, created=True, row_count=len(profiles))
+        google_url = public_url if self.mirrors_google_tables else None
         try:
-            if not await self.events.set_pass_table(event.event_id, disk_path, public_url):
+            if not await self.events.set_pass_table(event.event_id, disk_path, public_url, google_url):
                 raise EventNotFound("Игра была удалена во время создания таблицы")
         except Exception:
             await self.showcase.delete_pass_table(disk_path)

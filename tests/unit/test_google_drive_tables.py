@@ -59,6 +59,18 @@ class RecordingUploader:
             await before_invoke()
 
 
+class FailingUploader(RecordingUploader):
+    async def submit(
+        self,
+        files: Sequence[DiskUpload],
+        *,
+        callback: dict[str, object] | None = None,
+        before_invoke: UploadReadyCallback | None = None,
+    ) -> None:
+        await super().submit(files, callback=callback, before_invoke=before_invoke)
+        raise RuntimeError("Yandex is unavailable")
+
+
 @pytest.mark.asyncio
 async def test_all_xlsx_files_are_mirrored_before_the_optional_yandex_job() -> None:
     drive = MemoryTableDrive()
@@ -139,3 +151,73 @@ async def test_background_refresh_returns_google_link_for_legacy_event_backfill(
 
     assert result == {"google:public": "https://drive.example/events-legacy-public.xlsx"}
     assert drive.published == ["events-legacy-public.xlsx"]
+
+
+@pytest.mark.asyncio
+async def test_all_xlsx_job_returns_google_links_without_waiting_for_yandex_completion() -> None:
+    drive = MemoryTableDrive()
+    delegate = RecordingUploader()
+    uploader = GoogleDriveMirroredUploader(delegate, drive, "tables-folder")
+    pending_called = False
+
+    async def pending() -> None:
+        nonlocal pending_called
+        pending_called = True
+
+    result = await uploader.submit(
+        [
+            DiskUpload(
+                "master",
+                "disk:/larp-bot/events/event-id/master.xlsx",
+                b"master",
+                XLSX_MIME_TYPE,
+                False,
+                True,
+            ),
+            DiskUpload(
+                "public",
+                "disk:/larp-bot/events/event-id/public.xlsx",
+                b"public",
+                XLSX_MIME_TYPE,
+                False,
+                True,
+            ),
+        ],
+        callback={"kind": "event_created"},
+        before_invoke=pending,
+    )
+
+    assert result == {
+        "google:master": "https://drive.example/events-event-id-master.xlsx",
+        "google:public": "https://drive.example/events-event-id-public.xlsx",
+        "master": "https://drive.example/events-event-id-master.xlsx",
+        "public": "https://drive.example/events-event-id-public.xlsx",
+    }
+    assert delegate.files == ()
+    assert delegate.callback is None
+    assert not pending_called
+
+
+@pytest.mark.asyncio
+async def test_yandex_failure_cannot_fail_an_authoritative_google_table_upload() -> None:
+    drive = MemoryTableDrive()
+    uploader = GoogleDriveMirroredUploader(FailingUploader(), drive, "tables-folder")
+
+    result = await uploader.submit(
+        [
+            DiskUpload(
+                "pass",
+                "disk:/larp-bot/passes/event-id.xlsx",
+                b"passes",
+                XLSX_MIME_TYPE,
+                True,
+                True,
+            )
+        ],
+        callback={"kind": "event_tables"},
+    )
+
+    assert result == {
+        "google:pass": "https://drive.example/passes-event-id.xlsx",
+        "pass": "https://drive.example/passes-event-id.xlsx",
+    }

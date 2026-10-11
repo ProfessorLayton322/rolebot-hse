@@ -104,6 +104,7 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         showcase,
         users=users,
         participant_secret=secrets["PARTICIPANT_KEY_HMAC_SECRET"],
+        legacy_registration_imports=False,
     )
     registration_service = RegistrationService(
         events,

@@ -5085,6 +5085,28 @@ async def test_event_tables_action_returns_existing_links_without_queueing(
 
 
 @pytest.mark.asyncio
+async def test_event_tables_action_queues_google_backfill_for_yandex_only_links(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    legacy = event.model_copy(
+        update={
+            "public_table_resource_path": f"disk:/larp-bot/events/{event.event_id}-public.xlsx",
+            "public_table_public_url": "https://disk.example/public-table",
+            "pass_table_resource_path": f"disk:/larp-bot/passes/{event.event_id}.xlsx",
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    engine, _, publisher, _ = await engine_setup(disk_store, legacy, admin=True)
+    engine.administration.showcase.mirrors_google_tables = True
+
+    tables = await engine.handle(inbound(1, f"ag:tables:{legacy.event_id}", callback=True))
+
+    assert tables.deferred and tables.command_enqueued
+    assert publisher.commands[-1].operation is Operation.REFRESH_EVENT_TABLES
+
+
+@pytest.mark.asyncio
 async def test_game_management_regenerates_achievements_and_reuses_the_link(
     disk_store: MemoryDiskStore,
     event: Event,

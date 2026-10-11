@@ -59,7 +59,7 @@ from .service_support import (
 
 
 class RegistrationCatalog:
-    """YDB registration source of truth plus its derived public showcase."""
+    """Registration source of truth plus its derived public showcase."""
 
     def __init__(
         self,
@@ -69,6 +69,7 @@ class RegistrationCatalog:
         *,
         users: UserRepository | None = None,
         participant_secret: str | None = None,
+        legacy_registration_imports: bool = True,
     ) -> None:
         if users is not None and participant_secret is None:
             raise ValueError("pass preferences require a participant secret")
@@ -77,14 +78,17 @@ class RegistrationCatalog:
         self.showcase = showcase
         self.users = users
         self.participant_secret = participant_secret
+        self.legacy_registration_imports = legacy_registration_imports
 
     async def ensure_migrated(self, event: Event) -> Event:
         if event.registrations_migrated_at is not None:
             return event
-        legacy = await self.showcase.read_legacy_registrations(event)
-        await self.registrations.import_missing(legacy)
-        # Publish the YDB projection before setting the marker. If Disk is
-        # temporarily unavailable, the next request safely retries migration.
+        if self.legacy_registration_imports:
+            legacy = await self.showcase.read_legacy_registrations(event)
+            await self.registrations.import_missing(legacy)
+        # AWS imports already contain the authoritative DynamoDB registration
+        # rows, so they must not wait for legacy Yandex Disk. The frozen Yandex
+        # runtime retains its one-time workbook import through the default.
         event = await self.refresh(event)
         migrated_at = datetime.now(UTC)
         await self.events.mark_registrations_migrated(event.event_id, migrated_at)
@@ -112,33 +116,31 @@ class RegistrationCatalog:
         if rows is None:
             rows = list(await self.registrations.list_for_event(event.event_id))
         _, disk_path = event_table_paths(event.event_id, event.name)
-        public_url = await self.showcase.create_public_event_workbook(
-            disk_path,
-            rows,
-            player_amount=event.player_amount,
-            callback={
+        callback: dict[str, object] | None = None
+        if requester is not None:
+            callback = {
                 "kind": "event_tables",
                 "event_id": event.event_id,
                 "resource_path": disk_path,
                 "component": "public",
-                **(
-                    {
-                        "requester": {
-                            "platform": requester.platform.value,
-                            "user_id": reply_user_id or requester.platform_user_id,
-                            "profile_user_id": requester.platform_user_id,
-                        }
-                    }
-                    if requester is not None
-                    else {}
-                ),
-            },
+                "requester": {
+                    "platform": requester.platform.value,
+                    "user_id": reply_user_id or requester.platform_user_id,
+                    "profile_user_id": requester.platform_user_id,
+                },
+            }
+        public_url = await self.showcase.create_public_event_workbook(
+            disk_path,
+            rows,
+            player_amount=event.player_amount,
+            callback=callback,
             before_invoke=before_invoke,
         )
         if public_url is None:
             return event
+        google_url = public_url if bool(getattr(self.showcase, "mirrors_google_tables", False)) else None
         try:
-            attached = await self.events.set_public_table(event.event_id, disk_path, public_url)
+            attached = await self.events.set_public_table(event.event_id, disk_path, public_url, google_url)
         except Exception:
             await self.showcase.delete_event_workbook(disk_path)
             raise
@@ -148,6 +150,7 @@ class RegistrationCatalog:
                 | {
                     "public_table_resource_path": disk_path,
                     "public_table_public_url": public_url,
+                    "public_table_google_url": google_url,
                 }
             )
 
