@@ -45,3 +45,13 @@ output "rehearsal_table_prefix" {
   description = "Temporary DynamoDB prefix when Phase 5 tables are enabled."
   value       = var.rehearsal_tables_enabled ? "${var.project_name}-rehearsal" : null
 }
+
+output "cloudwatch_operations_dashboard_name" {
+  description = "CloudWatch dashboard for Lambda spend, failures, queues, retries, scheduling, and DynamoDB."
+  value       = aws_cloudwatch_dashboard.operations.dashboard_name
+}
+
+output "cloudwatch_operations_dashboard_url" {
+  description = "Regional AWS console URL for the production operations dashboard."
+  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards/dashboard/${aws_cloudwatch_dashboard.operations.dashboard_name}"
+}
