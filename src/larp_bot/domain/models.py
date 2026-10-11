@@ -179,6 +179,7 @@ class Operation(StrEnum):
     STATISTICS = "STATISTICS"
     SYNC_PROFILE = "SYNC_PROFILE"
     REFRESH_DAILY_PASS_TABLE = "REFRESH_DAILY_PASS_TABLE"
+    REFRESH_EVENT_TABLES = "REFRESH_EVENT_TABLES"
     ENLIST = "ENLIST"
     UPDATE_PROFILE = "UPDATE_PROFILE"
     CONFIRM = "CONFIRM"
@@ -875,6 +876,7 @@ class OrderedRegistrationCommand(StrictModel):
         if self.operation is Operation.UPDATE_EVENT_DETAILS and not isinstance(self.payload, EventDetailsPayload):
             raise ValueError("UPDATE_EVENT_DETAILS requires EventDetailsPayload")
         empty_payload_operations = {
+            Operation.REFRESH_EVENT_TABLES,
             Operation.UPDATE_PROFILE,
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,

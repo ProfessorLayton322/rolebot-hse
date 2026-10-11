@@ -122,6 +122,7 @@ from larp_bot.domain.models import (
     CharacterWishPayload,
     ConfirmationDeadlinePayload,
     CoPlayerWishPayload,
+    EmptyPayload,
     EnlistPayload,
     Event,
     EventDetailsPayload,
@@ -3330,7 +3331,7 @@ async def test_admin_lists_and_removes_moderators_with_pagination_and_notificati
 
 @pytest.mark.asyncio
 async def test_created_game_confirmation_includes_all_table_links(disk_store: MemoryDiskStore, event: Event) -> None:
-    engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
+    engine, users, publisher, _ = await engine_setup(disk_store, event, admin=True)
     creator = await users.get(Platform.TELEGRAM, 1)
     assert isinstance(creator, TelegramUser)
     creator.needs_pass = True
@@ -3428,11 +3429,10 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     files = await engine.handle(inbound(90, f"ag:files:{created.event_id}", callback=True))
     assert EVENT_TABLES in [button.label for button in files.buttons]
     tables = await engine.handle(inbound(10, f"ag:tables:{created.event_id}", callback=True))
-    assert tables.text.count("https://disk.example/public/") == 3
-    assert MASTER_TABLE_DISCLAIMER in tables.text
-    assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
-    assert "Административная таблица" in tables.text
-    assert "Таблица пропусков" in tables.text
+    assert tables.text == "⏳ Таблицы обновляются. Бот пришлёт ссылки, когда загрузка завершится."
+    assert tables.deferred and tables.command_enqueued
+    assert publisher.commands[-1].operation is Operation.REFRESH_EVENT_TABLES
+    assert publisher.commands[-1].event_id == created.event_id
 
 
 @pytest.mark.asyncio
@@ -5031,8 +5031,11 @@ async def test_information_notification_preview_counts_confirmed_reserve_players
 
 
 @pytest.mark.asyncio
-async def test_event_tables_action_returns_all_three_permanent_links(disk_store: MemoryDiskStore, event: Event) -> None:
-    engine, _, _, _ = await engine_setup(disk_store, event, admin=True)
+async def test_event_tables_action_queues_refresh_without_blocking_gateway(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
     management = await engine.handle(inbound(1, f"ag:manage:{event.event_id}", callback=True))
     assert GAME_FILES in [button.label for button in management.buttons]
@@ -5040,15 +5043,16 @@ async def test_event_tables_action_returns_all_three_permanent_links(disk_store:
     assert EVENT_TABLES in [button.label for button in files.buttons]
 
     tables = await engine.handle(inbound(2, f"ag:tables:{event.event_id}", callback=True))
-    assert tables.text.count("https://disk.example/") == 3
-    assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
-    assert "Административная таблица" in tables.text
-    assert "Таблица пропусков" in tables.text
-    assert MASTER_TABLE_DISCLAIMER in tables.text
+    assert tables.text == "⏳ Таблицы обновляются. Бот пришлёт ссылки, когда загрузка завершится."
+    assert tables.deferred and tables.command_enqueued
     assert tables.buttons == [Button(label="⬅️ Назад", value=f"ag:files:{event.event_id}")]
-
-    repeated = await engine.handle(inbound(3, f"ag:tables:{event.event_id}", callback=True))
-    assert repeated.text == tables.text
+    assert len(publisher.commands) == 1
+    command = publisher.commands[0]
+    assert command.operation is Operation.REFRESH_EVENT_TABLES
+    assert command.event_id == event.event_id
+    assert isinstance(command.payload, EmptyPayload)
+    assert command.reply_context.buttons == tables.buttons
+    assert all(1 <= len(button.value.encode("utf-8")) <= 64 for button in tables.buttons)
 
 
 @pytest.mark.asyncio

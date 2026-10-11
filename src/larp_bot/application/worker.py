@@ -6,8 +6,17 @@ import time
 from collections.abc import Sequence
 
 from larp_bot.adapters.ymq.client import QueueEnvelope
-from larp_bot.domain.models import Button, DailyPassRefreshPayload, Operation, Platform, UnreachableRecipient
+from larp_bot.domain.models import (
+    BotIdentity,
+    Button,
+    DailyPassRefreshPayload,
+    Operation,
+    Platform,
+    UnreachableRecipient,
+    event_reference,
+)
 
+from .conversation_support import event_table_links
 from .game_closings import ScheduledGameClosingService
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, EventAdministrationService, OrderedMutationService
@@ -138,6 +147,32 @@ class OrderedWorker:
                             await self.administration.refresh_daily_pass_table(command.payload.game_date)
                             default_text = ""
                             notifications_enabled = False
+                        elif command.operation is Operation.REFRESH_EVENT_TABLES:
+                            if self.administration is None:
+                                raise RuntimeError("event administration service is not configured")
+                            event = await self.mutations.require_active_event_leader(command)
+                            requester = BotIdentity(
+                                platform=command.platform,
+                                platform_user_id=command.platform_user_id,
+                            )
+                            reply_user_id = (
+                                command.reply_context.chat_id
+                                or command.reply_context.peer_id
+                                or command.platform_user_id
+                            )
+                            event = await self.administration.refresh_event_tables(
+                                event.event_id,
+                                requester=requester,
+                                reply_user_id=reply_user_id,
+                            )
+                            if event.public_table_public_url is None or event.pass_table_public_url is None:
+                                default_text = ""
+                                notifications_enabled = False
+                            else:
+                                default_text = (
+                                    f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n"
+                                    f"{event_table_links(event)}"
+                                )
                         elif command.operation is Operation.STATISTICS:
                             if self.statistics is None:
                                 raise RuntimeError("statistics service is not configured")

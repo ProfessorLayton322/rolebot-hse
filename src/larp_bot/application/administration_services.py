@@ -214,6 +214,31 @@ class EventAdministrationService:
             return event
         return await self.catalog.refresh(event)
 
+    async def refresh_event_tables(
+        self,
+        event_id: str,
+        *,
+        requester: BotIdentity,
+        reply_user_id: int,
+    ) -> Event:
+        event = await self.events.get(event_id)
+        if event is None:
+            raise EventNotFound("Игра не найдена")
+        event = await self.ensure_event_tables(
+            event,
+            requester=requester,
+            reply_user_id=reply_user_id,
+        )
+        await self.create_pass_table(
+            event.event_id,
+            requester=requester,
+            reply_user_id=reply_user_id,
+        )
+        refreshed = await self.events.get(event.event_id)
+        if refreshed is None:
+            raise EventNotFound("Игра не найдена")
+        return refreshed
+
     async def _registration_page(
         self,
         event_id: str,

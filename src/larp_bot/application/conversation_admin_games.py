@@ -626,45 +626,31 @@ class AdministrationGamesMixin(ConversationContext):
         if action == "tables":
             await self._clear(user)
             pending_buttons = [game_files_button(event.event_id)]
-            before_invoke = self._upload_pending_callback(
-                user,
-                message,
-                text="⏳ Таблицы создаются. Бот пришлёт ссылки, когда загрузка завершится.",
-                buttons=pending_buttons,
-                operation=f"tables:{event.event_id}",
-            )
             if can_manage:
-                requester = self._identity(user)
-                reply_user_id = message.chat_id or message.peer_id or requester.platform_user_id
-                event = await self.administration.ensure_event_tables(
-                    event,
-                    requester=requester,
-                    reply_user_id=reply_user_id,
-                    before_invoke=before_invoke,
+                identity = self._identity(user)
+                await self.registrations.enqueue(
+                    operation=Operation.REFRESH_EVENT_TABLES,
+                    event_id=event.event_id,
+                    platform=identity.platform,
+                    user_id=identity.platform_user_id,
+                    payload=EmptyPayload(),
+                    reply_context=ReplyContext(
+                        chat_id=message.chat_id,
+                        peer_id=message.peer_id,
+                        buttons=pending_buttons,
+                    ),
+                    idempotency_key=f"{message.update_id}:{Operation.REFRESH_EVENT_TABLES.value}",
                 )
-                await self.administration.create_pass_table(
-                    event.event_id,
-                    requester=requester,
-                    reply_user_id=reply_user_id,
-                    before_invoke=before_invoke,
+                return BotResponse(
+                    text="⏳ Таблицы обновляются. Бот пришлёт ссылки, когда загрузка завершится.",
+                    buttons=pending_buttons,
+                    deferred=True,
+                    command_enqueued=True,
                 )
             refreshed = await self.events.get(event.event_id)
             if refreshed is None:
                 return BotResponse(text="Игра не найдена.", buttons=[Button(label=BACK, value=MANAGE_GAMES)])
             if refreshed.public_table_public_url is None or refreshed.pass_table_public_url is None:
-                if can_manage:
-                    if before_invoke is not None:
-                        return BotResponse(
-                            text="",
-                            buttons=pending_buttons,
-                            deferred=requester.platform is Platform.TELEGRAM,
-                            silent=True,
-                        )
-                    return BotResponse(
-                        text="⏳ Таблицы создаются. Бот пришлёт ссылки, когда загрузка завершится.",
-                        buttons=pending_buttons,
-                        deferred=True,
-                    )
                 return BotResponse(
                     text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
                     buttons=[game_files_button(event.event_id)],
