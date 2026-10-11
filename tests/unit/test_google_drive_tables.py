@@ -92,7 +92,7 @@ class HangingUploader(RecordingUploader):
 
 
 @pytest.mark.asyncio
-async def test_all_xlsx_files_are_mirrored_before_the_optional_yandex_job() -> None:
+async def test_all_xlsx_files_are_mirrored_before_the_best_effort_yandex_job() -> None:
     drive = MemoryTableDrive()
     delegate = RecordingUploader()
     uploader = GoogleDriveMirroredUploader(delegate, drive, "tables-folder")
@@ -248,7 +248,7 @@ async def test_yandex_failure_cannot_fail_an_authoritative_google_table_upload()
 
 
 @pytest.mark.asyncio
-async def test_google_failure_falls_back_to_the_yandex_job() -> None:
+async def test_google_failure_prevents_yandex_only_table_delivery() -> None:
     delegate = RecordingUploader()
     uploader = GoogleDriveMirroredUploader(delegate, FailingDrive(), "tables-folder")
     pending_called = False
@@ -257,45 +257,44 @@ async def test_google_failure_falls_back_to_the_yandex_job() -> None:
         nonlocal pending_called
         pending_called = True
 
-    result = await uploader.submit(
-        [
-            DiskUpload(
-                "public",
-                "disk:/larp-bot/events/event-id/public.xlsx",
-                b"public",
-                XLSX_MIME_TYPE,
-                True,
-                True,
-            )
-        ],
-        callback={"kind": "event_tables"},
-        before_invoke=pending,
-    )
+    with pytest.raises(RuntimeError, match="Google Drive is unavailable"):
+        await uploader.submit(
+            [
+                DiskUpload(
+                    "public",
+                    "disk:/larp-bot/events/event-id/public.xlsx",
+                    b"public",
+                    XLSX_MIME_TYPE,
+                    True,
+                    True,
+                )
+            ],
+            callback={"kind": "event_tables"},
+            before_invoke=pending,
+        )
 
-    assert result is None
-    assert [file.role for file in delegate.files] == ["public"]
-    assert delegate.callback == {"kind": "event_tables"}
-    assert pending_called
+    assert delegate.files == ()
+    assert delegate.callback is None
+    assert not pending_called
 
 
 @pytest.mark.asyncio
-async def test_existing_table_refresh_ignores_both_provider_failures() -> None:
+async def test_non_table_yandex_failure_is_not_hidden() -> None:
     uploader = GoogleDriveMirroredUploader(FailingUploader(), FailingDrive(), "tables-folder")
 
-    result = await uploader.submit(
-        [
-            DiskUpload(
-                "public",
-                "disk:/larp-bot/events/event-id/public.xlsx",
-                b"public",
-                XLSX_MIME_TYPE,
-                True,
-                False,
-            )
-        ]
-    )
-
-    assert result is None
+    with pytest.raises(RuntimeError, match="Yandex is unavailable"):
+        await uploader.submit(
+            [
+                DiskUpload(
+                    "achievement",
+                    "disk:/larp-bot/achievements/event-id.pptx",
+                    b"achievement",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    True,
+                    False,
+                )
+            ]
+        )
 
 
 @pytest.mark.asyncio

@@ -65,33 +65,25 @@ class GoogleDriveMirroredUploader:
         before_invoke: UploadReadyCallback | None = None,
     ) -> dict[str, str] | None:
         xlsx_files = [file for file in files if file.content_type == XLSX_MIME_TYPE]
-        google_error: Exception | None = None
-        try:
-            mirrored_files = await asyncio.gather(
-                *(
-                    self.drive.upsert_xlsx(
-                        self.folder_id,
-                        mirrored_table_name(file.disk_path),
-                        file.content,
-                    )
-                    for file in xlsx_files
+        mirrored_files = await asyncio.gather(
+            *(
+                self.drive.upsert_xlsx(
+                    self.folder_id,
+                    mirrored_table_name(file.disk_path),
+                    file.content,
                 )
+                for file in xlsx_files
             )
-            await asyncio.gather(*(self.drive.publish_file(file.file_id) for file in mirrored_files))
-        except Exception as exc:
-            google_error = exc
-            mirrored_files = []
-            LOGGER.warning("google_drive_table_mirror_failed", extra={"error": str(exc)})
-
-        mirrored_by_role = (
-            {upload.role: drive_file_url(file) for upload, file in zip(xlsx_files, mirrored_files, strict=True)}
-            if google_error is None
-            else {}
         )
+        await asyncio.gather(*(self.drive.publish_file(file.file_id) for file in mirrored_files))
+
+        mirrored_by_role = {
+            upload.role: drive_file_url(file) for upload, file in zip(xlsx_files, mirrored_files, strict=True)
+        }
         google_urls = {
             upload.role: mirrored_by_role[upload.role] for upload in xlsx_files if upload.publish and mirrored_files
         }
-        google_complete = google_error is None and bool(files) and len(xlsx_files) == len(files)
+        google_complete = bool(files) and len(xlsx_files) == len(files)
         enriched_callback = (
             None
             if callback is None
@@ -100,7 +92,7 @@ class GoogleDriveMirroredUploader:
         prepared = [
             replace(
                 file,
-                google_mirrored=google_error is None and file.content_type == XLSX_MIME_TYPE,
+                google_mirrored=file.content_type == XLSX_MIME_TYPE,
                 google_url=mirrored_by_role.get(file.role) if file.publish else None,
             )
             for file in files
@@ -109,13 +101,12 @@ class GoogleDriveMirroredUploader:
         try:
             async with asyncio.timeout(YANDEX_STAGING_TIMEOUT_SECONDS):
                 yandex_result = await self.delegate.submit(
-                    prepared if google_error is None else files,
+                    prepared,
                     callback=enriched_callback,
                     before_invoke=None if google_complete else before_invoke,
                 )
         except Exception as exc:
-            refresh_has_persisted_links = bool(files) and all(file.overwrite for file in files)
-            if not google_complete and not refresh_has_persisted_links:
+            if not google_complete:
                 raise
             LOGGER.warning("yandex_disk_table_stage_skipped", extra={"error": str(exc)})
             yandex_result = None

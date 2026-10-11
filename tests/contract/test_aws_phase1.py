@@ -37,19 +37,20 @@ def test_bootstrap_root_is_read_only_inventory() -> None:
     assert "AccountFullAccessRole" in readme
 
 
-def test_dynamodb_mirror_is_protected_and_uses_on_demand_capacity() -> None:
+def test_dynamodb_mirror_is_protected_and_within_free_tier_capacity() -> None:
     dynamodb = (APPLICATION / "dynamodb.tf").read_text()
     resources = re.findall(r'resource "aws_dynamodb_table" "([^"]+)"', dynamodb)
 
     assert resources == ["tg_users", "vk_users", "events", "event_leaders", "registrations"]
-    assert len(re.findall(r'billing_mode\s+= "PAY_PER_REQUEST"', dynamodb)) == 5
+    assert len(re.findall(r'billing_mode\s+= "PROVISIONED"', dynamodb)) == 5
     assert dynamodb.count("table_class") == 5
     assert dynamodb.count("deletion_protection_enabled = true") == 5
     assert dynamodb.count("prevent_destroy = true") == 5
     assert dynamodb.count("enabled = false") == 5
     assert dynamodb.count("global_secondary_index") == 5
-    assert "read_capacity" not in dynamodb
-    assert "write_capacity" not in dynamodb
+    # Five tables plus five GSIs at one unit each stay below 25 RCUs/WCUs.
+    assert dynamodb.count("read_capacity") == 10
+    assert dynamodb.count("write_capacity") == 10
 
 
 def test_standby_controls_cannot_accept_production_traffic() -> None:
