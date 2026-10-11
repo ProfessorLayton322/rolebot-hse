@@ -13,6 +13,7 @@ from larp_bot.adapters.aws.storage import AwsStagedYandexDiskUploader
 from larp_bot.adapters.yandex_disk.repository import DiskUpload
 from larp_bot.domain.models import EmptyPayload, Operation, OrderedRegistrationCommand, Platform
 from larp_bot.functions import aws_upload_completion
+from larp_bot.functions.aws_bootstrap import AWS_DYNAMODB_CONFIG
 from larp_bot.functions.gateway.handler import async_handler
 from larp_bot.functions.gateway.handler import handler as gateway_handler
 from larp_bot.functions.runtime_mode import ApplicationMode, RuntimeGate, runtime_controls_configured
@@ -29,6 +30,10 @@ def _command(operation_id: str = "11111111-1111-4111-8111-111111111111") -> Orde
         payload=EmptyPayload(),
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
+
+
+def test_aws_dynamodb_client_adapts_to_free_tier_throttling() -> None:
+    assert AWS_DYNAMODB_CONFIG.retries == {"mode": "adaptive", "total_max_attempts": 20}
 
 
 class RecordingSqs:
