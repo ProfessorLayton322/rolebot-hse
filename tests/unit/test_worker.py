@@ -227,7 +227,7 @@ async def test_daily_pass_refresh_runs_in_worker_without_sending_a_message() -> 
 
 
 @pytest.mark.asyncio
-async def test_event_table_refresh_runs_in_worker_and_sends_links(event: Event) -> None:
+async def test_event_table_request_with_existing_links_skips_refresh_and_sends_links(event: Event) -> None:
     event_id = "12345678-1234-1234-1234-123456789abc"
     table_event = event.model_copy(
         update={
@@ -267,11 +267,7 @@ async def test_event_table_refresh_runs_in_worker_and_sends_links(event: Event) 
 
     assert await worker.run() == 1
     mutations.require_active_event_leader.assert_awaited_once_with(command)
-    administration.refresh_event_tables.assert_awaited_once_with(
-        event_id,
-        requester=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
-        reply_user_id=1,
-    )
+    administration.refresh_event_tables.assert_not_awaited()
     assert len(transport.sent) == 1
     assert "https://disk.example/public-table" in transport.sent[0][3]
     assert "https://disk.example/pass-table" in transport.sent[0][3]
@@ -306,6 +302,11 @@ async def test_event_table_refresh_waits_for_upload_completion_when_links_are_pe
     )
 
     assert await worker.run() == 1
+    administration.refresh_event_tables.assert_awaited_once_with(
+        event.event_id,
+        requester=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+        reply_user_id=1,
+    )
     assert transport.sent == []
     assert consumer.deleted == ["receipt-tables"]
 

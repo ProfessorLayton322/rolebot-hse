@@ -3429,10 +3429,13 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
     files = await engine.handle(inbound(90, f"ag:files:{created.event_id}", callback=True))
     assert EVENT_TABLES in [button.label for button in files.buttons]
     tables = await engine.handle(inbound(10, f"ag:tables:{created.event_id}", callback=True))
-    assert tables.text == "⏳ Таблицы обновляются. Бот пришлёт ссылки, когда загрузка завершится."
-    assert tables.deferred and tables.command_enqueued
-    assert publisher.commands[-1].operation is Operation.REFRESH_EVENT_TABLES
-    assert publisher.commands[-1].event_id == created.event_id
+    assert tables.text.count("https://disk.example/public/") == 3
+    assert MASTER_TABLE_DISCLAIMER in tables.text
+    assert "Публичная таблица (без контактов Telegram и VK)" in tables.text
+    assert "Административная таблица" in tables.text
+    assert "Таблица пропусков" in tables.text
+    assert not tables.deferred and not tables.command_enqueued
+    assert publisher.commands == []
 
 
 @pytest.mark.asyncio
@@ -5052,6 +5055,32 @@ async def test_event_tables_action_queues_refresh_without_blocking_gateway(
     assert command.event_id == event.event_id
     assert isinstance(command.payload, EmptyPayload)
     assert command.reply_context.buttons == tables.buttons
+    assert all(1 <= len(button.value.encode("utf-8")) <= 64 for button in tables.buttons)
+
+
+@pytest.mark.asyncio
+async def test_event_tables_action_returns_existing_links_without_queueing(
+    disk_store: MemoryDiskStore,
+    event: Event,
+) -> None:
+    linked = event.model_copy(
+        update={
+            "public_table_resource_path": f"disk:/larp-bot/events/{event.event_id}-public.xlsx",
+            "public_table_public_url": "https://disk.example/public-table",
+            "pass_table_resource_path": f"disk:/larp-bot/passes/{event.event_id}.xlsx",
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    engine, _, publisher, _ = await engine_setup(disk_store, linked, admin=True)
+
+    tables = await engine.handle(inbound(1, f"ag:tables:{linked.event_id}", callback=True))
+
+    assert tables.text.startswith(f"Таблицы игры «{linked.name}»")
+    assert "https://disk.example/public-table" in tables.text
+    assert "https://disk.example/pass-table" in tables.text
+    assert not tables.deferred and not tables.command_enqueued
+    assert publisher.commands == []
+    assert tables.buttons == [Button(label="⬅️ Назад", value=f"ag:files:{linked.event_id}")]
     assert all(1 <= len(button.value.encode("utf-8")) <= 64 for button in tables.buttons)
 
 
