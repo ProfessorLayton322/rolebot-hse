@@ -90,6 +90,11 @@ class GoogleDriveMirroredUploader:
             )
             for file in files
         ]
+        google_authoritative = bool(files) and len(xlsx_files) == len(files)
+        if google_authoritative:
+            google_results = {f"google:{role}": url for role, url in mirrored_by_role.items()}
+            published_results = {role: google_urls[role] for role in google_urls}
+            return google_results | published_results
         result = await self.delegate.submit(
             prepared,
             callback=enriched_callback,
@@ -97,7 +102,9 @@ class GoogleDriveMirroredUploader:
         )
         if result is None:
             if callback is None:
-                return {f"google:{role}": url for role, url in mirrored_by_role.items()}
+                google_results = {f"google:{role}": url for role, url in mirrored_by_role.items()}
+                published_results = {role: google_urls[role] for role in google_urls}
+                return google_results | published_results
             return None
         return result
 

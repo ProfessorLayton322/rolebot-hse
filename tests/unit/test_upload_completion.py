@@ -13,7 +13,7 @@ from larp_bot.adapters.memory import (
     StaticAdminProvider,
 )
 from larp_bot.application.services import daily_pass_table_path
-from larp_bot.application.table_links import YANDEX_UPLOAD_FAILED, public_table_links
+from larp_bot.application.table_links import public_table_links
 from larp_bot.application.upload_completion import UploadCompletionService
 from larp_bot.domain.models import DailyPassRefreshPayload, Event, Operation, Platform, TelegramUser
 
@@ -77,7 +77,7 @@ async def test_completion_creates_event_and_sends_links_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_yandex_failure_keeps_google_tables_and_marks_only_admin_output() -> None:
+async def test_yandex_failure_keeps_google_tables_as_the_only_visible_links() -> None:
     events = MemoryEventRepository()
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=42))
@@ -131,11 +131,10 @@ async def test_yandex_failure_keeps_google_tables_and_marks_only_admin_output() 
     assert event.pass_table_public_url == google["pass"]
 
     admin_text = transport.sent[0][3]
-    assert admin_text.count(YANDEX_UPLOAD_FAILED) == 2
-    assert admin_text.index(google["master"]) < admin_text.index("https://disk.example/master")
+    assert all(url in admin_text for url in google.values())
+    assert "https://disk.example/master" not in admin_text
     player_text = public_table_links(event).for_player()
     assert player_text == f"Google Drive: {google['public']}"
-    assert YANDEX_UPLOAD_FAILED not in player_text
 
 
 @pytest.mark.asyncio

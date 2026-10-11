@@ -198,6 +198,22 @@ jobs:
           else
             test "$(jq -r .scheduler_state <<<"${controls}")" = "DISABLED"
           fi
+      - name: Queue missing Google Drive showcase tables
+        if: vars.ACTIVE_BACKEND == 'aws' && vars.AWS_MUTATIONS_ENABLED == 'true' && vars.AWS_SQS_EVENT_MAPPING_ENABLED == 'true'
+        run: |
+          controls="$(terraform -chdir=infra/aws/application output -json standby_controls)"
+          if [[ "$(jq -r .runtime_table_target <<<"${controls}")" != "production" ]]; then
+            echo "Skipping Google Drive showcase backfill outside production tables"
+            exit 0
+          fi
+          tables="$(terraform -chdir=infra/aws/application output -json dynamodb_tables)"
+          events_table="$(jq -er .events <<<"${tables}")"
+          leaders_table="$(jq -er .event_leaders <<<"${tables}")"
+          queue_url="$(terraform -chdir=infra/aws/application output -raw registration_fifo_url)"
+          python scripts/backfill_google_showcase.py \
+            --events-table "${events_table}" \
+            --leaders-table "${leaders_table}" \
+            --queue-url "${queue_url}"
       - name: Exchange GitHub OIDC token for Yandex IAM token
         if: vars.ACTIVE_BACKEND != 'aws'
         env:

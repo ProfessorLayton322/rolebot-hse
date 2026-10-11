@@ -88,6 +88,7 @@ from .conversation_support import (
 )
 from .deadlines import MOSCOW_TIMEZONE, format_confirmation_deadline, next_night_03, tuesday_before_game_18
 from .navigation import admin_menu_button
+from .table_links import google_event_tables_ready
 
 
 class AdministrationGamesMixin(ConversationContext):
@@ -626,7 +627,10 @@ class AdministrationGamesMixin(ConversationContext):
         if action == "tables":
             await self._clear(user)
             pending_buttons = [game_files_button(event.event_id)]
-            if event.public_table_public_url is not None and event.pass_table_public_url is not None:
+            google_ready = google_event_tables_ready(event)
+            if (not self.administration.mirrors_google_tables or google_ready) and (
+                event.public_table_public_url is not None and event.pass_table_public_url is not None
+            ):
                 return BotResponse(
                     text=(f"Таблицы игры {event_reference(event.name, event.game_date)}\n\n{event_table_links(event)}"),
                     buttons=pending_buttons,
@@ -653,7 +657,8 @@ class AdministrationGamesMixin(ConversationContext):
                     command_enqueued=True,
                 )
             return BotResponse(
-                text="Таблицы этой игры ещё не созданы. Обратитесь к мастеру игры или администратору.",
+                text="Таблицы этой игры ещё не перенесены в Google Drive. "
+                + "Обратитесь к мастеру игры или администратору.",
                 buttons=pending_buttons,
             )
         if action == "achievements":

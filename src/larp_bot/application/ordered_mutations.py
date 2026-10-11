@@ -99,12 +99,16 @@ class OrderedMutationService:
         raise OperationNotAllowed("Только администраторы бота могут изменять архив игр")
 
     async def require_active_event_leader(self, command: OrderedRegistrationCommand) -> Event:
-        event = await self.events.get(command.event_id)
-        if event is None:
-            raise EventNotFound("Игра уже удалена или не существует")
+        event = await self.require_event(command)
         if event.archived_at is not None:
             raise OperationNotAllowed("Игра уже архивирована")
         await self._require_event_leader(command)
+        return event
+
+    async def require_event(self, command: OrderedRegistrationCommand) -> Event:
+        event = await self.events.get(command.event_id)
+        if event is None:
+            raise EventNotFound("Игра уже удалена или не существует")
         return event
 
     async def _actor_registrations(

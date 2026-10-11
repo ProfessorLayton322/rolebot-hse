@@ -21,6 +21,7 @@ from .game_closings import ScheduledGameClosingService
 from .ports import DeferredTransport, OrderedCommandConsumer, UserRepository
 from .services import ConfirmationNotificationService, DomainError, EventAdministrationService, OrderedMutationService
 from .statistics import StatisticsService
+from .table_links import google_event_tables_ready
 
 LOGGER = logging.getLogger("larp_bot.application.worker")
 
@@ -144,29 +145,43 @@ class OrderedWorker:
                             if self.administration is None:
                                 raise RuntimeError("event administration service is not configured")
                             assert isinstance(command.payload, DailyPassRefreshPayload)
-                            await self.administration.refresh_daily_pass_table(command.payload.game_date)
+                            await self.administration.create_daily_pass_table(command.payload.game_date)
                             default_text = ""
                             notifications_enabled = False
                         elif command.operation is Operation.REFRESH_EVENT_TABLES:
                             if self.administration is None:
                                 raise RuntimeError("event administration service is not configured")
-                            event = await self.mutations.require_active_event_leader(command)
-                            requester = BotIdentity(
-                                platform=command.platform,
-                                platform_user_id=command.platform_user_id,
+                            system_backfill = command.platform is Platform.SYSTEM
+                            event = (
+                                await self.mutations.require_event(command)
+                                if system_backfill
+                                else await self.mutations.require_active_event_leader(command)
                             )
-                            reply_user_id = (
-                                command.reply_context.chat_id
-                                or command.reply_context.peer_id
-                                or command.platform_user_id
-                            )
-                            if event.public_table_public_url is None or event.pass_table_public_url is None:
-                                event = await self.administration.refresh_event_tables(
-                                    event.event_id,
-                                    requester=requester,
-                                    reply_user_id=reply_user_id,
-                                )
-                            if event.public_table_public_url is None or event.pass_table_public_url is None:
+                            google_ready = google_event_tables_ready(event)
+                            if self.administration.mirrors_google_tables and not google_ready:
+                                if system_backfill:
+                                    event = await self.administration.refresh_event_tables(event.event_id)
+                                else:
+                                    requester = BotIdentity(
+                                        platform=command.platform,
+                                        platform_user_id=command.platform_user_id,
+                                    )
+                                    reply_user_id = (
+                                        command.reply_context.chat_id
+                                        or command.reply_context.peer_id
+                                        or command.platform_user_id
+                                    )
+                                    event = await self.administration.refresh_event_tables(
+                                        event.event_id,
+                                        requester=requester,
+                                        reply_user_id=reply_user_id,
+                                    )
+                            elif event.public_table_public_url is None or event.pass_table_public_url is None:
+                                event = await self.administration.refresh_event_tables(event.event_id)
+                            if system_backfill:
+                                default_text = ""
+                                notifications_enabled = False
+                            elif event.public_table_public_url is None or event.pass_table_public_url is None:
                                 default_text = ""
                                 notifications_enabled = False
                             else:

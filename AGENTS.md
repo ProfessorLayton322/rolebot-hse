@@ -1,6 +1,7 @@
 # Agentic tool operating rules
 
 - Yandex Cloud and YDB are frozen legacy targets. Commit `01aab7f35014c2b18b2c7ff489c3b3cbe76722f3` is the final Yandex-supporting baseline; preserve it in Git history as the reference for the last known-good Yandex state.
+- Treat Yandex Cloud, YDB, and Yandex Disk as operationally unreliable legacy services. Google Drive is the required showcase destination: every administrative roster, player-safe roster, and pass table must have a persisted Google Drive URL. A Yandex Disk copy may remain as best-effort legacy output, but it must never define readiness, block delivery, or be the only link offered when a Google link exists.
 - Do not develop, repair, deploy, migrate, or maintain feature parity for Yandex Cloud or YDB. Preserve the existing legacy implementation unless the user explicitly requests its removal.
 - From the commit after that baseline onward, all cloud infrastructure and database development must target AWS and DynamoDB only.
 - If the user explicitly requests a future return to Yandex Cloud or YDB, derive the complete catch-up work from the preserved baseline and the then-current AWS/DynamoDB implementation, then implement the required migration as a new effort. Do not proactively keep Yandex ready in the meantime.

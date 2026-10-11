@@ -220,7 +220,7 @@ async def test_daily_pass_refresh_runs_in_worker_without_sending_a_message() -> 
     )
 
     assert await worker.run() == 1
-    administration.refresh_daily_pass_table.assert_awaited_once_with(game_date)
+    administration.create_daily_pass_table.assert_awaited_once_with(game_date)
     mutations.apply.assert_not_awaited()
     assert transport.sent == []
     assert consumer.deleted == ["receipt-refresh"]
@@ -232,10 +232,13 @@ async def test_event_table_request_with_existing_links_skips_refresh_and_sends_l
     table_event = event.model_copy(
         update={
             "event_id": event_id,
+            "master_table_google_url": "https://drive.example/master-table",
             "public_table_resource_path": f"disk:/larp-bot/events/{event_id}/public.xlsx",
             "public_table_public_url": "https://disk.example/public-table",
+            "public_table_google_url": "https://drive.example/public-table",
             "pass_table_resource_path": f"disk:/larp-bot/passes/{event_id}.xlsx",
             "pass_table_public_url": "https://disk.example/pass-table",
+            "pass_table_google_url": "https://drive.example/pass-table",
         }
     )
     back = Button(label="⬅️ Назад", value=f"ag:files:{event_id}")
@@ -269,8 +272,9 @@ async def test_event_table_request_with_existing_links_skips_refresh_and_sends_l
     mutations.require_active_event_leader.assert_awaited_once_with(command)
     administration.refresh_event_tables.assert_not_awaited()
     assert len(transport.sent) == 1
-    assert "https://disk.example/public-table" in transport.sent[0][3]
-    assert "https://disk.example/pass-table" in transport.sent[0][3]
+    assert "https://drive.example/public-table" in transport.sent[0][3]
+    assert "https://drive.example/pass-table" in transport.sent[0][3]
+    assert "https://disk.example/public-table" not in transport.sent[0][3]
     assert transport.sent[0][4] == (back,)
     assert 1 <= len(back.value.encode("utf-8")) <= 64
     assert consumer.deleted == ["receipt-tables"]
@@ -309,6 +313,51 @@ async def test_event_table_refresh_waits_for_upload_completion_when_links_are_pe
     )
     assert transport.sent == []
     assert consumer.deleted == ["receipt-tables"]
+
+
+@pytest.mark.asyncio
+async def test_system_event_table_backfill_refreshes_google_without_user_delivery(event: Event) -> None:
+    refreshed = event.model_copy(
+        update={
+            "master_table_google_url": "https://drive.example/master",
+            "public_table_resource_path": "disk:/larp-bot/events/event-a1-public.xlsx",
+            "public_table_public_url": "https://drive.example/public",
+            "public_table_google_url": "https://drive.example/public",
+            "pass_table_resource_path": "disk:/larp-bot/passes/event-a1.xlsx",
+            "pass_table_public_url": "https://drive.example/pass",
+            "pass_table_google_url": "https://drive.example/pass",
+        }
+    )
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.REFRESH_EVENT_TABLES,
+        platform=Platform.SYSTEM,
+        platform_user_id=0,
+        payload=EmptyPayload(),
+    )
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-backfill")])
+    administration = AsyncMock()
+    administration.mirrors_google_tables = True
+    administration.refresh_event_tables.return_value = refreshed
+    mutations = AsyncMock()
+    mutations.require_event.return_value = event
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        mutations,
+        MemoryUserRepository(),
+        transport,
+        max_seconds=2,
+        administration=administration,
+    )
+
+    assert await worker.run() == 1
+    mutations.require_event.assert_awaited_once_with(command)
+    mutations.require_active_event_leader.assert_not_awaited()
+    administration.refresh_event_tables.assert_awaited_once_with(event.event_id)
+    assert transport.sent == []
+    assert consumer.deleted == ["receipt-backfill"]
 
 
 @pytest.mark.asyncio

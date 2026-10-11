@@ -4,8 +4,6 @@ from dataclasses import dataclass
 
 from larp_bot.domain.models import Event
 
-YANDEX_UPLOAD_FAILED = "[НЕ УДАЛОСЬ ЗАГРУЗИТЬ НА ЯНДЕКС ДИСК]"
-
 
 @dataclass(frozen=True)
 class TableProviderLinks:
@@ -13,22 +11,14 @@ class TableProviderLinks:
     yandex: str | None
 
     def for_player(self) -> str:
-        if self.google is None and self.yandex is not None:
-            return self.yandex
-        lines: list[str] = []
         if self.google is not None:
-            lines.append(f"Google Drive: {self.google}")
+            return f"Google Drive: {self.google}"
         if self.yandex is not None:
-            lines.append(f"Яндекс Диск: {self.yandex}")
-        if not lines:
-            raise RuntimeError("table has no public link")
-        return "\n".join(lines)
+            return self.yandex
+        raise RuntimeError("table has no public link")
 
     def for_admin(self) -> str:
-        text = self.for_player()
-        if self.google is not None and self.yandex is None:
-            return f"{text}\n{YANDEX_UPLOAD_FAILED}"
-        return text
+        return self.for_player()
 
 
 def table_provider_links(google_url: str | None, stored_url: str | None) -> TableProviderLinks:
@@ -46,3 +36,13 @@ def public_table_links(event: Event) -> TableProviderLinks:
 
 def pass_table_links(event: Event) -> TableProviderLinks:
     return table_provider_links(event.pass_table_google_url, event.pass_table_public_url)
+
+
+def google_event_tables_ready(event: Event) -> bool:
+    return all(
+        (
+            event.master_table_google_url,
+            event.public_table_google_url,
+            event.pass_table_google_url,
+        )
+    )
