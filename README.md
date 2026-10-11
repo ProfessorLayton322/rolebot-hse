@@ -307,6 +307,7 @@ Runtime Functions do not receive `admin` or `editor`. The deployment identity ne
 ## Local development
 
 For YDB usage investigations, see [operation metrics and read amplification](docs/ydb-operations.md).
+For a capability-oriented source index, see the [code map](docs/code-map.md).
 
 ```bash
 python3.12 -m venv .venv

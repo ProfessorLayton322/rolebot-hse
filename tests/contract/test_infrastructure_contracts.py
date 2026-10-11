@@ -262,7 +262,7 @@ def test_yandex_runtime_uses_oidc_protected_worker_config() -> None:
 
 
 def test_button_lists_use_shared_five_item_page_size() -> None:
-    source = (ROOT / "src/larp_bot/application/conversation.py").read_text()
+    source = "\n".join(path.read_text() for path in (ROOT / "src/larp_bot/application").glob("conversation*.py"))
     assert "async def _show_admin_games(" in source
     assert "archived=False" in source
     assert "PAGE_SIZE = 5" in source

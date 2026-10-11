@@ -3442,7 +3442,7 @@ async def test_admin_can_choose_next_saturday_as_game_date(
     event: Event,
 ) -> None:
     next_saturday = date(2026, 9, 19)
-    monkeypatch.setattr("larp_bot.application.conversation.next_saturday_game_date", lambda: next_saturday)
+    monkeypatch.setattr("larp_bot.application.conversation_admin_dialog.next_saturday_game_date", lambda: next_saturday)
     engine, users, _, _ = await engine_setup(disk_store, event, admin=True)
 
     await engine.handle(inbound(1, "➕ Создать игру"))
@@ -3697,7 +3697,7 @@ async def test_nearest_friday_button_schedules_registration_and_cancel_aborts_cr
     event: Event,
 ) -> None:
     friday = datetime(2026, 9, 18, 18, tzinfo=MOSCOW_TIMEZONE)
-    monkeypatch.setattr("larp_bot.application.conversation.closest_friday_18", lambda: friday)
+    monkeypatch.setattr("larp_bot.application.conversation_admin_creation.closest_friday_18", lambda: friday)
     engine, _, _, _ = await engine_setup(disk_store, event, gamemaster=True)
 
     await engine.handle(inbound(1, "➕ Создать игру"))
@@ -4833,7 +4833,7 @@ async def test_admin_can_choose_nearest_thursday_deadline(
     event: Event,
 ) -> None:
     deadline = datetime(2026, 9, 3, 16, tzinfo=UTC)
-    monkeypatch.setattr("larp_bot.application.conversation.closest_thursday_19", lambda: deadline)
+    monkeypatch.setattr("larp_bot.application.conversation_admin_dialog.closest_thursday_19", lambda: deadline)
     event.status = EventStatus.CREATED
     engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True)
 
