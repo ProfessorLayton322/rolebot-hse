@@ -85,7 +85,7 @@ data "aws_iam_policy_document" "lambda" {
   }
 
   dynamic "statement" {
-    for_each = contains(["gateway", "registration_notifier"], each.key) ? [1] : []
+    for_each = contains(["gateway", "ordered_worker", "registration_notifier"], each.key) ? [1] : []
     content {
       sid       = "PublishRegistrationCommands"
       effect    = "Allow"

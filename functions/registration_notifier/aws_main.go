@@ -489,6 +489,8 @@ type awsCommandPublisher struct {
 	fifoURL string
 }
 
+const awsOrderedMessageGroup = "ordered"
+
 func (publisher *awsCommandPublisher) publish(ctx context.Context, command orderedCommand) error {
 	body, err := marshalCommand(command)
 	if err != nil {
@@ -497,7 +499,7 @@ func (publisher *awsCommandPublisher) publish(ctx context.Context, command order
 	_, err = publisher.client.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl:               aws.String(publisher.fifoURL),
 		MessageBody:            aws.String(body),
-		MessageGroupId:         aws.String(command.EventID),
+		MessageGroupId:         aws.String(awsOrderedMessageGroup),
 		MessageDeduplicationId: aws.String(command.OperationID),
 	})
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
@@ -16,6 +17,41 @@ import (
 type fakeSSM struct {
 	values map[string]string
 	names  []string
+}
+
+type fakeAWSSQS struct {
+	inputs []*sqs.SendMessageInput
+}
+
+func (client *fakeAWSSQS) SendMessage(
+	_ context.Context,
+	input *sqs.SendMessageInput,
+	_ ...func(*sqs.Options),
+) (*sqs.SendMessageOutput, error) {
+	client.inputs = append(client.inputs, input)
+	return &sqs.SendMessageOutput{}, nil
+}
+
+func TestAWSCommandPublisherUsesOneOrderedGroup(t *testing.T) {
+	client := &fakeAWSSQS{}
+	publisher := &awsCommandPublisher{client: client, fifoURL: "queue-url"}
+	command := orderedCommand{
+		SchemaVersion: 1,
+		OperationID:   "11111111-1111-4111-8111-111111111111",
+		EventID:       "event-a1",
+		Operation:     "SCHEDULED_CLOSE_EVENT",
+		Platform:      "system",
+		Payload:       map[string]any{},
+		ReplyContext:  emptyReplyContext(),
+		CreatedAt:     time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC),
+	}
+
+	if err := publisher.publish(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.inputs) != 1 || aws.ToString(client.inputs[0].MessageGroupId) != awsOrderedMessageGroup {
+		t.Fatalf("unexpected SQS inputs: %#v", client.inputs)
+	}
 }
 
 func (client *fakeSSM) GetParameter(
