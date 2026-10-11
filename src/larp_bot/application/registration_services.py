@@ -846,6 +846,7 @@ class RegistrationService:
             if not event.registration_is_open():
                 raise OperationNotAllowed("Регистрация на эту игру ещё не открыта")
         administrative_operations = {
+            Operation.REFRESH_EVENT_TABLES,
             Operation.OPEN_REGISTRATION,
             Operation.OPEN_CONFIRMATION,
             Operation.SEND_CONFIRMATION_REMINDER,

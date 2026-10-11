@@ -227,6 +227,90 @@ async def test_daily_pass_refresh_runs_in_worker_without_sending_a_message() -> 
 
 
 @pytest.mark.asyncio
+async def test_event_table_refresh_runs_in_worker_and_sends_links(event: Event) -> None:
+    event_id = "12345678-1234-1234-1234-123456789abc"
+    table_event = event.model_copy(
+        update={
+            "event_id": event_id,
+            "public_table_resource_path": f"disk:/larp-bot/events/{event_id}/public.xlsx",
+            "public_table_public_url": "https://disk.example/public-table",
+            "pass_table_resource_path": f"disk:/larp-bot/passes/{event_id}.xlsx",
+            "pass_table_public_url": "https://disk.example/pass-table",
+        }
+    )
+    back = Button(label="⬅️ Назад", value=f"ag:files:{event_id}")
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event_id,
+        operation=Operation.REFRESH_EVENT_TABLES,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=EmptyPayload(),
+        reply_context=ReplyContext(buttons=[back]),
+    )
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-tables")])
+    administration = AsyncMock()
+    administration.refresh_event_tables.return_value = table_event
+    mutations = AsyncMock()
+    mutations.require_active_event_leader.return_value = table_event
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=1))
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        mutations,
+        users,
+        transport,
+        max_seconds=2,
+        administration=administration,
+    )
+
+    assert await worker.run() == 1
+    mutations.require_active_event_leader.assert_awaited_once_with(command)
+    administration.refresh_event_tables.assert_awaited_once_with(
+        event_id,
+        requester=BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1),
+        reply_user_id=1,
+    )
+    assert len(transport.sent) == 1
+    assert "https://disk.example/public-table" in transport.sent[0][3]
+    assert "https://disk.example/pass-table" in transport.sent[0][3]
+    assert transport.sent[0][4] == (back,)
+    assert 1 <= len(back.value.encode("utf-8")) <= 64
+    assert consumer.deleted == ["receipt-tables"]
+
+
+@pytest.mark.asyncio
+async def test_event_table_refresh_waits_for_upload_completion_when_links_are_pending(event: Event) -> None:
+    command = OrderedRegistrationCommand(
+        operation_id=str(uuid4()),
+        event_id=event.event_id,
+        operation=Operation.REFRESH_EVENT_TABLES,
+        platform=Platform.TELEGRAM,
+        platform_user_id=1,
+        payload=EmptyPayload(),
+    )
+    consumer = FakeConsumer([QueueEnvelope(command=command, receipt_handle="receipt-tables")])
+    administration = AsyncMock()
+    administration.refresh_event_tables.return_value = event
+    mutations = AsyncMock()
+    mutations.require_active_event_leader.return_value = event
+    transport = MemoryDeferredTransport()
+    worker = OrderedWorker(
+        consumer,
+        mutations,
+        MemoryUserRepository(),
+        transport,
+        max_seconds=2,
+        administration=administration,
+    )
+
+    assert await worker.run() == 1
+    assert transport.sent == []
+    assert consumer.deleted == ["receipt-tables"]
+
+
+@pytest.mark.asyncio
 async def test_worker_processes_order_and_suppresses_duplicate_delivery(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
