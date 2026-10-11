@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Protocol
@@ -16,6 +17,8 @@ from larp_bot.adapters.yandex_disk.repository import (
 from .statistics import DriveFile
 
 GOOGLE_CALLBACK_URLS = "google_public_urls"
+YANDEX_STAGING_TIMEOUT_SECONDS = 3.0
+LOGGER = logging.getLogger(__name__)
 
 
 class GoogleTableStorage(Protocol):
@@ -40,7 +43,7 @@ def drive_file_url(file: DriveFile) -> str:
 
 
 class GoogleDriveMirroredUploader:
-    """Write every XLSX to Drive before making the optional Yandex attempt."""
+    """Prefer Google for XLSX tables while staging a bounded Yandex copy."""
 
     def __init__(self, delegate: DiskUploader, drive: GoogleTableStorage, folder_id: str) -> None:
         if not folder_id.strip():
@@ -73,15 +76,19 @@ class GoogleDriveMirroredUploader:
             )
         )
         await asyncio.gather(*(self.drive.publish_file(file.file_id) for file in mirrored_files))
-        google_urls = {
-            upload.role: drive_file_url(file)
-            for upload, file in zip(xlsx_files, mirrored_files, strict=True)
-            if upload.publish
-        }
-        enriched_callback = None if callback is None else dict(callback) | {GOOGLE_CALLBACK_URLS: google_urls}
+
         mirrored_by_role = {
             upload.role: drive_file_url(file) for upload, file in zip(xlsx_files, mirrored_files, strict=True)
         }
+        google_urls = {
+            upload.role: mirrored_by_role[upload.role] for upload in xlsx_files if upload.publish and mirrored_files
+        }
+        google_complete = bool(files) and len(xlsx_files) == len(files)
+        enriched_callback = (
+            None
+            if callback is None
+            else dict(callback) | ({GOOGLE_CALLBACK_URLS: google_urls} if mirrored_files else {})
+        )
         prepared = [
             replace(
                 file,
@@ -90,23 +97,25 @@ class GoogleDriveMirroredUploader:
             )
             for file in files
         ]
-        google_authoritative = bool(files) and len(xlsx_files) == len(files)
-        if google_authoritative:
+
+        try:
+            async with asyncio.timeout(YANDEX_STAGING_TIMEOUT_SECONDS):
+                yandex_result = await self.delegate.submit(
+                    prepared,
+                    callback=enriched_callback,
+                    before_invoke=None if google_complete else before_invoke,
+                )
+        except Exception as exc:
+            if not google_complete:
+                raise
+            LOGGER.warning("yandex_disk_table_stage_skipped", extra={"error": str(exc)})
+            yandex_result = None
+
+        if google_complete:
             google_results = {f"google:{role}": url for role, url in mirrored_by_role.items()}
             published_results = {role: google_urls[role] for role in google_urls}
-            return google_results | published_results
-        result = await self.delegate.submit(
-            prepared,
-            callback=enriched_callback,
-            before_invoke=before_invoke,
-        )
-        if result is None:
-            if callback is None:
-                google_results = {f"google:{role}": url for role, url in mirrored_by_role.items()}
-                published_results = {role: google_urls[role] for role in google_urls}
-                return google_results | published_results
-            return None
-        return result
+            return google_results | published_results | (yandex_result or {})
+        return yandex_result
 
     async def delete_google_table(self, disk_path: str) -> None:
         if not disk_path.lower().endswith(".xlsx"):

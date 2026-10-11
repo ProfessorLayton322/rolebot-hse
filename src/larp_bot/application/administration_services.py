@@ -194,7 +194,13 @@ class EventAdministrationService:
             scheduled_close_at=scheduled_close_at,
             signup_token=signup_token,
         )
-        await self.events.create(event, leaders)
+        try:
+            await self.events.create(event, leaders)
+        except ValueError:
+            existing = await self.events.get(event_id)
+            if existing is None or existing.signup_token != signup_token:
+                raise
+            event = existing
         await self.refresh_daily_pass_table(game_date)
         return event
 
@@ -595,18 +601,17 @@ class EventAdministrationService:
         )
 
         disk_path = f"disk:/larp-bot/passes/{event.event_id}.xlsx"
-        callback: dict[str, object] | None = None
+        callback: dict[str, object] = {
+            "kind": "event_tables",
+            "event_id": event.event_id,
+            "resource_path": disk_path,
+            "component": "pass",
+        }
         if requester is not None:
-            callback = {
-                "kind": "event_tables",
-                "event_id": event.event_id,
-                "resource_path": disk_path,
-                "component": "pass",
-                "requester": {
-                    "platform": requester.platform.value,
-                    "user_id": reply_user_id or requester.platform_user_id,
-                    "profile_user_id": requester.platform_user_id,
-                },
+            callback["requester"] = {
+                "platform": requester.platform.value,
+                "user_id": reply_user_id or requester.platform_user_id,
+                "profile_user_id": requester.platform_user_id,
             }
         public_url = await self.showcase.create_pass_table(
             disk_path,

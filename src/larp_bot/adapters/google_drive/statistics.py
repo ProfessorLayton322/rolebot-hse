@@ -9,6 +9,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from google.auth.transport.requests import AuthorizedSession
+from google.oauth2 import credentials as oauth_credentials
 from google.oauth2 import service_account
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -92,7 +93,7 @@ def _drive_query_literal(value: str) -> str:
 
 
 class GoogleDriveRestClient:
-    """Minimal Drive v3 client authenticated by a service-account JSON document."""
+    """Minimal Drive v3 client authenticated by a Google credential document."""
 
     def __init__(self, service_account_json: str, session: DriveSession | None = None) -> None:
         if session is not None:
@@ -101,12 +102,22 @@ class GoogleDriveRestClient:
         try:
             decoded = json.loads(service_account_json)
             if not isinstance(decoded, dict):
-                raise ValueError("service-account document must be an object")
-            credentials = service_account.Credentials.from_service_account_info(  # type: ignore[no-untyped-call]
-                cast(Mapping[str, Any], decoded), scopes=[DRIVE_SCOPE]
-            )
+                raise ValueError("credential document must be an object")
+            credential_info = cast(Mapping[str, Any], decoded)
+            if decoded.get("type") == "authorized_user":
+                credentials = oauth_credentials.Credentials.from_authorized_user_info(  # type: ignore[no-untyped-call]
+                    credential_info,
+                    scopes=[DRIVE_SCOPE],
+                )
+            elif decoded.get("type") == "service_account":
+                credentials = service_account.Credentials.from_service_account_info(  # type: ignore[no-untyped-call]
+                    credential_info,
+                    scopes=[DRIVE_SCOPE],
+                )
+            else:
+                raise ValueError("credential type must be service_account or authorized_user")
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not a valid service-account document") from exc
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not a valid Google credential document") from exc
         self.session = cast(DriveSession, AuthorizedSession(credentials))  # type: ignore[no-untyped-call]
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> DriveResponse:

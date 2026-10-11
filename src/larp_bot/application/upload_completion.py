@@ -67,6 +67,23 @@ class UploadCompletionService:
         self.transport = transport
         self.publisher = publisher
 
+    async def _store_yandex_table_links(
+        self,
+        event_id: str,
+        *,
+        master_url: str | None = None,
+        public_url: str | None = None,
+        pass_url: str | None = None,
+    ) -> None:
+        writer = getattr(self.events, "set_yandex_table_links", None)
+        if writer is not None:
+            await writer(
+                event_id,
+                master_url=master_url,
+                public_url=public_url,
+                pass_url=pass_url,
+            )
+
     async def _queue_daily_pass_refresh(self, game_date: date, job_id: str) -> None:
         date_group = f"daily-passes:{game_date.isoformat()}"
         await self.publisher.publish(
@@ -148,6 +165,8 @@ class UploadCompletionService:
         yandex_urls: dict[str, str],
         google_urls: dict[str, str],
         job_id: str,
+        *,
+        notify: bool,
     ) -> None:
         expected = {"master", "public", "pass"}
         legacy_completion = not google_urls and set(yandex_urls) == expected
@@ -176,12 +195,22 @@ class UploadCompletionService:
             raise ValueError("leaders must be a list")
         leaders = [BotIdentity.model_validate(item) for item in leaders_raw]
         existing = await self.events.get(event.event_id)
+        created_now = existing is None
         if existing is None:
             await self.events.create(event, leaders)
         else:
-            event = existing
+            await self._store_yandex_table_links(
+                event.event_id,
+                master_url=yandex_urls.get("master"),
+                public_url=yandex_urls.get("public"),
+                pass_url=yandex_urls.get("pass"),
+            )
+            event = await self.events.get(event.event_id) or existing
+        if not notify or (created_now and google_urls):
+            return
         requester = self._requester(callback)
-        await self._notify_leaders(event, leaders, requester, job_id)
+        if created_now:
+            await self._notify_leaders(event, leaders, requester, job_id)
 
         telegram_username, vk_group_id = (
             await self.config.get_secret("TG_BOT_USERNAME"),
@@ -240,7 +269,7 @@ class UploadCompletionService:
             text=text,
             buttons=[game_management_button(event.event_id)],
         )
-        if event.game_date is not None:
+        if created_now and event.game_date is not None:
             await self._queue_daily_pass_refresh(event.game_date, job_id)
 
     async def _event_tables(
@@ -249,6 +278,8 @@ class UploadCompletionService:
         yandex_urls: dict[str, str],
         google_urls: dict[str, str],
         job_id: str,
+        *,
+        notify: bool,
     ) -> None:
         event_id = str(callback["event_id"])
         component = str(callback["component"])
@@ -261,12 +292,14 @@ class UploadCompletionService:
         google_url = google_urls.get(expected_role)
         if component == "public":
             await self.events.set_public_table(event_id, path, stored_url, google_url)
+            await self._store_yandex_table_links(event_id, public_url=yandex_urls.get(expected_role))
         elif component == "pass":
             await self.events.set_pass_table(event_id, path, stored_url, google_url)
+            await self._store_yandex_table_links(event_id, pass_url=yandex_urls.get(expected_role))
         else:
             raise ValueError("unknown table component")
         event = await self.events.get(event_id)
-        if event is None or event.public_table_public_url is None or event.pass_table_public_url is None:
+        if not notify or event is None or event.public_table_public_url is None or event.pass_table_public_url is None:
             return
         link_version = hashlib.sha256(
             (
@@ -310,6 +343,8 @@ class UploadCompletionService:
         yandex_urls: dict[str, str],
         google_urls: dict[str, str],
         job_id: str,
+        *,
+        notify: bool,
     ) -> None:
         legacy_completion = not google_urls and set(yandex_urls) == {"pass"}
         if not legacy_completion and (set(google_urls) != {"pass"} or not set(yandex_urls) <= {"pass"}):
@@ -317,6 +352,8 @@ class UploadCompletionService:
         game_date = date.fromisoformat(str(callback["game_date"]))
         if callback.get("resource_path") != daily_pass_table_path(game_date):
             raise ValueError("daily pass completion has an unexpected resource path")
+        if not notify:
+            return
         await self._send(
             callback,
             operation_id=f"daily-passes:{game_date.isoformat()}:{job_id}",
@@ -349,10 +386,11 @@ class UploadCompletionService:
             )
             return
         yandex_urls = _public_urls(payload.get("public_urls"))
+        notify = payload.get("success") is True
         if kind == "event_created":
-            await self._event_created(callback, yandex_urls, google_urls, job_id)
+            await self._event_created(callback, yandex_urls, google_urls, job_id, notify=notify)
         elif kind == "event_tables":
-            await self._event_tables(callback, yandex_urls, google_urls, job_id)
+            await self._event_tables(callback, yandex_urls, google_urls, job_id, notify=notify)
         elif kind == "achievement":
             if payload.get("success") is not True:
                 await self._send(
@@ -363,6 +401,6 @@ class UploadCompletionService:
                 return
             await self._achievement(callback, yandex_urls, job_id)
         elif kind == "daily_passes":
-            await self._daily_passes(callback, yandex_urls, google_urls, job_id)
+            await self._daily_passes(callback, yandex_urls, google_urls, job_id, notify=notify)
         else:
             raise ValueError("unknown upload completion kind")

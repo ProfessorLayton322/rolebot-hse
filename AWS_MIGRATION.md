@@ -347,7 +347,7 @@ Suggested schema rules:
   values, because that would put them in Terraform state.
 - Lambda execution roles read only their necessary parameters. Cache parameter
   values within warm Lambda environments.
-- Validate the Google service-account JSON against the 4 KB SSM Standard
+- Validate the Google credential JSON against the 4 KB SSM Standard
   parameter limit. If it is larger, use a private encrypted S3 object with
   narrowly scoped IAM access or split it into appropriate parameters.
 - Cloudflare egress must temporarily accept both the existing Yandex egress HMAC
