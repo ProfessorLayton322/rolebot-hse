@@ -62,6 +62,44 @@ terraform -chdir=infra/aws/application init -backend=false
 terraform -chdir=infra/aws/application validate
 ```
 
+## Operations dashboard
+
+Terraform creates the `${project_name}-${environment}-operations` CloudWatch
+dashboard and returns its regional console link as
+`cloudwatch_operations_dashboard_url`. The dashboard keeps the main failure
+paths in one view:
+
+- approximate Lambda compute burn by function in GB-seconds per wall-clock
+  second, calculated from each function's configured memory and the sum of its
+  `Duration` metric in five-minute periods;
+- Lambda invocation error percentages, throttles, asynchronous event drops,
+  destination/dead-letter delivery failures, recursion protection, Function
+  URL 4xx/5xx responses, and a cross-function Logs Insights error table;
+- SQS sent/received/deleted counts, receive/delete amplification, backlog,
+  in-flight FIFO groups, oldest-message age, and dead-letter depth;
+- opt-in Lambda event-source counts for polled, invoked, failed, and deleted
+  SQS records, including a second retry-amplification view that remains useful
+  with partial-batch responses;
+- EventBridge Scheduler delivery attempts and every published failure class;
+- DynamoDB system/client errors, throttles, and transaction conflicts for the
+  active production or rehearsal table set.
+
+The alarm panel includes the existing queue-age and DLQ alarms plus aggregate
+alarms for every Lambda failure signal, Function URL 5xx responses,
+asynchronous-event age, event-source invocation failures, Scheduler delivery
+failures, and a sustained retry storm. The retry-storm alarm requires at least
+five invoked records and more than two invocations per successful delete for
+two consecutive five-minute periods, avoiding a page for a single in-flight
+batch while still exposing lower-volume retries on the graphs. These alarms
+have no notification actions; use the dashboard alarm panel unless an SNS or
+incident destination is deliberately added later.
+
+The GB-s/s chart is a compute-usage approximation, not a bill. It excludes
+request, log, storage, and transfer charges, free-tier credits, and small
+differences between the `Duration` metric and billed-duration rounding. The
+Logs Insights widget runs a query across the selected dashboard time range on
+each refresh, so use a narrow range when investigating older errors.
+
 Current pricing must be rechecked before deployment. Free allowances are usage
 limits rather than a promise of zero cost, and data transfer, logs, storage,
 requests, or later feature changes can still incur charges.

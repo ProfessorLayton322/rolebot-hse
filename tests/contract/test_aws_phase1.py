@@ -96,6 +96,67 @@ def test_fifo_has_a_fifo_dlq_and_disabled_partial_batch_consumer() -> None:
     assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
 
 
+def test_aws_dashboard_covers_compute_errors_and_retry_storms() -> None:
+    monitoring = (APPLICATION / "monitoring.tf").read_text()
+    lambda_config = (APPLICATION / "lambda.tf").read_text()
+    outputs = (APPLICATION / "outputs.tf").read_text()
+
+    assert 'resource "aws_cloudwatch_dashboard" "operations"' in monitoring
+    assert 'title   = "Lambda compute burn rate (GB-s/s)"' in monitoring
+    assert '"Duration"' in monitoring
+    assert "/ 1024 / 1000 / ${local.dashboard_period_seconds}" in monitoring
+    assert 'title   = "Lambda invocation error rate (%)"' in monitoring
+    assert "100 * FILL(errors_${index}, 0) / inv_${index}" in monitoring
+
+    for metric in (
+        "Errors",
+        "Throttles",
+        "DeadLetterErrors",
+        "DestinationDeliveryFailures",
+        "AsyncEventsDropped",
+        "RecursiveInvocationsDropped",
+        "Url4xxCount",
+        "Url5xxCount",
+        "AsyncEventAge",
+    ):
+        assert f'"{metric}"' in monitoring
+
+    for metric in (
+        "NumberOfMessagesReceived",
+        "NumberOfMessagesDeleted",
+        "NumberOfDeduplicatedSentMessages",
+        "ApproximateAgeOfOldestMessage",
+        "PolledEventCount",
+        "InvokedEventCount",
+        "DeletedEventCount",
+        "FailedInvokeEventCount",
+    ):
+        assert f'"{metric}"' in monitoring
+
+    assert 'resource "aws_cloudwatch_metric_alarm" "registration_retry_storm"' in monitoring
+    assert "IF(invoked >= 5, invoked / IF(deleted > 0, deleted, 1), 0)" in monitoring
+    assert "evaluation_periods  = 2" in monitoring
+    assert "datapoints_to_alarm = 2" in monitoring
+    assert 'metrics = ["EventCount"]' in lambda_config
+
+    for metric in (
+        "TargetErrorCount",
+        "TargetErrorThrottledCount",
+        "InvocationThrottleCount",
+        "InvocationDroppedCount",
+        "SystemErrors",
+        "UserErrors",
+        "ReadThrottleEvents",
+        "WriteThrottleEvents",
+        "TransactionConflict",
+    ):
+        assert metric in monitoring
+
+    assert "Recent application and runtime errors" in monitoring
+    assert "SOURCE logGroups(namePrefix:" in monitoring
+    assert 'output "cloudwatch_operations_dashboard_url"' in outputs
+
+
 def test_ssm_secrets_never_flow_through_terraform_inputs() -> None:
     terraform = _application_terraform()
     locals_config = (APPLICATION / "locals.tf").read_text()

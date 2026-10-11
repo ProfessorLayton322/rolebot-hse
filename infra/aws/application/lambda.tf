@@ -88,6 +88,10 @@ resource "aws_lambda_event_source_mapping" "registration_commands" {
   batch_size                         = 10
   maximum_batching_window_in_seconds = 0
   function_response_types            = ["ReportBatchItemFailures"]
+
+  metrics_config {
+    metrics = ["EventCount"]
+  }
 }
 
 resource "aws_lambda_permission" "s3_upload_completion" {
