@@ -94,6 +94,7 @@ def test_fifo_has_a_fifo_dlq_and_disabled_partial_batch_consumer() -> None:
     assert "sqs_managed_sse_enabled     = true" in queues
     assert 'function_response_types            = ["ReportBatchItemFailures"]' in lambda_config
     assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
+    assert "batch_size                         = 1" in lambda_config
     assert 'reserved_concurrent_executions = each.key == "ordered_worker" ? 1 : -1' in lambda_config
 
 

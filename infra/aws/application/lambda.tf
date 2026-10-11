@@ -90,7 +90,10 @@ resource "aws_lambda_event_source_mapping" "registration_commands" {
   event_source_arn                   = aws_sqs_queue.registration_commands.arn
   function_name                      = aws_lambda_function.application["ordered_worker"].arn
   enabled                            = var.sqs_event_mapping_enabled
-  batch_size                         = 10
+  # A command can spend most of the worker's application deadline rebuilding
+  # player and pass tables. Give every command its own invocation so a batch of
+  # expensive commands cannot time out and defer otherwise successful work.
+  batch_size                         = 1
   maximum_batching_window_in_seconds = 0
   function_response_types            = ["ReportBatchItemFailures"]
 
