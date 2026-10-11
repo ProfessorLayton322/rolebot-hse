@@ -60,6 +60,16 @@ variable "google_folder_id" {
   type        = string
 }
 
+variable "google_apps_script_url" {
+  description = "Owner-executed signed Apps Script endpoint used for generated Google Drive XLSX files."
+  type        = string
+
+  validation {
+    condition     = can(regex("^https://script\\.google\\.com/macros/s/[A-Za-z0-9_-]+/exec$", var.google_apps_script_url))
+    error_message = "google_apps_script_url must be an https://script.google.com/macros/s/.../exec URL."
+  }
+}
+
 variable "tg_admin_ids" {
   description = "JSON array of Telegram administrators."
   type        = string

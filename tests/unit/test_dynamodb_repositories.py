@@ -13,7 +13,7 @@ from larp_bot.adapters.aws.dynamodb import (
     DynamoRegistrationRepository,
     DynamoUserRepository,
 )
-from larp_bot.domain.models import AttendanceStatus, BotIdentity, Event, Platform, Registration, TelegramUser
+from larp_bot.domain.models import AttendanceStatus, BotIdentity, Event, Platform, Registration, TelegramUser, VkUser
 
 _DESERIALIZER = TypeDeserializer()
 
@@ -176,6 +176,46 @@ async def test_telegram_handle_lookup_indexes_users_without_a_vk_link() -> None:
 
     assert await repository.find_telegram_by_handle("@player") == user
     assert client.scans == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_user_reads_reuse_one_snapshot_per_worker_batch() -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoUserRepository(client, telegram_table="tg-users", vk_table="vk-users")
+    telegram = TelegramUser(tg_id=123, telegram_handle="@player", linked_vk_id=456, needs_pass=True)
+    vk = VkUser(vk_id=456, telegram_handle="@player", needs_pass=True)
+    await repository.save(telegram)
+    await repository.save(vk)
+
+    async with repository.bulk_read_snapshot():
+        assert len(await repository.list_all()) == 2
+        assert len(await repository.list_pass_preferences()) == 2
+        assert await repository.find_linked(telegram) == vk
+        assert len(await repository.list_all()) == 2
+
+    assert client.scans.count("tg-users") == 1
+    assert client.scans.count("vk-users") == 1
+
+    assert len(await repository.list_all()) == 2
+    assert client.scans.count("tg-users") == 2
+    assert client.scans.count("vk-users") == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_user_snapshot_is_invalidated_by_a_user_mutation() -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoUserRepository(client, telegram_table="tg-users", vk_table="vk-users")
+    first = TelegramUser(tg_id=123, telegram_handle="@first")
+    second = TelegramUser(tg_id=456, telegram_handle="@second")
+    await repository.save(first)
+
+    async with repository.bulk_read_snapshot():
+        assert await repository.list_all() == [first]
+        await repository.save(second)
+        assert {user.tg_id for user in await repository.list_all() if isinstance(user, TelegramUser)} == {123, 456}
+
+    assert client.scans.count("tg-users") == 2
+    assert client.scans.count("vk-users") == 2
 
 
 @pytest.mark.asyncio

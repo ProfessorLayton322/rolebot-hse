@@ -94,6 +94,7 @@ def test_fifo_has_a_fifo_dlq_and_disabled_partial_batch_consumer() -> None:
     assert "sqs_managed_sse_enabled     = true" in queues
     assert 'function_response_types            = ["ReportBatchItemFailures"]' in lambda_config
     assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
+    assert 'reserved_concurrent_executions = each.key == "ordered_worker" ? 1 : -1' in lambda_config
 
 
 def test_aws_dashboard_covers_compute_errors_and_retry_storms() -> None:
@@ -209,6 +210,17 @@ def test_aws_workflows_use_oidc_and_deploy_only_manually() -> None:
     assert "push:" not in deploy
     assert "APPLY_AWS_CONTROLS" in deploy
     assert "billing_guardrails_confirmed" in deploy
+
+
+def test_aws_deployments_validate_signed_google_drive_gateway_before_apply() -> None:
+    production = (ROOT / ".github/workflows/deploy.yml").read_text()
+    manual = (ROOT / ".github/workflows/aws-deploy.yml").read_text()
+
+    for workflow in (production, manual):
+        assert workflow.index("Validate signed Google Drive gateway") < workflow.index("terraform apply")
+        assert "integrations/google-drive-apps-script/check_endpoint.py" in workflow
+        assert "GOOGLE_APPS_SCRIPT_HMAC_SECRET" in workflow
+        assert "GOOGLE_APPS_SCRIPT_URL" in workflow
 
 
 def test_go_aws_packages_are_built_as_linux_bootstraps() -> None:

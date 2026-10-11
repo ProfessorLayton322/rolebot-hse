@@ -19,6 +19,10 @@ resource "aws_lambda_function" "application" {
   source_code_hash = filebase64sha256(each.value.package)
   memory_size      = each.value.memory_size
   timeout          = each.value.timeout
+  # The reversible DynamoDB adapter intentionally uses whole-table snapshots
+  # for a few projections. Keep queue batches sequential so independent FIFO
+  # groups cannot stampede the free-tier provisioned read capacity.
+  reserved_concurrent_executions = each.key == "ordered_worker" ? 1 : -1
 
   environment {
     variables = {
@@ -41,6 +45,7 @@ resource "aws_lambda_function" "application" {
       DYNAMODB_REGISTRATIONS_TABLE = local.runtime_table_names.registrations
       TELEGRAM_EGRESS_URL          = "https://${var.project_name}-telegram-egress.${var.cloudflare_workers_subdomain}.workers.dev"
       GOOGLE_FOLDER_ID             = var.google_folder_id
+      GOOGLE_APPS_SCRIPT_URL       = var.google_apps_script_url
       TG_ADMIN_IDS                 = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_admin_ids
       VK_ADMIN_IDS                 = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_admin_ids
       TG_GAMEMASTER_IDS            = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_gamemaster_ids

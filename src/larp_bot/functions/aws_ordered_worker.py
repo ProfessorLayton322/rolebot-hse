@@ -23,7 +23,12 @@ async def _run(event: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
     if _container is None:
         _container = await build_aws_container(consumer=_consumer)
     try:
-        await _container.worker.run()
+        bulk_read_snapshot = getattr(_container.users, "bulk_read_snapshot", None)
+        if bulk_read_snapshot is None:
+            await _container.worker.run()
+        else:
+            async with bulk_read_snapshot():
+                await _container.worker.run()
     except Exception:
         LOGGER.exception("aws_ordered_batch_failed")
     return _consumer.batch_response()
