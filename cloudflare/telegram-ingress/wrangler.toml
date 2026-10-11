@@ -17,3 +17,8 @@ required = [
 BACKEND_INLINE_CUTOFF_MS = "1500"
 INGRESS_HARD_DEADLINE_MS = "2500"
 MAX_BODY_BYTES = "262144"
+
+[[ratelimits]]
+name = "TG_USER_RATE_LIMITER"
+namespace_id = "731001"
+simple = { limit = 30, period = 60 }

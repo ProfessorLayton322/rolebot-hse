@@ -46,9 +46,11 @@ jobs:
             functions/disk_uploader/go.mod
             functions/registration_notifier/go.mod
       - uses: hashicorp/setup-terraform@v3
+        if: vars.ACTIVE_BACKEND != 'aws'
         with:
           terraform_version: "1.15.9"
       - name: Exchange GitHub OIDC token for Yandex IAM token
+        if: vars.ACTIVE_BACKEND != 'aws'
         env:
           YC_WIF_AUDIENCE: ${{ vars.YC_WIF_AUDIENCE }}
           YC_DEPLOY_SERVICE_ACCOUNT_ID: ${{ vars.YC_DEPLOY_SERVICE_ACCOUNT_ID }}
@@ -62,8 +64,31 @@ jobs:
       - run: npm ci && npm run build
         working-directory: cloudflare/telegram-egress
       - name: Terraform init
+        if: vars.ACTIVE_BACKEND != 'aws'
         working-directory: infra/terraform
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="key=larp-bot/production.tfstate"
       - name: Terraform plan
+        if: vars.ACTIVE_BACKEND != 'aws'
         working-directory: infra/terraform
         run: terraform plan -input=false -lock-timeout=5m
+      - name: Validate AWS-routed Cloudflare deployment without Yandex
+        if: vars.ACTIVE_BACKEND == 'aws'
+        env:
+          ACTIVE_BACKEND: ${{ vars.ACTIVE_BACKEND }}
+          AWS_BACKEND_URL: ${{ vars.AWS_BACKEND_URL }}
+        run: |
+          test "${ACTIVE_BACKEND}" = "aws"
+          test -n "${AWS_BACKEND_URL}"
+          npx --yes wrangler@4.125.0 deploy cloudflare/telegram-ingress/dist/index.js \
+            --config cloudflare/telegram-ingress/wrangler.toml \
+            --name larp-bot-telegram-ingress \
+            --keep-vars \
+            --var "ACTIVE_BACKEND:${ACTIVE_BACKEND}" \
+            --var "YANDEX_BACKEND_URL:https://unavailable.invalid" \
+            --var "AWS_BACKEND_URL:${AWS_BACKEND_URL}" \
+            --dry-run
+          npx --yes wrangler@4.125.0 deploy cloudflare/telegram-egress/dist/index.js \
+            --config cloudflare/telegram-egress/wrangler.toml \
+            --name larp-bot-telegram-egress \
+            --keep-vars \
+            --dry-run

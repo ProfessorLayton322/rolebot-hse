@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${ACTIVE_BACKEND:?ACTIVE_BACKEND is required}"
 : "${TG_WEBHOOK_SECRET:?TG_WEBHOOK_SECRET is required}"
 : "${TG_BOT_TOKEN:?TG_BOT_TOKEN is required}"
 : "${CF_TO_YANDEX_HMAC_SECRET:?CF_TO_YANDEX_HMAC_SECRET is required}"
@@ -18,12 +19,15 @@ set -euo pipefail
 : "${TG_GAMEMASTER_IDS:?TG_GAMEMASTER_IDS is required}"
 : "${VK_GAMEMASTER_IDS:?VK_GAMEMASTER_IDS is required}"
 : "${PARTICIPANT_KEY_HMAC_SECRET:?PARTICIPANT_KEY_HMAC_SECRET is required}"
-: "${YMQ_ACCESS_KEY_ID:?YMQ_ACCESS_KEY_ID is required}"
-: "${YMQ_SECRET_ACCESS_KEY:?YMQ_SECRET_ACCESS_KEY is required}"
-: "${YANDEX_OIDC_AUDIENCE:?YANDEX_OIDC_AUDIENCE is required}"
-: "${YANDEX_SERVICE_ACCOUNT_IDS:?YANDEX_SERVICE_ACCOUNT_IDS is required}"
 : "${INGRESS_WORKER_NAME:?INGRESS_WORKER_NAME is required}"
 : "${EGRESS_WORKER_NAME:?EGRESS_WORKER_NAME is required}"
+
+if [[ "${ACTIVE_BACKEND}" != "aws" ]]; then
+  : "${YMQ_ACCESS_KEY_ID:?YMQ_ACCESS_KEY_ID is required outside AWS mode}"
+  : "${YMQ_SECRET_ACCESS_KEY:?YMQ_SECRET_ACCESS_KEY is required outside AWS mode}"
+  : "${YANDEX_OIDC_AUDIENCE:?YANDEX_OIDC_AUDIENCE is required outside AWS mode}"
+  : "${YANDEX_SERVICE_ACCOUNT_IDS:?YANDEX_SERVICE_ACCOUNT_IDS is required outside AWS mode}"
+fi
 
 validate_numeric_ids() {
   local name="$1"
@@ -39,10 +43,12 @@ validate_numeric_ids "TG_ADMIN_IDS" "${TG_ADMIN_IDS}"
 validate_numeric_ids "VK_ADMIN_IDS" "${VK_ADMIN_IDS}"
 validate_numeric_ids "TG_GAMEMASTER_IDS" "${TG_GAMEMASTER_IDS}"
 validate_numeric_ids "VK_GAMEMASTER_IDS" "${VK_GAMEMASTER_IDS}"
-if ! printf '%s' "${YANDEX_SERVICE_ACCOUNT_IDS}" | jq -e \
-  'type == "array" and length == 3 and all(.[]; type == "string" and length > 0)' >/dev/null; then
-  echo "YANDEX_SERVICE_ACCOUNT_IDS must contain the three runtime service-account IDs" >&2
-  exit 1
+if [[ "${ACTIVE_BACKEND}" != "aws" ]]; then
+  if ! printf '%s' "${YANDEX_SERVICE_ACCOUNT_IDS}" | jq -e \
+    'type == "array" and length == 3 and all(.[]; type == "string" and length > 0)' >/dev/null; then
+    echo "YANDEX_SERVICE_ACCOUNT_IDS must contain the three runtime service-account IDs" >&2
+    exit 1
+  fi
 fi
 
 telegram_bot_username="$(curl --fail-with-body --silent --show-error \
@@ -69,6 +75,7 @@ jq -n \
       --name "${INGRESS_WORKER_NAME}"
 
 jq -n \
+  --arg active_backend "${ACTIVE_BACKEND}" \
   --arg token "${TG_BOT_TOKEN}" \
   --arg telegram_username "${telegram_bot_username}" \
   --arg yandex_hmac "${YANDEX_TO_CF_EGRESS_HMAC_SECRET}" \
@@ -85,10 +92,10 @@ jq -n \
   --arg vk_gamemasters "${VK_GAMEMASTER_IDS}" \
   --arg participant "${PARTICIPANT_KEY_HMAC_SECRET}" \
   --arg ingress "${CF_TO_YANDEX_HMAC_SECRET}" \
-  --arg ymq_id "${YMQ_ACCESS_KEY_ID}" \
-  --arg ymq_secret "${YMQ_SECRET_ACCESS_KEY}" \
-  --arg audience "${YANDEX_OIDC_AUDIENCE}" \
-  --arg subjects "${YANDEX_SERVICE_ACCOUNT_IDS}" \
+  --arg ymq_id "${YMQ_ACCESS_KEY_ID:-}" \
+  --arg ymq_secret "${YMQ_SECRET_ACCESS_KEY:-}" \
+  --arg audience "${YANDEX_OIDC_AUDIENCE:-}" \
+  --arg subjects "${YANDEX_SERVICE_ACCOUNT_IDS:-}" \
   '{
     TG_BOT_TOKEN:$token,
     TG_BOT_USERNAME:$telegram_username,
@@ -105,12 +112,13 @@ jq -n \
     TG_GAMEMASTER_IDS:$tg_gamemasters,
     VK_GAMEMASTER_IDS:$vk_gamemasters,
     PARTICIPANT_KEY_HMAC_SECRET:$participant,
-    CF_TO_YANDEX_HMAC_SECRET:$ingress,
+    CF_TO_YANDEX_HMAC_SECRET:$ingress
+  } + if $active_backend == "aws" then {} else {
     YMQ_ACCESS_KEY_ID:$ymq_id,
     YMQ_SECRET_ACCESS_KEY:$ymq_secret,
     YANDEX_OIDC_AUDIENCE:$audience,
     YANDEX_SERVICE_ACCOUNT_IDS:$subjects
-  }' \
+  } end' \
   | npx --yes wrangler@4.125.0 secret bulk \
       --config cloudflare/telegram-egress/wrangler.toml \
       --name "${EGRESS_WORKER_NAME}"

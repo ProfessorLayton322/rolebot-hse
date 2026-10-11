@@ -47,6 +47,16 @@ jobs:
       TF_VAR_yandex_notifier_enabled: ${{ vars.YANDEX_NOTIFIER_ENABLED || 'true' }}
       TF_VAR_ydb_rehearsal_enabled: ${{ vars.YDB_REHEARSAL_ENABLED || 'false' }}
       TF_VAR_google_folder_id: ${{ vars.GOOGLE_FOLDER_ID }}
+      TF_VAR_tg_admin_ids: ${{ vars.TG_ADMIN_IDS }}
+      TF_VAR_vk_admin_ids: ${{ vars.VK_ADMIN_IDS }}
+      TF_VAR_tg_gamemaster_ids: ${{ vars.TG_GAMEMASTER_IDS }}
+      TF_VAR_vk_gamemaster_ids: ${{ vars.VK_GAMEMASTER_IDS }}
+      TF_VAR_application_mode: ${{ vars.AWS_APPLICATION_MODE || 'standby' }}
+      TF_VAR_mutations_enabled: ${{ vars.AWS_MUTATIONS_ENABLED || 'false' }}
+      TF_VAR_sqs_event_mapping_enabled: ${{ vars.AWS_SQS_EVENT_MAPPING_ENABLED || 'false' }}
+      TF_VAR_scheduler_enabled: ${{ vars.AWS_SCHEDULER_ENABLED || 'false' }}
+      TF_VAR_rehearsal_tables_enabled: ${{ vars.AWS_REHEARSAL_TABLES_ENABLED || 'false' }}
+      TF_VAR_runtime_table_target: ${{ vars.AWS_RUNTIME_TABLE_TARGET || 'production' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -79,10 +89,14 @@ jobs:
           (cd functions/disk_uploader && go test ./... && go vet ./...)
           (cd functions/registration_notifier && go test ./... && go vet ./...)
       - name: Build deterministic Function package
+        if: vars.ACTIVE_BACKEND != 'aws'
         run: |
           bash scripts/build_function.sh
           bash scripts/build_disk_uploader.sh
           bash scripts/build_registration_notifier.sh
+      - name: Build AWS application packages
+        if: vars.ACTIVE_BACKEND == 'aws'
+        run: bash scripts/build_aws_application_packages.sh
       # One command per line and one step per Worker. A previous `&&` chain
       # followed by another line hid a failing `npm test`: Bash `-e` ignores a
       # non-final command of an `&&` list, the step took its status from the
@@ -102,21 +116,107 @@ jobs:
           npm test
           npm run typecheck
           npm run build
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        if: vars.ACTIVE_BACKEND == 'aws'
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Verify fixed AWS deployment identity
+        if: vars.ACTIVE_BACKEND == 'aws'
+        run: |
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          test "${account_id}" = "${{ vars.AWS_ACCOUNT_ID }}"
+      - name: Apply active AWS application stack
+        if: vars.ACTIVE_BACKEND == 'aws'
+        working-directory: infra/aws/application
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.AWS_TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.AWS_TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+          terraform plan -input=false -lock-timeout=5m -out=aws-production.tfplan
+          terraform apply -input=false -lock-timeout=5m aws-production.tfplan
+      - name: Populate active AWS runtime parameters
+        if: vars.ACTIVE_BACKEND == 'aws'
+        working-directory: infra/aws/application
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
+          VK_ACCESS_TOKEN: ${{ secrets.VK_ACCESS_TOKEN }}
+          VK_CALLBACK_SECRET: ${{ secrets.VK_CALLBACK_SECRET }}
+          VK_CONFIRMATION_STRING: ${{ secrets.VK_CONFIRMATION_STRING }}
+          VK_GROUP_ID: ${{ secrets.VK_GROUP_ID }}
+          YANDEX_DISK_TOKEN: ${{ secrets.YANDEX_DISK_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          PARTICIPANT_KEY_HMAC_SECRET: ${{ secrets.PARTICIPANT_KEY_HMAC_SECRET }}
+          CF_TO_AWS_HMAC_SECRET: ${{ secrets.CF_TO_AWS_HMAC_SECRET }}
+          AWS_TO_CF_EGRESS_HMAC_SECRET: ${{ secrets.AWS_TO_CF_EGRESS_HMAC_SECRET }}
+        run: |
+          set +x
+          parameter_names_json="$(terraform output -json runtime_parameter_names)"
+          put_secret() {
+            parameter_key="$1"
+            parameter_value="$2"
+            parameter_name="$(jq -er --arg key "${parameter_key}" '.[$key]' <<<"${parameter_names_json}")"
+            byte_count="$(LC_ALL=C printf '%s' "${parameter_value}" | wc -c)"
+            if [[ "${byte_count}" -lt 1 || "${byte_count}" -gt 4096 ]]; then
+              echo "${parameter_name} must contain between 1 and 4096 bytes" >&2
+              return 1
+            fi
+            aws ssm put-parameter \
+              --name "${parameter_name}" \
+              --type SecureString \
+              --tier Standard \
+              --value "${parameter_value}" \
+              --overwrite >/dev/null
+          }
+
+          put_secret tg_bot_token "${TG_BOT_TOKEN}"
+          put_secret tg_webhook_secret "${TG_WEBHOOK_SECRET}"
+          put_secret vk_access_token "${VK_ACCESS_TOKEN}"
+          put_secret vk_callback_secret "${VK_CALLBACK_SECRET}"
+          put_secret vk_confirmation_string "${VK_CONFIRMATION_STRING}"
+          put_secret vk_group_id "${VK_GROUP_ID}"
+          put_secret yandex_disk_token "${YANDEX_DISK_TOKEN}"
+          put_secret google_service_account_json "${GOOGLE_SERVICE_ACCOUNT_JSON}"
+          put_secret participant_key_hmac_secret "${PARTICIPANT_KEY_HMAC_SECRET}"
+          put_secret cloudflare_ingress_hmac_secret "${CF_TO_AWS_HMAC_SECRET}"
+          put_secret cloudflare_egress_hmac_secret "${AWS_TO_CF_EGRESS_HMAC_SECRET}"
+      - name: Confirm active AWS runtime controls
+        if: vars.ACTIVE_BACKEND == 'aws'
+        working-directory: infra/aws/application
+        run: |
+          controls="$(terraform output -json standby_controls)"
+          test "$(jq -r .gateway_auth_type <<<"${controls}")" = "NONE"
+          test "$(jq -r .application_mode <<<"${controls}")" = "${TF_VAR_application_mode}"
+          test "$(jq -r .mutation_enabled <<<"${controls}")" = "${TF_VAR_mutations_enabled}"
+          test "$(jq -r .runtime_table_target <<<"${controls}")" = "${TF_VAR_runtime_table_target}"
+          test "$(jq -r .rehearsal_tables <<<"${controls}")" = "${TF_VAR_rehearsal_tables_enabled}"
+          test "$(jq -r .sqs_event_mapping_state <<<"${controls}")" = "${TF_VAR_sqs_event_mapping_enabled}"
+          if test "${TF_VAR_scheduler_enabled}" = "true"; then
+            test "$(jq -r .scheduler_state <<<"${controls}")" = "ENABLED"
+          else
+            test "$(jq -r .scheduler_state <<<"${controls}")" = "DISABLED"
+          fi
       - name: Exchange GitHub OIDC token for Yandex IAM token
+        if: vars.ACTIVE_BACKEND != 'aws'
         env:
           YC_WIF_AUDIENCE: ${{ vars.YC_WIF_AUDIENCE }}
           YC_DEPLOY_SERVICE_ACCOUNT_ID: ${{ vars.YC_DEPLOY_SERVICE_ACCOUNT_ID }}
         run: bash scripts/exchange_yandex_oidc_token.sh
       - name: Terraform apply
+        if: vars.ACTIVE_BACKEND != 'aws'
         working-directory: infra/terraform
         run: |
           terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" -backend-config="key=larp-bot/production.tfstate"
           terraform plan -input=false -lock-timeout=5m -out=production.tfplan
           terraform apply -input=false -lock-timeout=5m production.tfplan
       - name: Remove obsolete Object Storage versions
+        if: vars.ACTIVE_BACKEND != 'aws'
         run: python scripts/cleanup_object_storage.py --bucket "${{ vars.TF_STATE_BUCKET }}"
       - name: Read Terraform outputs
-        id: outputs
+        if: vars.ACTIVE_BACKEND != 'aws'
+        id: yandex_outputs
         working-directory: infra/terraform
         run: |
           ymq_access_key_id="$(terraform output -raw ymq_access_key_id)"
@@ -139,8 +239,61 @@ jobs:
             echo "ymq_fifo_url=$(terraform output -raw ymq_fifo_url)"
             echo "deployment_bucket=$(terraform output -raw deployment_bucket)"
           } >>"${GITHUB_OUTPUT}"
+      - name: Deploy Cloudflare Workers without Yandex
+        if: vars.ACTIVE_BACKEND == 'aws'
+        env:
+          ACTIVE_BACKEND: ${{ vars.ACTIVE_BACKEND }}
+          AWS_BACKEND_URL: ${{ vars.AWS_BACKEND_URL }}
+        run: |
+          test "${ACTIVE_BACKEND}" = "aws"
+          test -n "${AWS_BACKEND_URL}"
+          npx --yes wrangler@4.125.0 deploy cloudflare/telegram-ingress/dist/index.js \
+            --config cloudflare/telegram-ingress/wrangler.toml \
+            --name larp-bot-telegram-ingress \
+            --keep-vars \
+            --var "ACTIVE_BACKEND:${ACTIVE_BACKEND}" \
+            --var "YANDEX_BACKEND_URL:https://unavailable.invalid" \
+            --var "AWS_BACKEND_URL:${AWS_BACKEND_URL}"
+          npx --yes wrangler@4.125.0 deploy cloudflare/telegram-egress/dist/index.js \
+            --config cloudflare/telegram-egress/wrangler.toml \
+            --name larp-bot-telegram-egress \
+            --keep-vars
+      - name: Resolve deployment endpoints
+        id: outputs
+        env:
+          ACTIVE_BACKEND: ${{ vars.ACTIVE_BACKEND }}
+          CLOUDFLARE_WORKERS_SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          RUNTIME_SERVICE_ACCOUNT_IDS: ${{ steps.yandex_outputs.outputs.runtime_service_account_ids }}
+          YANDEX_GATEWAY_URL: ${{ steps.yandex_outputs.outputs.yandex_gateway_url }}
+          YANDEX_BACKEND_URL: ${{ steps.yandex_outputs.outputs.yandex_backend_url }}
+          TELEGRAM_INGRESS_URL: ${{ steps.yandex_outputs.outputs.telegram_ingress_url }}
+          TELEGRAM_EGRESS_URL: ${{ steps.yandex_outputs.outputs.telegram_egress_url }}
+          VK_CALLBACK_URL: ${{ steps.yandex_outputs.outputs.vk_callback_url }}
+          YANDEX_VK_ROLLBACK_URL: ${{ steps.yandex_outputs.outputs.yandex_vk_rollback_url }}
+          YMQ_KICK_URL: ${{ steps.yandex_outputs.outputs.ymq_kick_url }}
+          YMQ_FIFO_URL: ${{ steps.yandex_outputs.outputs.ymq_fifo_url }}
+          DEPLOYMENT_BUCKET: ${{ steps.yandex_outputs.outputs.deployment_bucket }}
+        run: |
+          if [[ "${ACTIVE_BACKEND}" = "aws" ]]; then
+            TELEGRAM_INGRESS_URL="https://larp-bot-telegram-ingress.${CLOUDFLARE_WORKERS_SUBDOMAIN}.workers.dev"
+            TELEGRAM_EGRESS_URL="https://larp-bot-telegram-egress.${CLOUDFLARE_WORKERS_SUBDOMAIN}.workers.dev"
+            VK_CALLBACK_URL="${TELEGRAM_INGRESS_URL}/vk"
+          fi
+          {
+            echo "runtime_service_account_ids=${RUNTIME_SERVICE_ACCOUNT_IDS}"
+            echo "yandex_gateway_url=${YANDEX_GATEWAY_URL}"
+            echo "yandex_backend_url=${YANDEX_BACKEND_URL}"
+            echo "telegram_ingress_url=${TELEGRAM_INGRESS_URL}"
+            echo "telegram_egress_url=${TELEGRAM_EGRESS_URL}"
+            echo "vk_callback_url=${VK_CALLBACK_URL}"
+            echo "yandex_vk_rollback_url=${YANDEX_VK_ROLLBACK_URL}"
+            echo "ymq_kick_url=${YMQ_KICK_URL}"
+            echo "ymq_fifo_url=${YMQ_FIFO_URL}"
+            echo "deployment_bucket=${DEPLOYMENT_BUCKET}"
+          } >>"${GITHUB_OUTPUT}"
       - name: Inject Cloudflare Worker secrets
         env:
+          ACTIVE_BACKEND: ${{ vars.ACTIVE_BACKEND }}
           TG_WEBHOOK_SECRET: ${{ secrets.TG_WEBHOOK_SECRET }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           CF_TO_YANDEX_HMAC_SECRET: ${{ secrets.CF_TO_YANDEX_HMAC_SECRET }}
@@ -164,12 +317,12 @@ jobs:
           EGRESS_WORKER_NAME: larp-bot-telegram-egress
         run: bash scripts/update_cloudflare_secrets.sh
       - name: Wake ordered worker after deployment
-        if: vars.YANDEX_BACKGROUND_ENABLED != 'false'
+        if: vars.ACTIVE_BACKEND != 'aws' && vars.YANDEX_BACKGROUND_ENABLED != 'false'
         env:
           YMQ_KICK_URL: ${{ steps.outputs.outputs.ymq_kick_url }}
         run: python scripts/wake_ordered_worker.py
       - name: Drain YMQ and verify pending uploads are complete
-        if: inputs.verify_yandex_quiescence
+        if: vars.ACTIVE_BACKEND != 'aws' && inputs.verify_yandex_quiescence
         env:
           YMQ_FIFO_URL: ${{ steps.outputs.outputs.ymq_fifo_url }}
           YMQ_KICK_URL: ${{ steps.outputs.outputs.ymq_kick_url }}

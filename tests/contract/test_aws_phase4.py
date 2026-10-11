@@ -61,3 +61,47 @@ def test_cloudflare_ownership_does_not_enter_aws_state() -> None:
     aws_terraform = "\n".join(path.read_text() for path in (ROOT / "infra/aws/application").glob("*.tf"))
     assert 'resource "cloudflare_' not in aws_terraform
     assert "cloudflare/cloudflare" not in aws_terraform
+
+
+def test_aws_production_deploy_does_not_contact_yandex() -> None:
+    deploy = (ROOT / ".github/workflows/deploy.yml").read_text()
+    plan = (ROOT / ".github/workflows/plan.yml").read_text()
+    secret_script = (ROOT / "scripts/update_cloudflare_secrets.sh").read_text()
+    wrangler = (ROOT / "cloudflare/telegram-ingress/wrangler.toml").read_text()
+
+    for step_name in (
+        "Exchange GitHub OIDC token for Yandex IAM token",
+        "Terraform apply",
+        "Remove obsolete Object Storage versions",
+        "Read Terraform outputs",
+        "Wake ordered worker after deployment",
+        "Drain YMQ and verify pending uploads are complete",
+    ):
+        step = deploy.split(f"- name: {step_name}", 1)[1].split("\n      - ", 1)[0]
+        assert "vars.ACTIVE_BACKEND != 'aws'" in step
+
+    for step_name in ("Exchange GitHub OIDC token for Yandex IAM token", "Terraform init", "Terraform plan"):
+        step = plan.split(f"- name: {step_name}", 1)[1].split("\n      - ", 1)[0]
+        assert "vars.ACTIVE_BACKEND != 'aws'" in step
+
+    cloudflare_deploy = deploy.split("- name: Deploy Cloudflare Workers without Yandex", 1)[1].split("\n      - ", 1)[0]
+    assert "vars.ACTIVE_BACKEND == 'aws'" in cloudflare_deploy
+    assert "npx --yes wrangler@4.125.0 deploy" in cloudflare_deploy
+    assert "--keep-vars" in cloudflare_deploy
+    assert "[[ratelimits]]" in wrangler
+    assert 'name = "TG_USER_RATE_LIMITER"' in wrangler
+    assert 'if [[ "${ACTIVE_BACKEND}" != "aws" ]]' in secret_script
+
+    for step_name in (
+        "Build AWS application packages",
+        "Verify fixed AWS deployment identity",
+        "Apply active AWS application stack",
+        "Populate active AWS runtime parameters",
+        "Confirm active AWS runtime controls",
+    ):
+        step = deploy.split(f"- name: {step_name}", 1)[1].split("\n      - ", 1)[0]
+        assert "vars.ACTIVE_BACKEND == 'aws'" in step
+
+    assert "working-directory: infra/aws/application" in deploy
+    assert 'backend-config="bucket=${{ vars.AWS_TF_STATE_BUCKET }}"' in deploy
+    assert "terraform apply -input=false -lock-timeout=5m aws-production.tfplan" in deploy
