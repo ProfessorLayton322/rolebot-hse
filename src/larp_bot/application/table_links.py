@@ -12,7 +12,10 @@ class TableProviderLinks:
 
     def for_player(self) -> str:
         if self.google is not None:
-            return f"Google Drive: {self.google}"
+            links = [f"Google Drive: {self.google}"]
+            if self.yandex is not None:
+                links.append(f"Яндекс Диск: {self.yandex}")
+            return "\n".join(links)
         if self.yandex is not None:
             return self.yandex
         raise RuntimeError("table has no public link")

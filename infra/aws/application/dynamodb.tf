@@ -1,10 +1,8 @@
 resource "aws_dynamodb_table" "tg_users" {
-  name           = local.table_names.tg_users
-  billing_mode   = "PROVISIONED"
-  read_capacity  = 1
-  write_capacity = 1
-  hash_key       = "tg_id"
-  table_class    = "STANDARD"
+  name         = local.table_names.tg_users
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "tg_id"
+  table_class  = "STANDARD"
 
   attribute {
     name = "tg_id"
@@ -24,8 +22,6 @@ resource "aws_dynamodb_table" "tg_users" {
   global_secondary_index {
     name            = "telegram-identity"
     projection_type = "ALL"
-    read_capacity   = 1
-    write_capacity  = 1
 
     key_schema {
       attribute_name = "telegram_handle"
@@ -41,8 +37,6 @@ resource "aws_dynamodb_table" "tg_users" {
   global_secondary_index {
     name            = "telegram-handle"
     projection_type = "ALL"
-    read_capacity   = 1
-    write_capacity  = 1
 
     key_schema {
       attribute_name = "telegram_handle"
@@ -66,12 +60,10 @@ resource "aws_dynamodb_table" "tg_users" {
 }
 
 resource "aws_dynamodb_table" "vk_users" {
-  name           = local.table_names.vk_users
-  billing_mode   = "PROVISIONED"
-  read_capacity  = 1
-  write_capacity = 1
-  hash_key       = "vk_id"
-  table_class    = "STANDARD"
+  name         = local.table_names.vk_users
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "vk_id"
+  table_class  = "STANDARD"
 
   attribute {
     name = "vk_id"
@@ -94,12 +86,10 @@ resource "aws_dynamodb_table" "vk_users" {
 }
 
 resource "aws_dynamodb_table" "events" {
-  name           = local.table_names.events
-  billing_mode   = "PROVISIONED"
-  read_capacity  = 1
-  write_capacity = 1
-  hash_key       = "event_id"
-  table_class    = "STANDARD"
+  name         = local.table_names.events
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "event_id"
+  table_class  = "STANDARD"
 
   attribute {
     name = "event_id"
@@ -119,8 +109,6 @@ resource "aws_dynamodb_table" "events" {
   global_secondary_index {
     name            = "signup-token"
     projection_type = "ALL"
-    read_capacity   = 1
-    write_capacity  = 1
 
     key_schema {
       attribute_name = "signup_token"
@@ -131,8 +119,6 @@ resource "aws_dynamodb_table" "events" {
   global_secondary_index {
     name            = "telegram-chat"
     projection_type = "ALL"
-    read_capacity   = 1
-    write_capacity  = 1
 
     key_schema {
       attribute_name = "telegram_chat_id"
@@ -156,13 +142,11 @@ resource "aws_dynamodb_table" "events" {
 }
 
 resource "aws_dynamodb_table" "event_leaders" {
-  name           = local.table_names.event_leaders
-  billing_mode   = "PROVISIONED"
-  read_capacity  = 1
-  write_capacity = 1
-  hash_key       = "event_id"
-  range_key      = "leader_key"
-  table_class    = "STANDARD"
+  name         = local.table_names.event_leaders
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "event_id"
+  range_key    = "leader_key"
+  table_class  = "STANDARD"
 
   attribute {
     name = "event_id"
@@ -192,13 +176,11 @@ resource "aws_dynamodb_table" "event_leaders" {
 }
 
 resource "aws_dynamodb_table" "registrations" {
-  name           = local.table_names.registrations
-  billing_mode   = "PROVISIONED"
-  read_capacity  = 1
-  write_capacity = 1
-  hash_key       = "event_id"
-  range_key      = "participant_key"
-  table_class    = "STANDARD"
+  name         = local.table_names.registrations
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "event_id"
+  range_key    = "participant_key"
+  table_class  = "STANDARD"
 
   attribute {
     name = "event_id"
@@ -218,8 +200,6 @@ resource "aws_dynamodb_table" "registrations" {
   global_secondary_index {
     name            = "telegram-profile"
     projection_type = "ALL"
-    read_capacity   = 1
-    write_capacity  = 1
 
     key_schema {
       attribute_name = "telegram_profile"

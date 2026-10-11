@@ -37,7 +37,7 @@ owns the canonical parameter names and exact IAM ARNs, but deliberately has no
 refresh even when a write-only argument is used. Therefore no real or sentinel
 value can enter Terraform state or provider memory. The workflow rejects empty
 values and values larger than the 4,096-byte Standard parameter limit; the
-Google service-account JSON must be split or moved to a private encrypted S3
+Google credential JSON must be split or moved to a private encrypted S3
 object before deployment if that check fails.
 
 The workflow also requires an explicit confirmation that the payer-account
