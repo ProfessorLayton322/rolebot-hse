@@ -130,6 +130,10 @@ Use the following access methods. Do not substitute static AWS access keys.
 - GitHub environment secrets already exist in `production`:
   - `CF_TO_AWS_HMAC_SECRET`
   - `AWS_TO_CF_EGRESS_HMAC_SECRET`
+  - `GOOGLE_APPS_SCRIPT_HMAC_SECRET`, matching the manually deployed Apps
+    Script's `ROLEBOT_HMAC_SECRET` property
+- `GOOGLE_APPS_SCRIPT_URL` exists in both the `production` and
+  `production-plan` environments and points to the deployed `/exec` web app.
 - The existing Yandex workflows set variables named `AWS_ACCESS_KEY_ID` and
   `AWS_SECRET_ACCESS_KEY`, but those values are Yandex Object Storage
   credentials. Never inherit or reuse that job environment for real AWS.

@@ -170,7 +170,7 @@ New games receive a pass table during creation; admins can create one for any le
 
 Admins and pass managers additionally receive `Получить все пропуска за день` in the main administration menu. With no dated unarchived games the action reports that there is nothing to export; one distinct game date is selected automatically, while multiple dates produce a date picker. The resulting workbook at `disk:/larp-bot/passes/daily-<YYYY-MM-DD>.xlsx` contains each pass-requiring global user at most once across all active registrations and master assignments on that date. Reciprocal Telegram/VK profiles and people registered for several same-day events are deduplicated as one person. Profile edits, signups, and cancellations regenerate the existing date resource without republishing it at a new path, so its public URL remains stable; cancelling one registration keeps the user in the workbook while another active same-day registration remains.
 
-Statistics use exactly two existing binary XLSX files in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx` and `master_statistics.xlsx`. Keep exactly one non-trashed statistics file with each name in the folder, and do not rename or replace them. The bot downloads and updates the content of the same statistics file IDs, so their names and `webViewLink` values remain permanent while Google Drive retains revision history. Generated registration and pass XLSX files are also created or updated in this folder under stable path-derived names and shared for link access before Yandex Disk is attempted. For a personal My Drive folder, use an `authorized_user` credential document with a refresh token for the folder owner; a service account has no personal Drive storage quota and can create these mirrors only in a Shared Drive.
+Statistics use exactly two existing binary XLSX files in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx` and `master_statistics.xlsx`. Keep exactly one non-trashed statistics file with each name in the folder, and do not rename or replace them. The bot downloads and updates the content of the same statistics file IDs through the existing service-account access, so their names and `webViewLink` values remain permanent while Google Drive retains revision history. On AWS, generated registration and pass XLSX files are created or updated in the same folder through the owner-executed, HMAC-signed Apps Script gateway under stable path-derived names and shared for link access before Yandex Disk is attempted. The gateway is restricted to `events — *.xlsx` and `passes — *.xlsx`; deployment instructions are in [`integrations/google-drive-apps-script`](integrations/google-drive-apps-script/README.md).
 
 Configured administrators see one `Управление статистикой` entry. Its submenu contains:
 
@@ -378,7 +378,8 @@ These names are exhaustive for the supplied workflows:
 | `TG_BOT_TOKEN` | BotFather token; installed only in telegram-egress and used by deployment to call `setWebhook` |
 | `TG_WEBHOOK_SECRET` | Random webhook secret using only `A-Z a-z 0-9 _ -`; installed in ingress and passed to `setWebhook` |
 | `YANDEX_DISK_TOKEN` | OAuth token for the dedicated Disk account/folder |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Complete Google credential JSON: use `authorized_user` for a personal My Drive folder, or a service account with edit access when `GOOGLE_FOLDER_ID` belongs to a Shared Drive |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Google credential JSON used only to read and update the two existing statistics workbooks; the current service account remains sufficient for those existing files |
+| `GOOGLE_APPS_SCRIPT_HMAC_SECRET` | At least 32 random bytes encoded as text; must exactly match the Apps Script `ROLEBOT_HMAC_SECRET` property and is installed only in AWS SSM |
 | `VK_ACCESS_TOKEN` | VK community access token with messaging permission |
 | `VK_CALLBACK_SECRET` | Random secret configured identically in VK Callback API |
 | `VK_CONFIRMATION_STRING` | VK's server-confirmation string |
@@ -410,6 +411,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket, where a prefix-scoped lifecycle retains three non-current packages and expires older ones after one day |
 | `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent statistics files and generated XLSX mirrors |
+| `GOOGLE_APPS_SCRIPT_URL` | Deployed owner-executed Apps Script web-app URL ending in `/exec`; configure it in both `production` and `production-plan` |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 | `TG_GAMEMASTER_IDS` | Public JSON array of Telegram moderator user IDs; moderators have privileged read access and can mutate games where they are masters |

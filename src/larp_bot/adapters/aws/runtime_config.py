@@ -22,6 +22,7 @@ class SsmRuntimeConfigProvider:
         "VK_GROUP_ID": "vk-group-id",
         "YANDEX_DISK_TOKEN": "yandex-disk-token",
         "GOOGLE_SERVICE_ACCOUNT_JSON": "google-service-account-json",
+        "GOOGLE_APPS_SCRIPT_HMAC_SECRET": "google-apps-script-hmac-secret",
         "PARTICIPANT_KEY_HMAC_SECRET": "participant-key-hmac-secret",
         "CF_TO_AWS_HMAC_SECRET": "cloudflare-ingress-hmac-secret",
         "AWS_TO_CF_EGRESS_HMAC_SECRET": "cloudflare-egress-hmac-secret",

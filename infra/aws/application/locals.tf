@@ -43,6 +43,7 @@ locals {
     vk_group_id                    = "/${var.project_name}/production/vk-group-id"
     yandex_disk_token              = "/${var.project_name}/production/yandex-disk-token"
     google_service_account_json    = "/${var.project_name}/production/google-service-account-json"
+    google_apps_script_hmac_secret = "/${var.project_name}/production/google-apps-script-hmac-secret"
     participant_key_hmac_secret    = "/${var.project_name}/production/participant-key-hmac-secret"
     cloudflare_ingress_hmac_secret = "/${var.project_name}/production/cloudflare-ingress-hmac-secret"
     cloudflare_egress_hmac_secret  = "/${var.project_name}/production/cloudflare-egress-hmac-secret"
@@ -63,6 +64,7 @@ locals {
       "vk_group_id",
       "yandex_disk_token",
       "google_service_account_json",
+      "google_apps_script_hmac_secret",
       "participant_key_hmac_secret",
       "cloudflare_ingress_hmac_secret",
       "cloudflare_egress_hmac_secret",
@@ -71,6 +73,7 @@ locals {
       "tg_bot_token",
       "vk_access_token",
       "google_service_account_json",
+      "google_apps_script_hmac_secret",
       "participant_key_hmac_secret",
       "cloudflare_egress_hmac_secret",
       "yandex_disk_token",
@@ -88,6 +91,7 @@ locals {
       "cloudflare_egress_hmac_secret",
       "yandex_disk_token",
       "google_service_account_json",
+      "google_apps_script_hmac_secret",
       "participant_key_hmac_secret",
     ]
   }

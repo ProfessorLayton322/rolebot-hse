@@ -40,6 +40,13 @@ values and values larger than the 4,096-byte Standard parameter limit; the
 Google credential JSON must be split or moved to a private encrypted S3
 object before deployment if that check fails.
 
+Before Terraform apply, the workflow sends an HMAC-signed health request to
+the configured Google Apps Script and verifies its fixed Drive folder ID. AWS
+uses this owner-executed gateway to create, replace, publish, check, and trash
+generated event/pass XLSX files. The Google service account remains limited to
+the two already-existing statistics workbooks, which it can update without
+owning new My Drive files.
+
 The workflow also requires an explicit confirmation that the payer-account
 budget, Free Tier alerts, and CloudWatch billing alarm in
 [`docs/aws-migration-phase-0.md`](../../../docs/aws-migration-phase-0.md) were

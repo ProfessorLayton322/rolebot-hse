@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -207,10 +208,54 @@ class _DynamoMemoryRepository[MemoryRepository]:
 
 
 class DynamoUserRepository(_DynamoMemoryRepository[MemoryUserRepository]):
+    _BULK_SNAPSHOT_METHODS = frozenset({"find_linked", "list_all", "list_pass_preferences"})
+    _MUTATING_METHODS = frozenset(
+        {
+            "claim_delivery",
+            "clear_privileged_role",
+            "grant_larp_experience",
+            "save",
+            "set_larp_experience",
+            "set_privileged_role",
+            "update_telegram_handle",
+            "update_telegram_link",
+        }
+    )
+
     def __init__(self, client: Any, *, telegram_table: str, vk_table: str) -> None:
         super().__init__(client)
         self.telegram_table = telegram_table
         self.vk_table = vk_table
+        self._bulk_snapshot_depth = 0
+        self._bulk_snapshot_rows: tuple[list[dict[str, Any]], list[dict[str, Any]]] | None = None
+        self._bulk_snapshot_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def bulk_read_snapshot(self) -> AsyncIterator[None]:
+        """Reuse one complete user snapshot during a single queue batch.
+
+        Game-table projections otherwise scan both user tables once per game.
+        Deployment backfills can contain many games, so that pattern can exhaust
+        the deliberately small free-tier provisioned capacity. Mutating methods
+        invalidate the snapshot before they load state.
+        """
+
+        self._bulk_snapshot_depth += 1
+        try:
+            yield
+        finally:
+            self._bulk_snapshot_depth -= 1
+            if self._bulk_snapshot_depth == 0:
+                self._bulk_snapshot_rows = None
+
+    async def _bulk_rows(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        async with self._bulk_snapshot_lock:
+            if self._bulk_snapshot_rows is None:
+                self._bulk_snapshot_rows = await asyncio.gather(
+                    self._scan(self.telegram_table),
+                    self._scan(self.vk_table),
+                )
+            return self._bulk_snapshot_rows
 
     @staticmethod
     def _user_item(user: User, table: str, revision: int = 0) -> _StoredItem:
@@ -239,6 +284,10 @@ class DynamoUserRepository(_DynamoMemoryRepository[MemoryUserRepository]):
         method_name: str,
         args: tuple[Any, ...],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if self._bulk_snapshot_depth and method_name in self._BULK_SNAPSHOT_METHODS:
+            snapshot_telegram_rows, snapshot_vk_rows = await self._bulk_rows()
+            return deepcopy(snapshot_telegram_rows), deepcopy(snapshot_vk_rows)
+
         telegram_rows: list[dict[str, Any]] = []
         vk_rows: list[dict[str, Any]] = []
 
@@ -297,6 +346,11 @@ class DynamoUserRepository(_DynamoMemoryRepository[MemoryUserRepository]):
             await add_user(args[0], int(args[1]))
             return telegram_rows, vk_rows
         return await asyncio.gather(self._scan(self.telegram_table), self._scan(self.vk_table))
+
+    async def _execute(self, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        if self._bulk_snapshot_depth and method_name in self._MUTATING_METHODS:
+            self._bulk_snapshot_rows = None
+        return await super()._execute(method_name, args, kwargs)
 
     async def _load(
         self,

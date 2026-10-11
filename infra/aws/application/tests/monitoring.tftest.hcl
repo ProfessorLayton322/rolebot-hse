@@ -26,6 +26,7 @@ mock_provider "aws" {
 variables {
   cloudflare_workers_subdomain   = "example"
   google_folder_id               = "example"
+  google_apps_script_url         = "https://script.google.com/macros/s/example/exec"
   tg_admin_ids                   = "[]"
   vk_admin_ids                   = "[]"
   tg_gamemaster_ids              = "[]"

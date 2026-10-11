@@ -14,6 +14,7 @@ from larp_bot.adapters.aws import (
     SsmRuntimeConfigProvider,
 )
 from larp_bot.adapters.google_drive import (
+    GoogleDriveAppsScriptClient,
     GoogleDriveMirroredUploader,
     GoogleDriveRestClient,
     GoogleDriveStatisticsRepository,
@@ -74,6 +75,7 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         for key in (
             "YANDEX_DISK_TOKEN",
             "GOOGLE_SERVICE_ACCOUNT_JSON",
+            "GOOGLE_APPS_SCRIPT_HMAC_SECRET",
             "PARTICIPANT_KEY_HMAC_SECRET",
             "AWS_TO_CF_EGRESS_HMAC_SECRET",
             "VK_ACCESS_TOKEN",
@@ -87,7 +89,12 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         function_name=settings.aws_disk_uploader_function,
     )
     google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    mirrored_uploader = GoogleDriveMirroredUploader(disk_uploader, google_drive, settings.google_folder_id)
+    google_tables = GoogleDriveAppsScriptClient(
+        settings.google_apps_script_url,
+        secrets["GOOGLE_APPS_SCRIPT_HMAC_SECRET"],
+        settings.google_folder_id,
+    )
+    mirrored_uploader = GoogleDriveMirroredUploader(disk_uploader, google_tables, settings.google_folder_id)
     showcase = YandexDiskShowcaseRepository(disk, mirrored_uploader)
     player_statistics = GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id)
     master_statistics = GoogleDriveStatisticsRepository.masters(google_drive, settings.google_folder_id)
