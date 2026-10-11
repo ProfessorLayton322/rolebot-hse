@@ -47,7 +47,7 @@ locals {
     }
   }
 
-  lambda_compute_rate_metrics = flatten([
+  lambda_compute_rate_metrics = concat([
     for key, definition in local.lambda_definitions : [
       [
         "AWS/Lambda",
@@ -70,9 +70,9 @@ locals {
         },
       ],
     ]
-  ])
+  ]...)
 
-  lambda_error_rate_metrics = flatten([
+  lambda_error_rate_metrics = concat([
     for index, key in sort(keys(local.function_names)) : [
       [
         "AWS/Lambda",
@@ -106,9 +106,9 @@ locals {
         },
       ],
     ]
-  ])
+  ]...)
 
-  lambda_failure_count_metrics = flatten([
+  lambda_failure_count_metrics = concat([
     for signal_key, signal in local.lambda_failure_signals : concat(
       [
         for index, key in sort(keys(local.function_names)) : [
@@ -132,7 +132,7 @@ locals {
         },
       ]],
     )
-  ])
+  ]...)
 
   lambda_async_age_metrics = [
     for key, name in local.function_names : [
@@ -152,7 +152,7 @@ locals {
     for name in values(local.runtime_table_names) : "TableName = '${name}'"
   ])
 
-  dynamodb_retry_metrics = flatten([
+  dynamodb_retry_metrics = concat([
     for key, name in local.runtime_table_names : [
       [
         "AWS/DynamoDB",
@@ -188,7 +188,19 @@ locals {
         },
       ],
     ]
-  ])
+  ]...)
+}
+
+check "dashboard_generated_metrics_are_rows" {
+  assert {
+    condition = alltrue(concat(
+      [for row in local.lambda_compute_rate_metrics : can(row[0])],
+      [for row in local.lambda_error_rate_metrics : can(row[0])],
+      [for row in local.lambda_failure_count_metrics : can(row[0])],
+      [for row in local.dynamodb_retry_metrics : can(row[0])],
+    ))
+    error_message = "Every generated CloudWatch metric entry must remain an array row. Do not recursively flatten dashboard metrics."
+  }
 }
 
 resource "aws_cloudwatch_metric_alarm" "registration_dlq_not_empty" {

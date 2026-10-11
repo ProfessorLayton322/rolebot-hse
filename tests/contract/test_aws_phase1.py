@@ -157,6 +157,26 @@ def test_aws_dashboard_covers_compute_errors_and_retry_storms() -> None:
     assert 'output "cloudwatch_operations_dashboard_url"' in outputs
 
 
+def test_generated_cloudwatch_metrics_preserve_row_arrays() -> None:
+    monitoring = (APPLICATION / "monitoring.tf").read_text()
+    terraform_test = (APPLICATION / "tests/monitoring.tftest.hcl").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+
+    assert "flatten([" not in monitoring
+    for generated_rows in (
+        "lambda_compute_rate_metrics",
+        "lambda_error_rate_metrics",
+        "lambda_failure_count_metrics",
+        "dynamodb_retry_metrics",
+    ):
+        assert re.search(rf"{generated_rows}\s*=\s*concat\(\[", monitoring)
+        assert f"[for row in local.{generated_rows} : can(row[0])]" in monitoring
+    assert 'check "dashboard_generated_metrics_are_rows"' in monitoring
+    assert "jsondecode(aws_cloudwatch_dashboard.operations.dashboard_body).widgets" in terraform_test
+    assert "can(row[0])" in terraform_test
+    assert "- run: terraform test" in workflow
+
+
 def test_ssm_secrets_never_flow_through_terraform_inputs() -> None:
     terraform = _application_terraform()
     locals_config = (APPLICATION / "locals.tf").read_text()

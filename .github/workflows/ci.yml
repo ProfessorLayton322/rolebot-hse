@@ -127,6 +127,8 @@ jobs:
         working-directory: infra/aws/application
       - run: terraform validate
         working-directory: infra/aws/application
+      - run: terraform test
+        working-directory: infra/aws/application
       - run: python scripts/check_storage_constraint.py
 
   secrets-scan:
