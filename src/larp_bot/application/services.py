@@ -59,6 +59,7 @@ from .ports import (
     TelegramChatGateway,
     UserRepository,
 )
+from .table_links import public_table_links
 
 LOGGER = logging.getLogger("larp_bot.application.services")
 
@@ -368,7 +369,14 @@ class RegistrationCatalog:
                 secret=self.participant_secret,
                 active_keys=active_keys,
             )
-        await self.showcase.replace(event, rows, needs_pass_by_key=answers)
+        urls = await self.showcase.replace(event, rows, needs_pass_by_key=answers)
+        if urls is not None and any(key.startswith("google:") for key in urls):
+            await self.events.set_google_table_links(
+                event.event_id,
+                master_url=urls.get("google:master"),
+                public_url=urls.get("google:public"),
+            )
+            event = await self.events.get(event.event_id) or event
         return event, rows
 
     async def archive(self, event: Event) -> None:
@@ -1141,6 +1149,10 @@ class EventAdministrationService:
     def deferred_uploads(self) -> bool:
         return self.showcase.deferred_uploads
 
+    @property
+    def mirrors_google_tables(self) -> bool:
+        return bool(getattr(self.showcase, "mirrors_google_tables", False))
+
     async def create_event(
         self,
         name: str,
@@ -1262,12 +1274,15 @@ class EventAdministrationService:
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> Event:
         event = await self.catalog.ensure_migrated(event)
-        return await self.catalog.ensure_public_table(
+        event = await self.catalog.ensure_public_table(
             event,
             requester=requester,
             reply_user_id=reply_user_id,
             before_invoke=before_invoke,
         )
+        if event.public_table_public_url is None:
+            return event
+        return await self.catalog.refresh(event)
 
     async def _registration_page(
         self,
@@ -1667,7 +1682,9 @@ class EventAdministrationService:
                 self.users,
                 self.participant_secret,
             )
-            await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+            google_url = await self.showcase.replace_pass_table(event.pass_table_resource_path, profiles)
+            if google_url is not None:
+                await self.events.set_google_table_links(event.event_id, pass_url=google_url)
         await self.refresh_daily_pass_table(event.game_date)
 
     async def export_achievements(
@@ -1955,7 +1972,7 @@ def enlistment_success_text(
             f"Вы записались на игру {event_reference(event.name, event.game_date)}!\n\n"
             "Сейчас вы в основном составе.\n\n"
             "Актуальный список записавшихся и состав можно посмотреть здесь: "
-            f"{event.public_table_public_url}"
+            f"{public_table_links(event).for_player()}"
         )
     else:
         cancellations_needed = queue_position - event.player_amount
@@ -1964,7 +1981,7 @@ def enlistment_success_text(
             f"Сейчас вы в запасе. Перед вами: {cancellations_needed}.\n\n"
             "Если вы перейдёте в основной состав, бот сообщит об этом отдельным сообщением.\n\n"
             "Актуальный список записавшихся и состав можно посмотреть здесь: "
-            f"{event.public_table_public_url}"
+            f"{public_table_links(event).for_player()}"
         )
     if event.status is EventStatus.CONFIRMATION_OPEN:
         deadline_text = (
@@ -2252,7 +2269,7 @@ class ConfirmationNotificationService:
                 f"{event_reference(event.name, event.game_date)}.\n\n"
                 "После подтверждения участия мастера отправят вам ссылку на чат игры отдельным сообщением.\n\n"
                 "Посмотрите актуальный состав игроков: "
-                f"{event.public_table_public_url}"
+                f"{public_table_links(event).for_player()}"
             ),
             buttons=[main_menu_button()],
         )
@@ -2630,7 +2647,7 @@ class ConfirmationNotificationService:
                     "Количество мест увеличилось: вы перешли из запаса в основной состав игры "
                     f"{event_reference(event.name, event.game_date)}.\n\n"
                     "Посмотрите актуальный состав игроков: "
-                    f"{event.public_table_public_url}"
+                    f"{public_table_links(event).for_player()}"
                 )
             ]
             registration = registrations.get(key)
@@ -2781,7 +2798,7 @@ class ConfirmationNotificationService:
                         "Вы перешли из запаса в основной состав игры "
                         f"{event_reference(event.name, event.game_date)}.\n\n"
                         "Посмотрите актуальный состав игроков: "
-                        f"{event.public_table_public_url}"
+                        f"{public_table_links(event).for_player()}"
                     ),
                     *(confirmed_notification_text(event.name, link, event.game_date) for link in chat_links),
                 ]

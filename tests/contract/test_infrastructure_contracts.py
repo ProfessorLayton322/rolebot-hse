@@ -183,7 +183,7 @@ def test_yandex_disk_uploads_run_asynchronously_in_the_low_memory_go_function() 
     assert functions.count("time_sleep.async_invoker_ready") == 2
     assert 'async_function_revision = "async-iam-ready-v1"' in functions
     assert functions.count("local.async_function_revision") == 2
-    assert 'stagingPrefix    = "larp-bot/uploads/"' in go_uploader
+    assert re.search(r'stagingPrefix\s+= "larp-bot/uploads/"', go_uploader)
     assert 'json:"object_version,omitempty"' in go_uploader
     assert 'params={"versionId": str(file["object_version"])}' in staging
     assert "resources/upload" in go_uploader

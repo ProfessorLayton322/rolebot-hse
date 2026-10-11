@@ -393,14 +393,26 @@ class FakeResponse:
 
 
 class FakeDriveSession:
-    def __init__(self, files: list[dict[str, str]]) -> None:
+    def __init__(self, files: list[dict[str, str]], *, permissions: list[dict[str, str]] | None = None) -> None:
         self.files = files
+        self.permissions = permissions or []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
     def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
         self.calls.append((method, url, kwargs))
-        if url.endswith("/files"):
+        if method == "GET" and url.endswith("/files"):
             return FakeResponse(payload={"files": self.files})
+        if method == "POST" and url.endswith("/files"):
+            return FakeResponse(
+                payload={
+                    "id": "created-id",
+                    "name": "events — event-id — public.xlsx",
+                    "mimeType": XLSX_MIME_TYPE,
+                    "webViewLink": "https://drive.example/created-id",
+                }
+            )
+        if method == "GET" and url.endswith("/permissions"):
+            return FakeResponse(payload={"permissions": self.permissions})
         if method == "GET":
             return FakeResponse(content=b"workbook")
         return FakeResponse(payload={})
@@ -448,6 +460,51 @@ async def test_drive_client_requires_exactly_one_xlsx_with_the_fixed_name() -> N
     )
     with pytest.raises(DomainError, match="XLSX"):
         await wrong_type.find_file("folder", ATTENDANCE_FILE_NAME)
+
+
+async def test_drive_client_creates_and_replaces_mirrored_xlsx_files() -> None:
+    name = "events — event-id — public.xlsx"
+    missing_session = FakeDriveSession([])
+    created = await GoogleDriveRestClient("unused", missing_session).upsert_xlsx("folder", name, b"new workbook")
+
+    assert created.file_id == "created-id"
+    create_call = missing_session.calls[1]
+    assert create_call[0:2] == ("POST", "https://www.googleapis.com/upload/drive/v3/files")
+    assert create_call[2]["params"]["uploadType"] == "multipart"
+    assert b"new workbook" in create_call[2]["data"]
+    assert name.encode() in create_call[2]["data"]
+
+    existing_session = FakeDriveSession(
+        [
+            {
+                "id": "existing-id",
+                "name": name,
+                "mimeType": XLSX_MIME_TYPE,
+                "webViewLink": "https://drive.example/existing-id",
+            }
+        ]
+    )
+    existing = await GoogleDriveRestClient("unused", existing_session).upsert_xlsx("folder", name, b"replacement")
+    assert existing.file_id == "existing-id"
+    assert existing_session.calls[1][0] == "PATCH"
+    assert existing_session.calls[1][2]["data"] == b"replacement"
+
+
+async def test_drive_client_makes_player_facing_file_public_once() -> None:
+    private_session = FakeDriveSession([])
+    client = GoogleDriveRestClient("unused", private_session)
+    await client.publish_file("table/id")
+
+    assert private_session.calls[0][0:2] == (
+        "GET",
+        "https://www.googleapis.com/drive/v3/files/table%2Fid/permissions",
+    )
+    assert private_session.calls[1][0] == "POST"
+    assert private_session.calls[1][2]["json"] == {"type": "anyone", "role": "reader"}
+
+    public_session = FakeDriveSession([], permissions=[{"type": "anyone", "role": "reader"}])
+    await GoogleDriveRestClient("unused", public_session).publish_file("table-id")
+    assert [call[0] for call in public_session.calls] == ["GET"]
 
 
 def test_invalid_service_account_json_is_rejected_without_exposing_its_contents() -> None:

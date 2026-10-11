@@ -309,6 +309,88 @@ func TestFailedCallbackJobDeletesItsExactStagedVersion(t *testing.T) {
 	}
 }
 
+func TestGoogleMirroredJobCompletesWhenYandexTokenIsUnavailable(t *testing.T) {
+	jobID := "12345678-1234-1234-1234-123456789abc"
+	objectKey := stagingPrefix + jobID + "/public.xlsx"
+	completionSeen := false
+	stagedDeleted := false
+	var completionPayload completion
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/metadata":
+			io.WriteString(writer, `{"access_token":"iam-token"}`)
+		case request.URL.Path == "/token":
+			io.WriteString(writer, `{"access_token":"identity-token"}`)
+		case request.URL.Path == "/config":
+			io.WriteString(writer, `{"values":{}}`)
+		case request.Method == http.MethodPost && request.URL.Path == "/completion":
+			completionSeen = true
+			if err := json.NewDecoder(request.Body).Decode(&completionPayload); err != nil {
+				t.Fatal(err)
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		case request.Method == http.MethodDelete && request.URL.Path == "/private-bucket/"+objectKey:
+			stagedDeleted = true
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", request.Method, request.URL.String())
+			http.Error(writer, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	service := uploaderService{
+		env: environment{
+			Bucket:                  "private-bucket",
+			RuntimeConfigURL:        server.URL + "/config",
+			RuntimeConfigAudience:   "https://config.example",
+			RuntimeServiceAccountID: "service-account-id",
+			CompletionFunctionURL:   server.URL + "/completion",
+		},
+		client:     server.Client(),
+		metadata:   server.URL + "/metadata",
+		tokenURL:   server.URL + "/token",
+		storageURL: server.URL,
+	}
+	job := uploadJob{
+		SchemaVersion: 1,
+		JobID:         jobID,
+		Bucket:        "private-bucket",
+		Files: []uploadFile{{
+			Role:           "public",
+			ObjectKey:      objectKey,
+			ObjectVersion:  "staged-version",
+			DiskPath:       "disk:/larp-bot/events/game/public.xlsx",
+			ContentType:    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			SHA256:         strings.Repeat("a", 64),
+			Generation:     "00000000000000000001-job",
+			Publish:        true,
+			GoogleMirrored: true,
+			GoogleURL:      "https://drive.example/public",
+		}},
+		Callback: map[string]any{
+			"kind": "event_tables",
+			"google_public_urls": map[string]any{
+				"public": "https://drive.example/public",
+			},
+		},
+	}
+
+	if err := service.process(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if !completionSeen || completionPayload.Success {
+		t.Fatalf("unexpected completion payload: %#v", completionPayload)
+	}
+	if completionPayload.Error != "runtime configuration has no Yandex Disk token" {
+		t.Fatalf("unexpected optional Yandex error: %q", completionPayload.Error)
+	}
+	if !stagedDeleted {
+		t.Fatal("Google-mirrored job left its staged object behind")
+	}
+}
+
 func TestStaleDestinationLockIsTakenOverConditionally(t *testing.T) {
 	jobID := "12345678-1234-1234-1234-123456789abc"
 	diskPath := "disk:/larp-bot/events/game.xlsx"

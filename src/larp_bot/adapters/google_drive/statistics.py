@@ -6,6 +6,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from urllib.parse import quote
+from uuid import uuid4
 
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
@@ -38,6 +39,19 @@ class _DriveFileList(BaseModel):
     files: list[DriveFile]
 
 
+class _DrivePermission(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    permission_type: str = Field(alias="type")
+    role: str
+
+
+class _DrivePermissionList(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    permissions: list[_DrivePermission] = Field(default_factory=list)
+
+
 class DriveResponse(Protocol):
     @property
     def content(self) -> bytes: ...
@@ -57,6 +71,14 @@ class DriveStorage(Protocol):
     async def download(self, file_id: str) -> bytes: ...
 
     async def replace(self, file_id: str, content: bytes) -> None: ...
+
+    async def upsert_xlsx(self, folder_id: str, name: str, content: bytes) -> DriveFile: ...
+
+    async def delete_named_xlsx(self, folder_id: str, name: str) -> None: ...
+
+    async def named_xlsx_exists(self, folder_id: str, name: str) -> bool: ...
+
+    async def publish_file(self, file_id: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -91,6 +113,17 @@ class GoogleDriveRestClient:
         return await asyncio.to_thread(self.session.request, method, url, timeout=30, **kwargs)
 
     async def find_file(self, folder_id: str, name: str) -> DriveFile:
+        files = await self._find_files(folder_id, name)
+        if not files:
+            raise DomainError(f"Файл {name} не найден в настроенной папке Google Drive.")
+        if len(files) > 1:
+            raise DomainError(f"В настроенной папке Google Drive найдено несколько файлов {name}.")
+        file = files[0]
+        if file.mime_type != XLSX_MIME_TYPE:
+            raise DomainError(f"Файл {name} должен быть файлом XLSX.")
+        return file
+
+    async def _find_files(self, folder_id: str, name: str) -> list[DriveFile]:
         query = (
             f"'{_drive_query_literal(folder_id)}' in parents and "
             f"name = '{_drive_query_literal(name)}' and trashed = false"
@@ -112,14 +145,7 @@ class GoogleDriveRestClient:
             files = _DriveFileList.model_validate(response.json()).files
         except ValidationError as exc:
             raise RuntimeError("Google Drive returned invalid file metadata") from exc
-        if not files:
-            raise DomainError(f"Файл {name} не найден в настроенной папке Google Drive.")
-        if len(files) > 1:
-            raise DomainError(f"В настроенной папке Google Drive найдено несколько файлов {name}.")
-        file = files[0]
-        if file.mime_type != XLSX_MIME_TYPE:
-            raise DomainError(f"Файл {name} должен быть файлом XLSX.")
-        return file
+        return files
 
     async def download(self, file_id: str) -> bytes:
         response = await self._request(
@@ -137,6 +163,99 @@ class GoogleDriveRestClient:
             params={"uploadType": "media", "supportsAllDrives": "true"},
             headers={"Content-Type": XLSX_MIME_TYPE},
             data=content,
+        )
+        response.raise_for_status()
+
+    async def _create_xlsx(self, folder_id: str, name: str, content: bytes) -> DriveFile:
+        boundary = f"rolebot-{uuid4().hex}"
+        metadata = json.dumps(
+            {"name": name, "mimeType": XLSX_MIME_TYPE, "parents": [folder_id]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        body = b"".join(
+            (
+                f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode(),
+                metadata,
+                f"\r\n--{boundary}\r\nContent-Type: {XLSX_MIME_TYPE}\r\n\r\n".encode(),
+                content,
+                f"\r\n--{boundary}--\r\n".encode(),
+            )
+        )
+        response = await self._request(
+            "POST",
+            f"{DRIVE_UPLOAD_API}/files",
+            params={
+                "uploadType": "multipart",
+                "supportsAllDrives": "true",
+                "fields": "id,name,mimeType,webViewLink",
+            },
+            headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
+            data=body,
+        )
+        response.raise_for_status()
+        try:
+            return DriveFile.model_validate(response.json())
+        except ValidationError as exc:
+            raise RuntimeError("Google Drive returned invalid created-file metadata") from exc
+
+    async def upsert_xlsx(self, folder_id: str, name: str, content: bytes) -> DriveFile:
+        files = await self._find_files(folder_id, name)
+        if len(files) > 1:
+            raise RuntimeError(f"Google Drive contains duplicate mirrored table {name}")
+        if not files:
+            return await self._create_xlsx(folder_id, name, content)
+        file = files[0]
+        if file.mime_type != XLSX_MIME_TYPE:
+            raise RuntimeError(f"Google Drive mirror destination {name} is not XLSX")
+        await self.replace(file.file_id, content)
+        return file
+
+    async def delete_named_xlsx(self, folder_id: str, name: str) -> None:
+        files = await self._find_files(folder_id, name)
+        for file in files:
+            if file.mime_type != XLSX_MIME_TYPE:
+                raise RuntimeError(f"Google Drive mirror destination {name} is not XLSX")
+            response = await self._request(
+                "DELETE",
+                f"{DRIVE_API}/files/{quote(file.file_id, safe='')}",
+                params={"supportsAllDrives": "true"},
+            )
+            response.raise_for_status()
+
+    async def named_xlsx_exists(self, folder_id: str, name: str) -> bool:
+        files = await self._find_files(folder_id, name)
+        if len(files) > 1:
+            raise RuntimeError(f"Google Drive contains duplicate mirrored table {name}")
+        if not files:
+            return False
+        if files[0].mime_type != XLSX_MIME_TYPE:
+            raise RuntimeError(f"Google Drive mirror destination {name} is not XLSX")
+        return True
+
+    async def publish_file(self, file_id: str) -> None:
+        encoded_id = quote(file_id, safe="")
+        response = await self._request(
+            "GET",
+            f"{DRIVE_API}/files/{encoded_id}/permissions",
+            params={
+                "supportsAllDrives": "true",
+                "fields": "permissions(type,role)",
+            },
+        )
+        response.raise_for_status()
+        try:
+            permissions = _DrivePermissionList.model_validate(response.json()).permissions
+        except ValidationError as exc:
+            raise RuntimeError("Google Drive returned invalid permission metadata") from exc
+        if any(permission.permission_type == "anyone" and permission.role == "reader" for permission in permissions):
+            return
+        response = await self._request(
+            "POST",
+            f"{DRIVE_API}/files/{encoded_id}/permissions",
+            params={"supportsAllDrives": "true"},
+            headers={"Content-Type": "application/json"},
+            json={"type": "anyone", "role": "reader"},
         )
         response.raise_for_status()
 

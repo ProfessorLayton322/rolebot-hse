@@ -745,11 +745,13 @@ async def test_pass_table_link_is_persisted_once_on_the_event() -> None:
         "event-a1",
         "disk:/larp-bot/passes/event-a1.xlsx",
         "https://disk.example/pass",
+        "https://drive.example/pass",
     )
 
     assert "pass_table_public_url IS NULL" in executor.query_text
     assert executor.params["$resource_path"] == "disk:/larp-bot/passes/event-a1.xlsx"
     assert executor.params["$public_url"] == "https://disk.example/pass"
+    assert executor.params["$google_url"] == "https://drive.example/pass"
 
 
 @pytest.mark.asyncio
@@ -815,8 +817,10 @@ async def test_public_game_table_link_is_persisted_once_on_the_event() -> None:
         "event-a1",
         "disk:/larp-bot/events/event-a1/public_table_Game.xlsx",
         "https://disk.example/public-game",
+        "https://drive.example/public-game",
     )
 
     assert "public_table_public_url IS NULL" in executor.query_text
     assert executor.params["$resource_path"].endswith("/public_table_Game.xlsx")
     assert executor.params["$public_url"] == "https://disk.example/public-game"
+    assert executor.params["$google_url"] == "https://drive.example/public-game"

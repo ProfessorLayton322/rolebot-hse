@@ -523,7 +523,13 @@ class MemoryEventRepository:
         event.registrations_migrated_at = migrated_at
         event.updated_at = migrated_at
 
-    async def set_public_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+    async def set_public_table(
+        self,
+        event_id: str,
+        resource_path: str,
+        public_url: str,
+        google_url: str | None = None,
+    ) -> bool:
         event = self.rows.get(event_id)
         if event is None or event.public_table_public_url is not None:
             return False
@@ -532,6 +538,7 @@ class MemoryEventRepository:
             | {
                 "public_table_resource_path": resource_path,
                 "public_table_public_url": public_url,
+                "public_table_google_url": google_url,
                 "updated_at": datetime.now(event.updated_at.tzinfo),
             }
         )
@@ -564,7 +571,13 @@ class MemoryEventRepository:
         )
         return True
 
-    async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+    async def set_pass_table(
+        self,
+        event_id: str,
+        resource_path: str,
+        public_url: str,
+        google_url: str | None = None,
+    ) -> bool:
         event = self.rows.get(event_id)
         if event is None or event.pass_table_public_url is not None:
             return False
@@ -573,6 +586,29 @@ class MemoryEventRepository:
             | {
                 "pass_table_resource_path": resource_path,
                 "pass_table_public_url": public_url,
+                "pass_table_google_url": google_url,
+                "updated_at": datetime.now(event.updated_at.tzinfo),
+            }
+        )
+        return True
+
+    async def set_google_table_links(
+        self,
+        event_id: str,
+        *,
+        master_url: str | None = None,
+        public_url: str | None = None,
+        pass_url: str | None = None,
+    ) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "master_table_google_url": master_url or event.master_table_google_url,
+                "public_table_google_url": public_url or event.public_table_google_url,
+                "pass_table_google_url": pass_url or event.pass_table_google_url,
                 "updated_at": datetime.now(event.updated_at.tzinfo),
             }
         )

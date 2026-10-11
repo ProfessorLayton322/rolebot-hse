@@ -91,8 +91,9 @@ func awsUploaderFromEnvironment(ctx context.Context) (*awsUploaderService, error
 		s3:  s3.NewFromConfig(config),
 		ssm: ssm.NewFromConfig(config),
 		disk: &uploaderService{
-			client:  client,
-			diskAPI: yandexDiskAPI,
+			client:     client,
+			diskClient: &http.Client{Timeout: yandexDiskTimeout},
+			diskAPI:    yandexDiskAPI,
 		},
 	}
 	return defaultAWSUploader, nil
@@ -434,18 +435,55 @@ func (service *awsUploaderService) invokeCompletion(ctx context.Context, payload
 	return err
 }
 
+func (service *awsUploaderService) cleanupStaged(ctx context.Context, job uploadJob) {
+	for _, file := range job.Files {
+		if err := service.deleteVersion(ctx, job.Bucket, file.ObjectKey, file.ObjectVersion); err != nil {
+			fmt.Printf("delete staged S3 object after optional Yandex failure for job %s: %v\n", job.JobID, err)
+		}
+	}
+}
+
+func (service *awsUploaderService) completeOptionalYandexFailure(
+	ctx context.Context,
+	job uploadJob,
+	publicURLs map[string]string,
+	cause error,
+) error {
+	if job.Callback != nil {
+		if err := service.invokeCompletion(ctx, completion{
+			SchemaVersion: 1,
+			JobID:         job.JobID,
+			Success:       false,
+			PublicURLs:    publicURLs,
+			Callback:      job.Callback,
+			Error:         cause.Error(),
+		}); err != nil {
+			return err
+		}
+	}
+	service.cleanupStaged(ctx, job)
+	return nil
+}
+
 func (service *awsUploaderService) process(ctx context.Context, job uploadJob) error {
 	if job.Bucket != service.env.Bucket {
 		return errors.New("upload job uses an unexpected S3 bucket")
 	}
 	diskToken, err := service.runtimeDiskToken(ctx)
 	if err != nil {
+		if googleMirrorCompleted(job) {
+			return service.completeOptionalYandexFailure(ctx, job, map[string]string{}, err)
+		}
 		return err
 	}
 	publicURLs := make(map[string]string)
 	for _, file := range job.Files {
 		var publicURL string
-		for attempt := 0; attempt < 3; attempt++ {
+		attempts := 3
+		if file.GoogleMirrored {
+			attempts = 1
+		}
+		for attempt := 0; attempt < attempts; attempt++ {
 			publicURL, err = service.uploadOne(ctx, job.Bucket, file, diskToken)
 			if err == nil {
 				break
@@ -453,6 +491,9 @@ func (service *awsUploaderService) process(ctx context.Context, job uploadJob) e
 			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
 		}
 		if err != nil {
+			if googleMirrorCompleted(job) {
+				return service.completeOptionalYandexFailure(ctx, job, publicURLs, err)
+			}
 			if errors.Is(err, errDestinationBusy) || job.Callback == nil {
 				return err
 			}
@@ -466,16 +507,7 @@ func (service *awsUploaderService) process(ctx context.Context, job uploadJob) e
 			}); completionErr != nil {
 				return completionErr
 			}
-			for _, stagedFile := range job.Files {
-				if cleanupErr := service.deleteVersion(
-					ctx,
-					job.Bucket,
-					stagedFile.ObjectKey,
-					stagedFile.ObjectVersion,
-				); cleanupErr != nil {
-					fmt.Printf("delete staged S3 object after failed job %s: %v\n", job.JobID, cleanupErr)
-				}
-			}
+			service.cleanupStaged(ctx, job)
 			return nil
 		}
 		if file.Publish {

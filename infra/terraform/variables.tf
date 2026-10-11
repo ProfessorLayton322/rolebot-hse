@@ -137,7 +137,7 @@ variable "labels" {
 }
 
 variable "google_folder_id" {
-  description = "Google Drive folder containing the permanent statistics workbooks."
+  description = "Google Drive folder containing permanent statistics workbooks and generated XLSX mirrors."
   type        = string
   validation {
     condition     = length(trimspace(var.google_folder_id)) > 0

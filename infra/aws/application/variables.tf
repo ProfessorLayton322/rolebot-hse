@@ -56,7 +56,7 @@ variable "cloudflare_workers_subdomain" {
 }
 
 variable "google_folder_id" {
-  description = "Existing Google Drive folder used by statistics exports."
+  description = "Existing Google Drive folder used by statistics workbooks and generated XLSX mirrors."
   type        = string
 }
 

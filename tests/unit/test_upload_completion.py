@@ -13,6 +13,7 @@ from larp_bot.adapters.memory import (
     StaticAdminProvider,
 )
 from larp_bot.application.services import daily_pass_table_path
+from larp_bot.application.table_links import YANDEX_UPLOAD_FAILED, public_table_links
 from larp_bot.application.upload_completion import UploadCompletionService
 from larp_bot.domain.models import DailyPassRefreshPayload, Event, Operation, Platform, TelegramUser
 
@@ -73,6 +74,68 @@ async def test_completion_creates_event_and_sends_links_once() -> None:
     assert len(publisher.commands) == 1
     assert publisher.commands[0].operation is Operation.REFRESH_DAILY_PASS_TABLE
     assert publisher.commands[0].payload == DailyPassRefreshPayload(game_date=date(2026, 10, 10))
+
+
+@pytest.mark.asyncio
+async def test_yandex_failure_keeps_google_tables_and_marks_only_admin_output() -> None:
+    events = MemoryEventRepository()
+    users = MemoryUserRepository()
+    await users.save(TelegramUser(tg_id=42))
+    transport = MemoryDeferredTransport()
+    service = UploadCompletionService(
+        events,
+        users,
+        StaticAdminProvider(secrets={"TG_BOT_USERNAME": "role_bot", "VK_GROUP_ID": "123"}),
+        transport,
+        MemoryCommandPublisher(),
+    )
+    google = {
+        "master": "https://drive.example/master",
+        "public": "https://drive.example/public",
+        "pass": "https://drive.example/pass",
+    }
+    await service.handle(
+        {
+            "schema_version": 1,
+            "job_id": "12345678-1234-1234-1234-123456789abc",
+            "success": False,
+            "public_urls": {"master": "https://disk.example/master"},
+            "error": "Yandex Disk timed out",
+            "callback": {
+                "kind": "event_created",
+                "google_public_urls": google,
+                "event": {
+                    "event_id": "event-1234",
+                    "name": "Осенняя игра",
+                    "game_date": "2026-10-10",
+                    "player_amount": 30,
+                    "disk_resource_path": "disk:/larp-bot/events/event-1234/master.xlsx",
+                    "public_table_resource_path": "disk:/larp-bot/events/event-1234/public.xlsx",
+                    "pass_table_resource_path": "disk:/larp-bot/passes/event-1234.xlsx",
+                    "registration_open_at": None,
+                    "signup_token": "signup-token",
+                },
+                "leaders": [],
+                "requester": {"platform": "telegram", "user_id": 42, "profile_user_id": 42},
+            },
+        }
+    )
+
+    event = await events.get("event-1234")
+    assert event is not None
+    assert event.master_table_google_url == google["master"]
+    assert event.public_table_google_url == google["public"]
+    assert event.pass_table_google_url == google["pass"]
+    assert event.public_registration_url == "https://disk.example/master"
+    assert event.public_table_public_url == google["public"]
+    assert event.pass_table_public_url == google["pass"]
+
+    admin_text = transport.sent[0][3]
+    assert admin_text.count(YANDEX_UPLOAD_FAILED) == 2
+    assert admin_text.index(google["master"]) < admin_text.index("https://disk.example/master")
+    player_text = public_table_links(event).for_player()
+    assert player_text == f"Google Drive: {google['public']}"
+    assert YANDEX_UPLOAD_FAILED not in player_text
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,11 @@ from larp_bot.adapters.aws import (
     SqsFifoCommandPublisher,
     SsmRuntimeConfigProvider,
 )
-from larp_bot.adapters.google_drive import GoogleDriveRestClient, GoogleDriveStatisticsRepository
+from larp_bot.adapters.google_drive import (
+    GoogleDriveMirroredUploader,
+    GoogleDriveRestClient,
+    GoogleDriveStatisticsRepository,
+)
 from larp_bot.adapters.transports import CloudflareTelegramEgress, MultiplexedDeferredTransport, VkApiTransport
 from larp_bot.adapters.yandex_disk.repository import YandexDiskRestClient, YandexDiskShowcaseRepository
 from larp_bot.application.chat_management import TelegramChatManagementService
@@ -82,8 +86,9 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         bucket=settings.aws_storage_bucket,
         function_name=settings.aws_disk_uploader_function,
     )
-    showcase = YandexDiskShowcaseRepository(disk, disk_uploader)
     google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    mirrored_uploader = GoogleDriveMirroredUploader(disk_uploader, google_drive, settings.google_folder_id)
+    showcase = YandexDiskShowcaseRepository(disk, mirrored_uploader)
     player_statistics = GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id)
     master_statistics = GoogleDriveStatisticsRepository.masters(google_drive, settings.google_folder_id)
     publisher = SqsFifoCommandPublisher(boto3.client("sqs"), settings.aws_fifo_queue_url)
@@ -174,7 +179,7 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         events=events,
         registrations=registrations,
         showcase=showcase,
-        disk_uploader=cast(MutableDiskUploader, disk_uploader),
+        disk_uploader=cast(MutableDiskUploader, mirrored_uploader),
         publisher=cast(ContinuableOrderedCommandPublisher, publisher),
         transport=transport,
         telegram_chat_management=telegram_chat_management,

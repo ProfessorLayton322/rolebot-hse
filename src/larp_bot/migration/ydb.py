@@ -95,8 +95,10 @@ _EVENT_UPSERT = """
     DECLARE $telegram_chat_id AS Optional<Int64>;
     DECLARE $telegram_chat_invite_link AS Optional<Utf8>;
     DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
+    DECLARE $master_table_google_url AS Optional<Utf8>;
     DECLARE $public_table_resource_path AS Optional<Utf8>;
     DECLARE $public_table_public_url AS Optional<Utf8>; DECLARE $status AS Utf8;
+    DECLARE $public_table_google_url AS Optional<Utf8>;
     DECLARE $registration_open_at AS Optional<Timestamp>;
     DECLARE $registration_open_notified_recipients_json AS Utf8;
     DECLARE $registration_open_notification_completed_at AS Optional<Timestamp>;
@@ -109,6 +111,7 @@ _EVENT_UPSERT = """
     DECLARE $registrations_migrated_at AS Optional<Timestamp>;
     DECLARE $pass_table_resource_path AS Optional<Utf8>;
     DECLARE $pass_table_public_url AS Optional<Utf8>;
+    DECLARE $pass_table_google_url AS Optional<Utf8>;
     DECLARE $achievement_resource_path AS Optional<Utf8>;
     DECLARE $achievement_public_url AS Optional<Utf8>;
     DECLARE $confirmed_notifications_json AS Utf8;
@@ -127,12 +130,13 @@ _EVENT_UPSERT = """
     UPSERT INTO `events` (
         event_id, name, game_date, player_amount, signup_token, telegram_post_url, vk_post_url,
         telegram_chat_id, telegram_chat_invite_link, disk_resource_path, public_registration_url,
-        public_table_resource_path, public_table_public_url, status, registration_open_at,
+        master_table_google_url, public_table_resource_path, public_table_public_url,
+        public_table_google_url, status, registration_open_at,
         registration_open_notified_recipients_json, registration_open_notification_completed_at,
         confirmation_open_at, scheduled_close_at, scheduled_close_operation_id,
         scheduled_close_notified_recipients_json, scheduled_close_completed_at,
         confirmation_deadline, registrations_migrated_at, pass_table_resource_path,
-        pass_table_public_url, achievement_resource_path, achievement_public_url,
+        pass_table_public_url, pass_table_google_url, achievement_resource_path, achievement_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
         last_reserve_promotion_delivered_operation_id, last_confirmed_link_promotion_operation_id,
@@ -143,12 +147,13 @@ _EVENT_UPSERT = """
     ) VALUES (
         $event_id, $name, $game_date, $player_amount, $signup_token, $telegram_post_url, $vk_post_url,
         $telegram_chat_id, $telegram_chat_invite_link, $disk_resource_path, $public_url,
-        $public_table_resource_path, $public_table_public_url, $status, $registration_open_at,
+        $master_table_google_url, $public_table_resource_path, $public_table_public_url,
+        $public_table_google_url, $status, $registration_open_at,
         $registration_open_notified_recipients_json, $registration_open_notification_completed_at,
         $confirmation_open_at, $scheduled_close_at, $scheduled_close_operation_id,
         $scheduled_close_notified_recipients_json, $scheduled_close_completed_at,
         $confirmation_deadline, $registrations_migrated_at, $pass_table_resource_path,
-        $pass_table_public_url, $achievement_resource_path, $achievement_public_url,
+        $pass_table_public_url, $pass_table_google_url, $achievement_resource_path, $achievement_public_url,
         $confirmed_notifications_json, $last_confirmed_notification_operation_id,
         $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
         $last_reserve_promotion_delivered_operation_id, $last_confirmed_link_promotion_operation_id,
@@ -328,8 +333,10 @@ def _event_params(event: Event) -> dict[str, Any]:
         "$telegram_chat_invite_link": event.telegram_chat_invite_link,
         "$disk_resource_path": event.disk_resource_path,
         "$public_url": event.public_registration_url,
+        "$master_table_google_url": event.master_table_google_url,
         "$public_table_resource_path": event.public_table_resource_path,
         "$public_table_public_url": event.public_table_public_url,
+        "$public_table_google_url": event.public_table_google_url,
         "$status": event.status.value,
         "$registration_open_at": event.registration_open_at,
         "$registration_open_notified_recipients_json": json.dumps(
@@ -347,6 +354,7 @@ def _event_params(event: Event) -> dict[str, Any]:
         "$registrations_migrated_at": event.registrations_migrated_at,
         "$pass_table_resource_path": event.pass_table_resource_path,
         "$pass_table_public_url": event.pass_table_public_url,
+        "$pass_table_google_url": event.pass_table_google_url,
         "$achievement_resource_path": event.achievement_resource_path,
         "$achievement_public_url": event.achievement_public_url,
         "$confirmed_notifications_json": json.dumps(

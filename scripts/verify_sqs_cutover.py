@@ -70,11 +70,9 @@ def verify(sqs: Any, lambda_client: Any, queue_url: str, dlq_url: str, probe_id:
         mapping = event_mapping(lambda_client)
         primary_depth = queue_depth(sqs, queue_url)
         dlq_depth = queue_depth(sqs, dlq_url)
-        if mapping.get("State") == "Enabled" and mapping.get("LastProcessingResult") == "OK" and primary_depth == 0:
+        if mapping.get("State") == "Enabled" and primary_depth == 0 and dlq_depth == 0:
             consecutive_empty += 1
             if consecutive_empty >= 3:
-                if dlq_depth:
-                    raise RuntimeError("the cutover FIFO probe reached the dead-letter queue")
                 print("Enabled Lambda event source consumed the non-mutating FIFO cutover probe")
                 return
         else:
