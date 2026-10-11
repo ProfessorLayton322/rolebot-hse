@@ -116,18 +116,17 @@ class RegistrationCatalog:
         if rows is None:
             rows = list(await self.registrations.list_for_event(event.event_id))
         _, disk_path = event_table_paths(event.event_id, event.name)
-        callback: dict[str, object] | None = None
+        callback: dict[str, object] = {
+            "kind": "event_tables",
+            "event_id": event.event_id,
+            "resource_path": disk_path,
+            "component": "public",
+        }
         if requester is not None:
-            callback = {
-                "kind": "event_tables",
-                "event_id": event.event_id,
-                "resource_path": disk_path,
-                "component": "public",
-                "requester": {
-                    "platform": requester.platform.value,
-                    "user_id": reply_user_id or requester.platform_user_id,
-                    "profile_user_id": requester.platform_user_id,
-                },
+            callback["requester"] = {
+                "platform": requester.platform.value,
+                "user_id": reply_user_id or requester.platform_user_id,
+                "profile_user_id": requester.platform_user_id,
             }
         public_url = await self.showcase.create_public_event_workbook(
             disk_path,

@@ -614,6 +614,28 @@ class MemoryEventRepository:
         )
         return True
 
+    async def set_yandex_table_links(
+        self,
+        event_id: str,
+        *,
+        master_url: str | None = None,
+        public_url: str | None = None,
+        pass_url: str | None = None,
+    ) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        self.rows[event_id] = Event.model_validate(
+            event.model_dump()
+            | {
+                "public_registration_url": master_url or event.public_registration_url,
+                "public_table_public_url": public_url or event.public_table_public_url,
+                "pass_table_public_url": pass_url or event.pass_table_public_url,
+                "updated_at": datetime.now(event.updated_at.tzinfo),
+            }
+        )
+        return True
+
     async def set_achievement(self, event_id: str, resource_path: str, public_url: str) -> bool:
         event = self.rows.get(event_id)
         if event is None or event.achievement_public_url is not None:

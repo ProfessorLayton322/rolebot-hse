@@ -214,6 +214,42 @@ async def test_telegram_chat_binding_is_one_to_one(event: Event) -> None:
 
 
 @pytest.mark.asyncio
+async def test_late_yandex_links_are_persisted_without_replacing_google_links(event: Event) -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoEventRepository(client, events_table="events", leaders_table="leaders")
+    event = Event.model_validate(
+        event.model_dump()
+        | {
+            "public_registration_url": "https://drive.example/master",
+            "master_table_google_url": "https://drive.example/master",
+            "public_table_resource_path": "disk:/larp-bot/events/event-a1/public.xlsx",
+            "public_table_public_url": "https://drive.example/public",
+            "public_table_google_url": "https://drive.example/public",
+            "pass_table_resource_path": "disk:/larp-bot/passes/event-a1.xlsx",
+            "pass_table_public_url": "https://drive.example/pass",
+            "pass_table_google_url": "https://drive.example/pass",
+        }
+    )
+    await repository.create(event)
+
+    assert await repository.set_yandex_table_links(
+        event.event_id,
+        master_url="https://disk.example/master",
+        public_url="https://disk.example/public",
+        pass_url="https://disk.example/pass",
+    )
+
+    stored = await repository.get(event.event_id)
+    assert stored is not None
+    assert stored.public_registration_url == "https://disk.example/master"
+    assert stored.public_table_public_url == "https://disk.example/public"
+    assert stored.pass_table_public_url == "https://disk.example/pass"
+    assert stored.master_table_google_url == "https://drive.example/master"
+    assert stored.public_table_google_url == "https://drive.example/public"
+    assert stored.pass_table_google_url == "https://drive.example/pass"
+
+
+@pytest.mark.asyncio
 async def test_linked_confirmation_is_one_dynamodb_transaction() -> None:
     client = MemoryDynamoClient()
     repository = DynamoRegistrationRepository(client, registrations_table="registrations")

@@ -77,8 +77,28 @@ async def test_completion_creates_event_and_sends_links_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_yandex_failure_keeps_google_tables_as_the_only_visible_links() -> None:
-    events = MemoryEventRepository()
+async def test_completion_persists_and_sends_both_google_and_yandex_links() -> None:
+    google = {
+        "master": "https://drive.example/master",
+        "public": "https://drive.example/public",
+        "pass": "https://drive.example/pass",
+    }
+    google_event = Event(
+        event_id="event-1234",
+        name="Осенняя игра",
+        game_date=date(2026, 10, 10),
+        disk_resource_path="disk:/larp-bot/events/event-1234/master.xlsx",
+        public_registration_url=google["master"],
+        master_table_google_url=google["master"],
+        public_table_resource_path="disk:/larp-bot/events/event-1234/public.xlsx",
+        public_table_public_url=google["public"],
+        public_table_google_url=google["public"],
+        pass_table_resource_path="disk:/larp-bot/passes/event-1234.xlsx",
+        pass_table_public_url=google["pass"],
+        pass_table_google_url=google["pass"],
+        signup_token="signup-token",
+    )
+    events = MemoryEventRepository([google_event])
     users = MemoryUserRepository()
     await users.save(TelegramUser(tg_id=42))
     transport = MemoryDeferredTransport()
@@ -89,18 +109,16 @@ async def test_yandex_failure_keeps_google_tables_as_the_only_visible_links() ->
         transport,
         MemoryCommandPublisher(),
     )
-    google = {
-        "master": "https://drive.example/master",
-        "public": "https://drive.example/public",
-        "pass": "https://drive.example/pass",
-    }
     await service.handle(
         {
             "schema_version": 1,
             "job_id": "12345678-1234-1234-1234-123456789abc",
-            "success": False,
-            "public_urls": {"master": "https://disk.example/master"},
-            "error": "Yandex Disk timed out",
+            "success": True,
+            "public_urls": {
+                "master": "https://disk.example/master",
+                "public": "https://disk.example/public",
+                "pass": "https://disk.example/pass",
+            },
             "callback": {
                 "kind": "event_created",
                 "google_public_urls": google,
@@ -127,14 +145,73 @@ async def test_yandex_failure_keeps_google_tables_as_the_only_visible_links() ->
     assert event.public_table_google_url == google["public"]
     assert event.pass_table_google_url == google["pass"]
     assert event.public_registration_url == "https://disk.example/master"
-    assert event.public_table_public_url == google["public"]
-    assert event.pass_table_public_url == google["pass"]
+    assert event.public_table_public_url == "https://disk.example/public"
+    assert event.pass_table_public_url == "https://disk.example/pass"
 
     admin_text = transport.sent[0][3]
     assert all(url in admin_text for url in google.values())
-    assert "https://disk.example/master" not in admin_text
+    assert all(
+        url in admin_text
+        for url in (
+            "https://disk.example/master",
+            "https://disk.example/public",
+            "https://disk.example/pass",
+        )
+    )
     player_text = public_table_links(event).for_player()
-    assert player_text == f"Google Drive: {google['public']}"
+    assert player_text == (f"Google Drive: {google['public']}\nЯндекс Диск: https://disk.example/public")
+
+
+@pytest.mark.asyncio
+async def test_yandex_failure_does_not_duplicate_a_google_completion_message() -> None:
+    event = Event(
+        event_id="event-1234",
+        name="Осенняя игра",
+        game_date=date(2026, 10, 10),
+        disk_resource_path="disk:/larp-bot/events/event-1234/master.xlsx",
+        public_registration_url="https://drive.example/master",
+        master_table_google_url="https://drive.example/master",
+        public_table_resource_path="disk:/larp-bot/events/event-1234/public.xlsx",
+        public_table_public_url="https://drive.example/public",
+        public_table_google_url="https://drive.example/public",
+        pass_table_resource_path="disk:/larp-bot/passes/event-1234.xlsx",
+        pass_table_public_url="https://drive.example/pass",
+        pass_table_google_url="https://drive.example/pass",
+        signup_token="signup-token",
+    )
+    events = MemoryEventRepository([event])
+    transport = MemoryDeferredTransport()
+    service = UploadCompletionService(
+        events,
+        MemoryUserRepository(),
+        StaticAdminProvider(),
+        transport,
+        MemoryCommandPublisher(),
+    )
+
+    await service.handle(
+        {
+            "schema_version": 1,
+            "job_id": "12345678-1234-1234-1234-123456789abc",
+            "success": False,
+            "public_urls": {"master": "https://disk.example/master"},
+            "callback": {
+                "kind": "event_created",
+                "google_public_urls": {
+                    "master": "https://drive.example/master",
+                    "public": "https://drive.example/public",
+                    "pass": "https://drive.example/pass",
+                },
+                "event": event.model_dump(mode="json"),
+                "leaders": [],
+            },
+        }
+    )
+
+    persisted = await events.get(event.event_id)
+    assert persisted is not None
+    assert persisted.public_registration_url == "https://disk.example/master"
+    assert transport.sent == []
 
 
 @pytest.mark.asyncio

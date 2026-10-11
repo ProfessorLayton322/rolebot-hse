@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -510,6 +510,31 @@ async def test_drive_client_makes_player_facing_file_public_once() -> None:
 def test_invalid_service_account_json_is_rejected_without_exposing_its_contents() -> None:
     with pytest.raises(RuntimeError, match="GOOGLE_SERVICE_ACCOUNT_JSON"):
         GoogleDriveRestClient("not-json")
+
+
+def test_drive_client_accepts_authorized_user_credentials_for_personal_drive() -> None:
+    credential = object()
+    session = object()
+    document = json.dumps(
+        {
+            "type": "authorized_user",
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "refresh_token": "refresh-token",
+        }
+    )
+
+    with (
+        patch(
+            "larp_bot.adapters.google_drive.statistics.oauth_credentials.Credentials.from_authorized_user_info",
+            return_value=credential,
+        ) as build_credentials,
+        patch("larp_bot.adapters.google_drive.statistics.AuthorizedSession", return_value=session),
+    ):
+        client = GoogleDriveRestClient(document)
+
+    assert client.session is session
+    assert build_credentials.call_args.args[0]["type"] == "authorized_user"
 
 
 async def test_repository_keeps_the_file_id_name_and_link_while_updating_content() -> None:

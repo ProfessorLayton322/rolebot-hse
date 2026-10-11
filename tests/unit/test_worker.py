@@ -274,7 +274,8 @@ async def test_event_table_request_with_existing_links_skips_refresh_and_sends_l
     assert len(transport.sent) == 1
     assert "https://drive.example/public-table" in transport.sent[0][3]
     assert "https://drive.example/pass-table" in transport.sent[0][3]
-    assert "https://disk.example/public-table" not in transport.sent[0][3]
+    assert "https://disk.example/public-table" in transport.sent[0][3]
+    assert "https://disk.example/pass-table" in transport.sent[0][3]
     assert transport.sent[0][4] == (back,)
     assert 1 <= len(back.value.encode("utf-8")) <= 64
     assert consumer.deleted == ["receipt-tables"]
