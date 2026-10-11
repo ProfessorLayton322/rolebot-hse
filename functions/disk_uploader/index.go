@@ -21,14 +21,15 @@ import (
 )
 
 const (
-	metadataTokenURL = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
-	tokenExchangeURL = "https://auth.yandex.cloud/oauth/token"
-	yandexDiskAPI    = "https://cloud-api.yandex.net/v1/disk"
-	objectStorageURL = "https://storage.yandexcloud.net"
-	stagingPrefix    = "larp-bot/uploads/"
-	statePrefix      = "larp-bot/upload-state/"
-	lockPrefix       = "larp-bot/upload-locks/"
-	lockStaleAfter   = 6 * time.Minute
+	metadataTokenURL  = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
+	tokenExchangeURL  = "https://auth.yandex.cloud/oauth/token"
+	yandexDiskAPI     = "https://cloud-api.yandex.net/v1/disk"
+	objectStorageURL  = "https://storage.yandexcloud.net"
+	stagingPrefix     = "larp-bot/uploads/"
+	statePrefix       = "larp-bot/upload-state/"
+	lockPrefix        = "larp-bot/upload-locks/"
+	lockStaleAfter    = 6 * time.Minute
+	yandexDiskTimeout = 3 * time.Second
 )
 
 var (
@@ -43,15 +44,17 @@ var (
 )
 
 type uploadFile struct {
-	Role          string `json:"role"`
-	ObjectKey     string `json:"object_key"`
-	ObjectVersion string `json:"object_version,omitempty"`
-	DiskPath      string `json:"disk_path"`
-	ContentType   string `json:"content_type"`
-	SHA256        string `json:"sha256"`
-	Generation    string `json:"generation"`
-	Overwrite     bool   `json:"overwrite"`
-	Publish       bool   `json:"publish"`
+	Role           string `json:"role"`
+	ObjectKey      string `json:"object_key"`
+	ObjectVersion  string `json:"object_version,omitempty"`
+	DiskPath       string `json:"disk_path"`
+	ContentType    string `json:"content_type"`
+	SHA256         string `json:"sha256"`
+	Generation     string `json:"generation"`
+	Overwrite      bool   `json:"overwrite"`
+	Publish        bool   `json:"publish"`
+	GoogleMirrored bool   `json:"google_mirrored,omitempty"`
+	GoogleURL      string `json:"google_url,omitempty"`
 }
 
 type storedGeneration struct {
@@ -87,6 +90,7 @@ type environment struct {
 type uploaderService struct {
 	env        environment
 	client     *http.Client
+	diskClient *http.Client
 	metadata   string
 	tokenURL   string
 	diskAPI    string
@@ -162,6 +166,7 @@ func serviceFromEnvironment() (*uploaderService, error) {
 	defaultService = &uploaderService{
 		env:        env,
 		client:     &http.Client{Timeout: 110 * time.Second},
+		diskClient: &http.Client{Timeout: yandexDiskTimeout},
 		metadata:   metadataTokenURL,
 		tokenURL:   tokenExchangeURL,
 		diskAPI:    yandexDiskAPI,
@@ -198,6 +203,15 @@ func validateJob(job *uploadJob) error {
 		}
 		if !digestPattern.MatchString(file.SHA256) || !generationPattern.MatchString(file.Generation) {
 			return errors.New("upload file has invalid integrity metadata")
+		}
+		if file.GoogleMirrored && file.ContentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+			return errors.New("only XLSX files can be marked as mirrored to Google Drive")
+		}
+		if file.GoogleURL != "" && !strings.HasPrefix(file.GoogleURL, "https://") {
+			return errors.New("Google Drive URL must use HTTPS")
+		}
+		if file.GoogleMirrored && file.Publish && file.GoogleURL == "" {
+			return errors.New("published Google Drive mirror has no URL")
 		}
 		switch file.ContentType {
 		case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -599,7 +613,11 @@ func (service *uploaderService) diskRequest(
 		return nil, err
 	}
 	request.Header.Set("Authorization", "OAuth "+token)
-	return service.client.Do(request)
+	client := service.diskClient
+	if client == nil {
+		client = service.client
+	}
+	return client.Do(request)
 }
 
 func (service *uploaderService) ensureDirectories(ctx context.Context, diskPath string, token string) error {
@@ -790,7 +808,11 @@ func (service *uploaderService) uploadOne(
 	}
 	uploadRequest.Header.Set("Content-Type", file.ContentType)
 	uploadRequest.ContentLength = staged.ContentLength
-	uploadResponse, err := service.client.Do(uploadRequest)
+	client := service.diskClient
+	if client == nil {
+		client = service.client
+	}
+	uploadResponse, err := client.Do(uploadRequest)
 	if err != nil {
 		return "", err
 	}
@@ -853,6 +875,53 @@ func (service *uploaderService) invokeCompletion(
 	return nil
 }
 
+func googleMirrorCompleted(job uploadJob) bool {
+	if len(job.Files) == 0 {
+		return false
+	}
+	for _, file := range job.Files {
+		if !file.GoogleMirrored {
+			return false
+		}
+	}
+	return true
+}
+
+func (service *uploaderService) cleanupStaged(
+	ctx context.Context,
+	job uploadJob,
+	iamToken string,
+) {
+	for _, file := range job.Files {
+		if err := service.deleteStaged(ctx, job.Bucket, file, iamToken); err != nil {
+			fmt.Printf("delete staged object after optional Yandex failure for job %s: %v\n", job.JobID, err)
+		}
+	}
+}
+
+func (service *uploaderService) completeOptionalYandexFailure(
+	ctx context.Context,
+	job uploadJob,
+	iamToken string,
+	publicURLs map[string]string,
+	cause error,
+) error {
+	if job.Callback != nil {
+		if err := service.invokeCompletion(ctx, iamToken, completion{
+			SchemaVersion: 1,
+			JobID:         job.JobID,
+			Success:       false,
+			PublicURLs:    publicURLs,
+			Callback:      job.Callback,
+			Error:         cause.Error(),
+		}); err != nil {
+			return err
+		}
+	}
+	service.cleanupStaged(ctx, job, iamToken)
+	return nil
+}
+
 func (service *uploaderService) process(ctx context.Context, job uploadJob) error {
 	if job.Bucket != service.env.Bucket {
 		return errors.New("upload job uses an unexpected bucket")
@@ -863,12 +932,19 @@ func (service *uploaderService) process(ctx context.Context, job uploadJob) erro
 	}
 	diskToken, err := service.diskToken(ctx, iamToken)
 	if err != nil {
+		if googleMirrorCompleted(job) {
+			return service.completeOptionalYandexFailure(ctx, job, iamToken, map[string]string{}, err)
+		}
 		return err
 	}
 	publicURLs := make(map[string]string)
 	for _, file := range job.Files {
 		var publicURL string
-		for attempt := 0; attempt < 3; attempt++ {
+		attempts := 3
+		if file.GoogleMirrored {
+			attempts = 1
+		}
+		for attempt := 0; attempt < attempts; attempt++ {
 			publicURL, err = service.uploadOne(ctx, job.Bucket, file, iamToken, diskToken)
 			if err == nil {
 				break
@@ -876,6 +952,9 @@ func (service *uploaderService) process(ctx context.Context, job uploadJob) erro
 			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
 		}
 		if err != nil {
+			if googleMirrorCompleted(job) {
+				return service.completeOptionalYandexFailure(ctx, job, iamToken, publicURLs, err)
+			}
 			if errors.Is(err, errDestinationBusy) {
 				return err
 			}
@@ -893,11 +972,7 @@ func (service *uploaderService) process(ctx context.Context, job uploadJob) erro
 			if completionErr != nil {
 				return completionErr
 			}
-			for _, stagedFile := range job.Files {
-				if cleanupErr := service.deleteStaged(ctx, job.Bucket, stagedFile, iamToken); cleanupErr != nil {
-					fmt.Printf("delete staged object after failed job %s: %v\n", job.JobID, cleanupErr)
-				}
-			}
+			service.cleanupStaged(ctx, job, iamToken)
 			return nil
 		}
 		if file.Publish {

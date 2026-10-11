@@ -94,6 +94,7 @@ from .services import (
     player_notification_text,
     same_day_signup_warning,
 )
+from .table_links import master_table_links, pass_table_links, public_table_links
 
 PROFILE = "📝 Профиль"
 EDIT_PROFILE = "Редактировать профиль"
@@ -402,9 +403,11 @@ def event_table_links(event: Event) -> str:
     if event.pass_table_public_url is None:
         raise RuntimeError("pass table is not initialized")
     return (
-        f"Публичная таблица (без контактов Telegram и VK):\n{event.public_table_public_url}\n\n"
-        f"Административная таблица:\n{MASTER_TABLE_DISCLAIMER}\n{event.master_table_public_url}\n\n"
-        f"Таблица пропусков:\n{event.pass_table_public_url}"
+        "Публичная таблица (без контактов Telegram и VK):\n"
+        f"{public_table_links(event).for_admin()}\n\n"
+        f"Административная таблица:\n{MASTER_TABLE_DISCLAIMER}\n"
+        f"{master_table_links(event).for_admin()}\n\n"
+        f"Таблица пропусков:\n{pass_table_links(event).for_admin()}"
     )
 
 
@@ -500,7 +503,7 @@ def _my_game_text(
         text = f"{text}\n\n{masters_text}"
     links = [f"Чат игры: {link}" for link in overview.chat_links]
     if event.public_table_public_url is not None:
-        links.append(f"Таблица участников: {event.public_table_public_url}")
+        links.append(f"Таблица участников: {public_table_links(event).for_player()}")
     if not links:
         return text
     return f"{text}\n\n" + "\n".join(links)
@@ -1884,6 +1887,12 @@ class ConversationEngine:
     async def _my_game_page(self, user: User, event: Event, *, from_list: bool) -> BotResponse:
         if event.archived_at is not None:
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        if (
+            self.administration.mirrors_google_tables
+            and event.public_table_public_url is not None
+            and event.public_table_google_url is None
+        ):
+            event = await self.administration.ensure_event_tables(event)
         identity = self._identity(user)
         overview, masters = await asyncio.gather(
             self.registrations.game_overview(event, identity.platform, identity.platform_user_id),

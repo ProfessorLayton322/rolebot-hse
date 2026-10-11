@@ -693,15 +693,16 @@ class YdbUserRepository:
 class YdbEventRepository:
     COLUMNS = """
         event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
+        master_table_google_url,
         telegram_post_url, vk_post_url, telegram_chat_id, telegram_chat_invite_link,
-        public_table_resource_path, public_table_public_url,
+        public_table_resource_path, public_table_public_url, public_table_google_url,
         status, registration_open_at, registration_open_notified_recipients_json,
         registration_open_notification_completed_at,
         confirmation_open_at,
         scheduled_close_at, scheduled_close_operation_id,
         scheduled_close_notified_recipients_json, scheduled_close_completed_at,
         confirmation_deadline, registrations_migrated_at,
-        pass_table_resource_path, pass_table_public_url,
+        pass_table_resource_path, pass_table_public_url, pass_table_google_url,
         achievement_resource_path, achievement_public_url,
         confirmed_notifications_json, last_confirmed_notification_operation_id,
         last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
@@ -735,8 +736,10 @@ class YdbEventRepository:
             telegram_chat_invite_link=row.get("telegram_chat_invite_link"),
             disk_resource_path=row["disk_resource_path"],
             public_registration_url=row["public_registration_url"],
+            master_table_google_url=row.get("master_table_google_url"),
             public_table_resource_path=row.get("public_table_resource_path"),
             public_table_public_url=row.get("public_table_public_url"),
+            public_table_google_url=row.get("public_table_google_url"),
             status=status,
             registration_open_at=(
                 _dt(row["registration_open_at"]) if row.get("registration_open_at") is not None else None
@@ -772,6 +775,7 @@ class YdbEventRepository:
             ),
             pass_table_resource_path=row.get("pass_table_resource_path"),
             pass_table_public_url=row.get("pass_table_public_url"),
+            pass_table_google_url=row.get("pass_table_google_url"),
             achievement_resource_path=row.get("achievement_resource_path"),
             achievement_public_url=row.get("achievement_public_url"),
             confirmed_notifications=_confirmed_notifications(row.get("confirmed_notifications_json")),
@@ -875,8 +879,10 @@ class YdbEventRepository:
             DECLARE $telegram_chat_id AS Optional<Int64>;
             DECLARE $telegram_chat_invite_link AS Optional<Utf8>;
             DECLARE $disk_resource_path AS Utf8; DECLARE $public_url AS Utf8;
+            DECLARE $master_table_google_url AS Optional<Utf8>;
             DECLARE $public_table_resource_path AS Optional<Utf8>;
             DECLARE $public_table_public_url AS Optional<Utf8>;
+            DECLARE $public_table_google_url AS Optional<Utf8>;
             DECLARE $status AS Utf8; DECLARE $created_at AS Timestamp;
             DECLARE $registration_open_at AS Optional<Timestamp>;
             DECLARE $registration_open_notified_recipients_json AS Utf8;
@@ -890,6 +896,7 @@ class YdbEventRepository:
             DECLARE $registrations_migrated_at AS Timestamp;
             DECLARE $pass_table_resource_path AS Optional<Utf8>;
             DECLARE $pass_table_public_url AS Optional<Utf8>;
+            DECLARE $pass_table_google_url AS Optional<Utf8>;
             DECLARE $achievement_resource_path AS Optional<Utf8>;
             DECLARE $achievement_public_url AS Optional<Utf8>;
             DECLARE $confirmed_notifications_json AS Utf8;
@@ -908,15 +915,16 @@ class YdbEventRepository:
             {" ".join(leader_declarations)}
             INSERT INTO `events` (
                 event_id, name, game_date, player_amount, signup_token, disk_resource_path, public_registration_url,
+                master_table_google_url,
                 telegram_post_url, vk_post_url, telegram_chat_id, telegram_chat_invite_link,
-                public_table_resource_path, public_table_public_url,
+                public_table_resource_path, public_table_public_url, public_table_google_url,
                 status, registration_open_at, registration_open_notified_recipients_json,
                 registration_open_notification_completed_at,
                 confirmation_open_at,
                 scheduled_close_at, scheduled_close_operation_id,
                 scheduled_close_notified_recipients_json, scheduled_close_completed_at,
                 confirmation_deadline, registrations_migrated_at,
-                pass_table_resource_path, pass_table_public_url,
+                pass_table_resource_path, pass_table_public_url, pass_table_google_url,
                 achievement_resource_path, achievement_public_url,
                 confirmed_notifications_json, last_confirmed_notification_operation_id,
                 last_reserve_promotion_operation_id, last_reserve_promotion_participant_key,
@@ -929,15 +937,16 @@ class YdbEventRepository:
                 created_at, updated_at
             ) VALUES (
                 $event_id, $name, $game_date, $player_amount, $signup_token, $disk_resource_path, $public_url,
+                $master_table_google_url,
                 $telegram_post_url, $vk_post_url, $telegram_chat_id, $telegram_chat_invite_link,
-                $public_table_resource_path, $public_table_public_url,
+                $public_table_resource_path, $public_table_public_url, $public_table_google_url,
                 $status, $registration_open_at, $registration_open_notified_recipients_json,
                 $registration_open_notification_completed_at,
                 $confirmation_open_at,
                 $scheduled_close_at, $scheduled_close_operation_id,
                 $scheduled_close_notified_recipients_json, $scheduled_close_completed_at,
                 $confirmation_deadline, $registrations_migrated_at,
-                $pass_table_resource_path, $pass_table_public_url,
+                $pass_table_resource_path, $pass_table_public_url, $pass_table_google_url,
                 $achievement_resource_path, $achievement_public_url,
                 $confirmed_notifications_json, $last_confirmed_notification_operation_id,
                 $last_reserve_promotion_operation_id, $last_reserve_promotion_participant_key,
@@ -963,8 +972,10 @@ class YdbEventRepository:
                 "$telegram_chat_invite_link": event.telegram_chat_invite_link,
                 "$disk_resource_path": event.disk_resource_path,
                 "$public_url": event.public_registration_url,
+                "$master_table_google_url": event.master_table_google_url,
                 "$public_table_resource_path": event.public_table_resource_path,
                 "$public_table_public_url": event.public_table_public_url,
+                "$public_table_google_url": event.public_table_google_url,
                 "$status": event.status.value,
                 "$registration_open_at": event.registration_open_at,
                 "$registration_open_notified_recipients_json": json.dumps(
@@ -984,6 +995,7 @@ class YdbEventRepository:
                 "$registrations_migrated_at": event.registrations_migrated_at,
                 "$pass_table_resource_path": event.pass_table_resource_path,
                 "$pass_table_public_url": event.pass_table_public_url,
+                "$pass_table_google_url": event.pass_table_google_url,
                 "$achievement_resource_path": event.achievement_resource_path,
                 "$achievement_public_url": event.achievement_public_url,
                 "$confirmed_notifications_json": json.dumps(
@@ -1722,14 +1734,22 @@ class YdbEventRepository:
             {"$event_id": event_id, "$migrated_at": migrated_at},
         )
 
-    async def set_public_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+    async def set_public_table(
+        self,
+        event_id: str,
+        resource_path: str,
+        public_url: str,
+        google_url: str | None = None,
+    ) -> bool:
         rows = await self.db.query(
             """
             DECLARE $event_id AS Utf8; DECLARE $resource_path AS Utf8;
-            DECLARE $public_url AS Utf8; DECLARE $updated_at AS Timestamp;
+            DECLARE $public_url AS Utf8; DECLARE $google_url AS Optional<Utf8>;
+            DECLARE $updated_at AS Timestamp;
             UPDATE `events`
             SET public_table_resource_path = $resource_path,
                 public_table_public_url = $public_url,
+                public_table_google_url = $google_url,
                 updated_at = $updated_at
             WHERE event_id = $event_id AND public_table_public_url IS NULL
             RETURNING event_id;
@@ -1738,19 +1758,28 @@ class YdbEventRepository:
                 "$event_id": event_id,
                 "$resource_path": resource_path,
                 "$public_url": public_url,
+                "$google_url": google_url,
                 "$updated_at": datetime.now(UTC),
             },
         )
         return bool(rows)
 
-    async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool:
+    async def set_pass_table(
+        self,
+        event_id: str,
+        resource_path: str,
+        public_url: str,
+        google_url: str | None = None,
+    ) -> bool:
         rows = await self.db.query(
             """
             DECLARE $event_id AS Utf8; DECLARE $resource_path AS Utf8;
-            DECLARE $public_url AS Utf8; DECLARE $updated_at AS Timestamp;
+            DECLARE $public_url AS Utf8; DECLARE $google_url AS Optional<Utf8>;
+            DECLARE $updated_at AS Timestamp;
             UPDATE `events`
             SET pass_table_resource_path = $resource_path,
                 pass_table_public_url = $public_url,
+                pass_table_google_url = $google_url,
                 updated_at = $updated_at
             WHERE event_id = $event_id AND pass_table_public_url IS NULL
             RETURNING event_id;
@@ -1759,6 +1788,40 @@ class YdbEventRepository:
                 "$event_id": event_id,
                 "$resource_path": resource_path,
                 "$public_url": public_url,
+                "$google_url": google_url,
+                "$updated_at": datetime.now(UTC),
+            },
+        )
+        return bool(rows)
+
+    async def set_google_table_links(
+        self,
+        event_id: str,
+        *,
+        master_url: str | None = None,
+        public_url: str | None = None,
+        pass_url: str | None = None,
+    ) -> bool:
+        rows = await self.db.query(
+            """
+            DECLARE $event_id AS Utf8;
+            DECLARE $master_url AS Optional<Utf8>;
+            DECLARE $public_url AS Optional<Utf8>;
+            DECLARE $pass_url AS Optional<Utf8>;
+            DECLARE $updated_at AS Timestamp;
+            UPDATE `events`
+            SET master_table_google_url = COALESCE($master_url, master_table_google_url),
+                public_table_google_url = COALESCE($public_url, public_table_google_url),
+                pass_table_google_url = COALESCE($pass_url, pass_table_google_url),
+                updated_at = $updated_at
+            WHERE event_id = $event_id
+            RETURNING event_id;
+            """,
+            {
+                "$event_id": event_id,
+                "$master_url": master_url,
+                "$public_url": public_url,
+                "$pass_url": pass_url,
                 "$updated_at": datetime.now(UTC),
             },
         )

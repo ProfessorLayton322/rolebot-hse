@@ -170,7 +170,7 @@ New games receive a pass table during creation; admins can create one for any le
 
 Admins and pass managers additionally receive `Получить все пропуска за день` in the main administration menu. With no dated unarchived games the action reports that there is nothing to export; one distinct game date is selected automatically, while multiple dates produce a date picker. The resulting workbook at `disk:/larp-bot/passes/daily-<YYYY-MM-DD>.xlsx` contains each pass-requiring global user at most once across all active registrations and master assignments on that date. Reciprocal Telegram/VK profiles and people registered for several same-day events are deduplicated as one person. Profile edits, signups, and cancellations regenerate the existing date resource without republishing it at a new path, so its public URL remains stable; cancelling one registration keeps the user in the workbook while another active same-day registration remains.
 
-Statistics use exactly two existing binary XLSX files in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx` and `master_statistics.xlsx`. Share the folder and both files with the service account's `client_email` as an editor, keep exactly one non-trashed file with each name in the folder, and do not rename or replace them. The bot downloads and updates the content of the same Drive file IDs, so their names and `webViewLink` values remain permanent while Google Drive retains revision history. The bot does not create source copies or backup files.
+Statistics use exactly two existing binary XLSX files in the Google Drive folder configured by `GOOGLE_FOLDER_ID`: `player_attendance_stats.xlsx` and `master_statistics.xlsx`. Share the folder and both files with the service account's `client_email` as an editor, keep exactly one non-trashed statistics file with each name in the folder, and do not rename or replace them. The bot downloads and updates the content of the same statistics file IDs, so their names and `webViewLink` values remain permanent while Google Drive retains revision history. Generated registration and pass XLSX files are also created or updated in this folder under stable path-derived names and shared for link access before Yandex Disk is attempted.
 
 Configured administrators see one `Управление статистикой` entry. Its submenu contains:
 
@@ -408,7 +408,7 @@ openssl rand -hex 24       # Telegram webhook secret (allowed character set)
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CLOUDFLARE_WORKERS_SUBDOMAIN` | Account subdomain without `.workers.dev` |
 | `TF_STATE_BUCKET` | Existing private versioned Object Storage bucket name; Function packages are stored under `larp-bot/functions/` in the same bucket, where a prefix-scoped lifecycle retains three non-current packages and expires older ones after one day |
-| `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent `player_attendance_stats.xlsx` and `master_statistics.xlsx` files |
+| `GOOGLE_FOLDER_ID` | Google Drive folder containing the permanent statistics files and generated XLSX mirrors |
 | `TG_ADMIN_IDS` | Public JSON array of numeric Telegram user IDs, e.g. `[12345678]` |
 | `VK_ADMIN_IDS` | Public JSON array of stable numeric VK user IDs, e.g. `[87654321]`; resolve vanity handles before adding them |
 | `TG_GAMEMASTER_IDS` | Public JSON array of Telegram moderator user IDs; moderators have privileged read access and can mutate games where they are masters |

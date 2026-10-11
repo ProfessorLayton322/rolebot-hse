@@ -190,9 +190,30 @@ class EventRepository(Protocol):
 
     async def mark_registrations_migrated(self, event_id: str, migrated_at: datetime) -> None: ...
 
-    async def set_public_table(self, event_id: str, resource_path: str, public_url: str) -> bool: ...
+    async def set_public_table(
+        self,
+        event_id: str,
+        resource_path: str,
+        public_url: str,
+        google_url: str | None = None,
+    ) -> bool: ...
 
-    async def set_pass_table(self, event_id: str, resource_path: str, public_url: str) -> bool: ...
+    async def set_pass_table(
+        self,
+        event_id: str,
+        resource_path: str,
+        public_url: str,
+        google_url: str | None = None,
+    ) -> bool: ...
+
+    async def set_google_table_links(
+        self,
+        event_id: str,
+        *,
+        master_url: str | None = None,
+        public_url: str | None = None,
+        pass_url: str | None = None,
+    ) -> bool: ...
 
     async def set_achievement(self, event_id: str, resource_path: str, public_url: str) -> bool: ...
 
@@ -407,7 +428,7 @@ class RegistrationShowcaseRepository(Protocol):
         registrations: Sequence[Registration],
         *,
         needs_pass_by_key: Mapping[str, bool | None] | None = None,
-    ) -> None: ...
+    ) -> dict[str, str] | None: ...
 
     async def create_event_workbook(
         self,
@@ -463,7 +484,7 @@ class RegistrationShowcaseRepository(Protocol):
 
     async def pass_table_exists(self, disk_path: str) -> bool: ...
 
-    async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None: ...
+    async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> str | None: ...
 
     async def delete_pass_table(self, disk_path: str) -> None: ...
 

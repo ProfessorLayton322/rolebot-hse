@@ -28,6 +28,9 @@ from .deadlines import format_confirmation_deadline
 from .navigation import admin_menu_button
 from .ports import AdminConfigProvider, DeferredTransport, EventRepository, OrderedCommandPublisher, UserRepository
 from .services import daily_pass_table_path
+from .table_links import table_provider_links
+
+GOOGLE_CALLBACK_URLS = "google_public_urls"
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -42,6 +45,11 @@ def _public_urls(value: object) -> dict[str, str]:
     if len(urls) != len(raw):
         raise ValueError("public_urls contains an invalid URL")
     return urls
+
+
+def _google_urls(callback: Mapping[str, Any]) -> dict[str, str]:
+    value = callback.get(GOOGLE_CALLBACK_URLS, {})
+    return _public_urls(value)
 
 
 class UploadCompletionService:
@@ -137,18 +145,30 @@ class UploadCompletionService:
     async def _event_created(
         self,
         callback: Mapping[str, Any],
-        urls: dict[str, str],
+        yandex_urls: dict[str, str],
+        google_urls: dict[str, str],
         job_id: str,
     ) -> None:
-        if set(urls) != {"master", "public", "pass"}:
-            raise ValueError("event creation requires master, public, and pass URLs")
+        expected = {"master", "public", "pass"}
+        legacy_completion = not google_urls and set(yandex_urls) == expected
+        if not legacy_completion and (set(google_urls) != expected or not set(yandex_urls) <= expected):
+            raise ValueError("event creation requires all Google URLs and only known Yandex URLs")
         event_data = dict(_mapping(callback.get("event"), "event"))
         event_data.update(
             {
-                "public_registration_url": urls["master"],
-                "public_table_public_url": urls["public"],
-                "pass_table_public_url": urls["pass"],
+                "public_registration_url": yandex_urls.get("master") or google_urls["master"],
+                "public_table_public_url": yandex_urls.get("public") or google_urls["public"],
+                "pass_table_public_url": yandex_urls.get("pass") or google_urls["pass"],
             }
+            | (
+                {
+                    "master_table_google_url": google_urls["master"],
+                    "public_table_google_url": google_urls["public"],
+                    "pass_table_google_url": google_urls["pass"],
+                }
+                if google_urls
+                else {}
+            )
         )
         event = Event.model_validate(event_data)
         leaders_raw = callback.get("leaders", [])
@@ -226,26 +246,33 @@ class UploadCompletionService:
     async def _event_tables(
         self,
         callback: Mapping[str, Any],
-        urls: dict[str, str],
+        yandex_urls: dict[str, str],
+        google_urls: dict[str, str],
         job_id: str,
     ) -> None:
         event_id = str(callback["event_id"])
         component = str(callback["component"])
         path = str(callback["resource_path"])
         expected_role = "public" if component == "public" else "pass"
-        if set(urls) != {expected_role}:
-            raise ValueError("table completion has unexpected upload results")
+        legacy_completion = not google_urls and set(yandex_urls) == {expected_role}
+        if not legacy_completion and (set(google_urls) != {expected_role} or not set(yandex_urls) <= {expected_role}):
+            raise ValueError("table completion has unexpected provider results")
+        stored_url = yandex_urls.get(expected_role) or google_urls[expected_role]
+        google_url = google_urls.get(expected_role)
         if component == "public":
-            await self.events.set_public_table(event_id, path, urls["public"])
+            await self.events.set_public_table(event_id, path, stored_url, google_url)
         elif component == "pass":
-            await self.events.set_pass_table(event_id, path, urls["pass"])
+            await self.events.set_pass_table(event_id, path, stored_url, google_url)
         else:
             raise ValueError("unknown table component")
         event = await self.events.get(event_id)
         if event is None or event.public_table_public_url is None or event.pass_table_public_url is None:
             return
         link_version = hashlib.sha256(
-            f"{event.public_table_public_url}\0{event.pass_table_public_url}".encode()
+            (
+                f"{event.public_table_google_url}\0{event.public_table_public_url}\0"
+                f"{event.pass_table_google_url}\0{event.pass_table_public_url}"
+            ).encode()
         ).hexdigest()[:16]
         await self._send(
             callback,
@@ -280,18 +307,23 @@ class UploadCompletionService:
     async def _daily_passes(
         self,
         callback: Mapping[str, Any],
-        urls: dict[str, str],
+        yandex_urls: dict[str, str],
+        google_urls: dict[str, str],
         job_id: str,
     ) -> None:
-        if set(urls) != {"pass"}:
-            raise ValueError("daily pass completion has unexpected upload results")
+        legacy_completion = not google_urls and set(yandex_urls) == {"pass"}
+        if not legacy_completion and (set(google_urls) != {"pass"} or not set(yandex_urls) <= {"pass"}):
+            raise ValueError("daily pass completion has unexpected provider results")
         game_date = date.fromisoformat(str(callback["game_date"]))
         if callback.get("resource_path") != daily_pass_table_path(game_date):
             raise ValueError("daily pass completion has an unexpected resource path")
         await self._send(
             callback,
             operation_id=f"daily-passes:{game_date.isoformat()}:{job_id}",
-            text=f"Таблица пропусков на {format_game_date(game_date)}\n\n{urls['pass']}",
+            text=(
+                f"Таблица пропусков на {format_game_date(game_date)}\n\n"
+                f"{table_provider_links(google_urls.get('pass'), yandex_urls.get('pass')).for_admin()}"
+            ),
             buttons=[admin_menu_button()],
         )
         # Run the final consistency refresh from the ordered worker, whose
@@ -307,22 +339,30 @@ class UploadCompletionService:
         if not job_id:
             raise ValueError("upload completion has no job ID")
         callback = _mapping(payload.get("callback"), "callback")
-        if payload.get("success") is not True:
+        google_urls = _google_urls(callback)
+        kind = callback.get("kind")
+        if payload.get("success") is not True and not google_urls:
             await self._send(
                 callback,
                 operation_id=f"{job_id}:failed",
                 text="Не удалось загрузить файл. Попробуйте повторить действие позже.",
             )
             return
-        urls = _public_urls(payload.get("public_urls"))
-        kind = callback.get("kind")
+        yandex_urls = _public_urls(payload.get("public_urls"))
         if kind == "event_created":
-            await self._event_created(callback, urls, job_id)
+            await self._event_created(callback, yandex_urls, google_urls, job_id)
         elif kind == "event_tables":
-            await self._event_tables(callback, urls, job_id)
+            await self._event_tables(callback, yandex_urls, google_urls, job_id)
         elif kind == "achievement":
-            await self._achievement(callback, urls, job_id)
+            if payload.get("success") is not True:
+                await self._send(
+                    callback,
+                    operation_id=f"{job_id}:failed",
+                    text="Не удалось загрузить файл. Попробуйте повторить действие позже.",
+                )
+                return
+            await self._achievement(callback, yandex_urls, job_id)
         elif kind == "daily_passes":
-            await self._daily_passes(callback, urls, job_id)
+            await self._daily_passes(callback, yandex_urls, google_urls, job_id)
         else:
             raise ValueError("unknown upload completion kind")

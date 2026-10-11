@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -99,6 +100,8 @@ TABLEAU_10_COLORS = (
 CHARACTER_WISH_CALLBACK_RE = re.compile(r"select:confirm:[a-z0-9-]{8,80}", re.IGNORECASE)
 XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PPTX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+YANDEX_DISK_FAILURE_TIMEOUT_SECONDS = 3.0
+LOGGER = logging.getLogger(__name__)
 
 
 class WorkbookIntegrityError(RuntimeError):
@@ -121,6 +124,8 @@ class DiskUpload:
     content_type: str
     overwrite: bool
     publish: bool
+    google_mirrored: bool = False
+    google_url: str | None = None
 
 
 UploadReadyCallback = Callable[[], Awaitable[None]]
@@ -476,7 +481,7 @@ class YandexDiskRestClient:
     API = "https://cloud-api.yandex.net/v1/disk"
 
     def __init__(self, token: str, client: httpx.AsyncClient | None = None) -> None:
-        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(YANDEX_DISK_FAILURE_TIMEOUT_SECONDS))
         self._headers = {"Authorization": f"OAuth {token}"}
 
     async def _link(self, endpoint: str, path: str) -> str:
@@ -546,6 +551,7 @@ class YandexDiskShowcaseRepository:
         self.store = store
         self.uploader = uploader if uploader is not None else cast(DiskUploader, store)
         self.deferred_uploads = uploader is not None or bool(getattr(store, "deferred_uploads", False))
+        self.mirrors_google_tables = hasattr(self.uploader, "google_table_exists")
         self._achievement_template = achievement_template
 
     async def _submit_one(
@@ -634,7 +640,7 @@ class YandexDiskShowcaseRepository:
         )
 
     async def delete_event_workbook(self, disk_path: str) -> None:
-        await self.store.delete(disk_path)
+        await self._delete_mirrored_xlsx(disk_path)
 
     async def create_pass_table(
         self,
@@ -681,20 +687,35 @@ class YandexDiskShowcaseRepository:
         )
 
     async def pass_table_exists(self, disk_path: str) -> bool:
+        google_exists = getattr(self.uploader, "google_table_exists", None)
+        if google_exists is not None:
+            return bool(await google_exists(disk_path))
         return await self.store.exists(disk_path)
 
-    async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> None:
+    async def replace_pass_table(self, disk_path: str, profiles: Sequence[PassDetails]) -> str | None:
         content = await asyncio.to_thread(pass_table_workbook_bytes, profiles)
-        await self._submit_one(
-            disk_path,
-            content,
-            content_type=XLSX_MIME_TYPE,
-            overwrite=True,
-            publish=False,
+        result = await self.uploader.submit(
+            [DiskUpload("pass", disk_path, content, XLSX_MIME_TYPE, True, False)],
         )
+        return None if result is None else result.get("google:pass")
 
     async def delete_pass_table(self, disk_path: str) -> None:
-        await self.store.delete(disk_path)
+        await self._delete_mirrored_xlsx(disk_path)
+
+    async def _delete_mirrored_xlsx(self, disk_path: str) -> None:
+        google_delete = getattr(self.uploader, "delete_google_table", None)
+        if google_delete is None:
+            await self.store.delete(disk_path)
+            return
+        await google_delete(disk_path)
+        try:
+            async with asyncio.timeout(YANDEX_DISK_FAILURE_TIMEOUT_SECONDS):
+                await self.store.delete(disk_path)
+        except Exception as exc:
+            LOGGER.warning(
+                "yandex_disk_delete_skipped",
+                extra={"disk_path": disk_path, "error": str(exc)},
+            )
 
     async def create_achievement_presentation(
         self,
@@ -734,7 +755,7 @@ class YandexDiskShowcaseRepository:
         registrations: Sequence[Registration],
         *,
         needs_pass_by_key: Mapping[str, bool | None] | None = None,
-    ) -> None:
+    ) -> dict[str, str] | None:
         master_content, public_content = await asyncio.gather(
             asyncio.to_thread(
                 showcase_workbook_bytes,
@@ -765,4 +786,4 @@ class YandexDiskShowcaseRepository:
                     False,
                 )
             )
-        await self.uploader.submit(uploads)
+        return await self.uploader.submit(uploads)

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import boto3
 
-from larp_bot.adapters.google_drive import GoogleDriveRestClient, GoogleDriveStatisticsRepository
+from larp_bot.adapters.google_drive import (
+    GoogleDriveMirroredUploader,
+    GoogleDriveRestClient,
+    GoogleDriveStatisticsRepository,
+)
 from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.transports import (
     CloudflareTelegramEgress,
@@ -65,9 +69,10 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         iam_token=iam_token,
     )
     google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    mirrored_uploader = GoogleDriveMirroredUploader(disk_uploader, google_drive, settings.google_folder_id)
     player_statistics = GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id)
     master_statistics = GoogleDriveStatisticsRepository.masters(google_drive, settings.google_folder_id)
-    showcase = YandexDiskShowcaseRepository(disk, disk_uploader)
+    showcase = YandexDiskShowcaseRepository(disk, mirrored_uploader)
     sqs = boto3.client(
         "sqs",
         endpoint_url=settings.ymq_endpoint,
@@ -160,7 +165,7 @@ async def build_container(*, iam_token: str | None = None) -> AppContainer:
         events=events,
         registrations=registrations,
         showcase=showcase,
-        disk_uploader=disk_uploader,
+        disk_uploader=mirrored_uploader,
         publisher=publisher,
         transport=transport,
         telegram_chat_management=telegram_chat_management,

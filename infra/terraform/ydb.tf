@@ -181,11 +181,19 @@ resource "yandex_ydb_table" "events" {
     not_null = true
   }
   column {
+    name = "master_table_google_url"
+    type = "Utf8"
+  }
+  column {
     name = "public_table_resource_path"
     type = "Utf8"
   }
   column {
     name = "public_table_public_url"
+    type = "Utf8"
+  }
+  column {
+    name = "public_table_google_url"
     type = "Utf8"
   }
   column {
@@ -241,6 +249,10 @@ resource "yandex_ydb_table" "events" {
   }
   column {
     name = "pass_table_public_url"
+    type = "Utf8"
+  }
+  column {
+    name = "pass_table_google_url"
     type = "Utf8"
   }
   # The generated presentation is published once and its stable Disk link is

@@ -57,6 +57,8 @@ class AwsStagedYandexDiskUploader:
             "generation": generation,
             "overwrite": upload.overwrite,
             "publish": upload.publish,
+            "google_mirrored": upload.google_mirrored,
+            "google_url": upload.google_url,
         }
 
     async def _delete_staged(self, files: Sequence[dict[str, object]]) -> None:

@@ -48,6 +48,7 @@ async def test_python_stages_files_and_only_submits_an_async_go_invocation() -> 
                     content_type=XLSX_MIME_TYPE,
                     overwrite=True,
                     publish=False,
+                    google_mirrored=True,
                 ),
             ],
             callback={"kind": "achievement"},
@@ -70,6 +71,8 @@ async def test_python_stages_files_and_only_submits_an_async_go_invocation() -> 
     assert [file["object_version"] for file in payload["files"]] == ["version-1", "version-2"]
     assert payload["files"][1]["overwrite"] is True
     assert payload["files"][1]["publish"] is False
+    assert payload["files"][1]["google_mirrored"] is True
+    assert payload["files"][1]["google_url"] is None
 
 
 @pytest.mark.asyncio

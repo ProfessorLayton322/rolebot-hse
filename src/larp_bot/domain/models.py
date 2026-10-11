@@ -492,8 +492,10 @@ class Event(StrictModel):
     player_amount: int = Field(default=DEFAULT_PLAYER_AMOUNT, ge=1, le=MAX_PLAYER_AMOUNT)
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
+    master_table_google_url: str | None = None
     public_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_table_public_url: str | None = None
+    public_table_google_url: str | None = None
     status: EventStatus = EventStatus.CREATED
     # Null means immediate publication. A future timestamp hides registration
     # from players until that instant while leaving it manageable by masters.
@@ -528,6 +530,7 @@ class Event(StrictModel):
     registrations_migrated_at: datetime | None = Field(default_factory=utc_now)
     pass_table_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/passes/.+\.xlsx$")
     pass_table_public_url: str | None = None
+    pass_table_google_url: str | None = None
     achievement_resource_path: str | None = Field(default=None, pattern=r"^disk:/larp-bot/achievements/.+\.pptx$")
     achievement_public_url: str | None = None
     confirmed_notifications: list[
@@ -601,6 +604,24 @@ class Event(StrictModel):
         """The legacy column is retained as the stable master-table URL."""
 
         return self.public_registration_url
+
+    @property
+    def master_table_yandex_url(self) -> str | None:
+        if self.master_table_google_url == self.public_registration_url:
+            return None
+        return self.public_registration_url
+
+    @property
+    def public_table_yandex_url(self) -> str | None:
+        if self.public_table_google_url == self.public_table_public_url:
+            return None
+        return self.public_table_public_url
+
+    @property
+    def pass_table_yandex_url(self) -> str | None:
+        if self.pass_table_google_url == self.pass_table_public_url:
+            return None
+        return self.pass_table_public_url
 
     def registration_is_open(self, now: datetime | None = None) -> bool:
         current = datetime.now(UTC) if now is None else now
