@@ -94,7 +94,18 @@ def test_fifo_has_a_fifo_dlq_and_disabled_partial_batch_consumer() -> None:
     assert "sqs_managed_sse_enabled     = true" in queues
     assert 'function_response_types            = ["ReportBatchItemFailures"]' in lambda_config
     assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
+    assert "batch_size                         = 1" in lambda_config
     assert 'reserved_concurrent_executions = each.key == "ordered_worker" ? 1 : -1' in lambda_config
+
+
+def test_ordered_worker_can_publish_continuation_commands() -> None:
+    iam = (APPLICATION / "iam.tf").read_text()
+    publish_statement = iam.split('sid       = "PublishRegistrationCommands"', 1)[0].rsplit('dynamic "statement" {', 1)[
+        1
+    ]
+
+    assert 'contains(["gateway", "ordered_worker", "registration_notifier"], each.key)' in publish_statement
+    assert 'actions   = ["sqs:GetQueueAttributes", "sqs:GetQueueUrl", "sqs:SendMessage"]' in iam
 
 
 def test_aws_dashboard_covers_compute_errors_and_retry_storms() -> None:

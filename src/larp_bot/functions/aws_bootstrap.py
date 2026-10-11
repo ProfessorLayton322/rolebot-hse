@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import cast
 
 import boto3
+from botocore.config import Config
 
 from larp_bot.adapters.aws import (
     AwsStagedYandexDiskUploader,
@@ -44,11 +45,21 @@ from larp_bot.functions.container import (
     MutableRuntimeConfig,
 )
 
+AWS_DYNAMODB_CONFIG = Config(
+    retries={
+        # The production tables deliberately stay at one provisioned capacity
+        # unit. Adaptive mode paces bursts instead of exhausting the standard
+        # retry budget and sending otherwise valid commands back to SQS.
+        "mode": "adaptive",
+        "total_max_attempts": 20,
+    }
+)
+
 
 async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) -> AppContainer:
     settings = AwsSettings.from_env()
     configure_logging(settings.app_log_level)
-    dynamodb = boto3.client("dynamodb")
+    dynamodb = boto3.client("dynamodb", config=AWS_DYNAMODB_CONFIG)
     users = cast(
         UserRepository,
         DynamoUserRepository(

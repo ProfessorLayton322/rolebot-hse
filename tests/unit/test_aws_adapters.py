@@ -8,11 +8,12 @@ from typing import Any
 import pytest
 
 from larp_bot.adapters.aws.runtime_config import SsmRuntimeConfigProvider
-from larp_bot.adapters.aws.sqs import LambdaBatchConsumer, SqsFifoCommandPublisher
+from larp_bot.adapters.aws.sqs import AWS_ORDERED_MESSAGE_GROUP, LambdaBatchConsumer, SqsFifoCommandPublisher
 from larp_bot.adapters.aws.storage import AwsStagedYandexDiskUploader
 from larp_bot.adapters.yandex_disk.repository import DiskUpload
 from larp_bot.domain.models import EmptyPayload, Operation, OrderedRegistrationCommand, Platform
 from larp_bot.functions import aws_upload_completion
+from larp_bot.functions.aws_bootstrap import AWS_DYNAMODB_CONFIG
 from larp_bot.functions.gateway.handler import async_handler
 from larp_bot.functions.gateway.handler import handler as gateway_handler
 from larp_bot.functions.runtime_mode import ApplicationMode, RuntimeGate, runtime_controls_configured
@@ -31,6 +32,10 @@ def _command(operation_id: str = "11111111-1111-4111-8111-111111111111") -> Orde
     )
 
 
+def test_aws_dynamodb_client_adapts_to_free_tier_throttling() -> None:
+    assert AWS_DYNAMODB_CONFIG.retries == {"mode": "adaptive", "total_max_attempts": 20}
+
+
 class RecordingSqs:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
@@ -41,7 +46,7 @@ class RecordingSqs:
 
 
 @pytest.mark.asyncio
-async def test_aws_fifo_publisher_preserves_group_and_operation_deduplication() -> None:
+async def test_aws_fifo_publisher_serializes_commands_and_preserves_operation_deduplication() -> None:
     client = RecordingSqs()
     publisher = SqsFifoCommandPublisher(client, "https://sqs.example/commands.fifo")
     command = _command()
@@ -52,7 +57,7 @@ async def test_aws_fifo_publisher_preserves_group_and_operation_deduplication() 
         {
             "QueueUrl": "https://sqs.example/commands.fifo",
             "MessageBody": command.model_dump_json(),
-            "MessageGroupId": command.queue_group_id,
+            "MessageGroupId": AWS_ORDERED_MESSAGE_GROUP,
             "MessageDeduplicationId": command.operation_id,
         }
     ]
@@ -69,12 +74,12 @@ async def test_lambda_batch_consumer_reports_failed_and_unprocessed_group_messag
                 {
                     "messageId": "message-1",
                     "body": first.model_dump_json(),
-                    "attributes": {"MessageGroupId": first.queue_group_id},
+                    "attributes": {"MessageGroupId": AWS_ORDERED_MESSAGE_GROUP},
                 },
                 {
                     "messageId": "message-2",
                     "body": second.model_dump_json(),
-                    "attributes": {"MessageGroupId": second.queue_group_id},
+                    "attributes": {"MessageGroupId": AWS_ORDERED_MESSAGE_GROUP},
                 },
             ]
         }
@@ -85,6 +90,25 @@ async def test_lambda_batch_consumer_reports_failed_and_unprocessed_group_messag
 
     assert await consumer.receive(max_messages=10, wait_seconds=0) == []
     assert consumer.batch_response() == {"batchItemFailures": [{"itemIdentifier": "message-2"}]}
+
+
+@pytest.mark.asyncio
+async def test_lambda_batch_consumer_accepts_a_legacy_per_command_group() -> None:
+    command = _command()
+    consumer = LambdaBatchConsumer()
+    consumer.reset(
+        {
+            "Records": [
+                {
+                    "messageId": "message-1",
+                    "body": command.model_dump_json(),
+                    "attributes": {"MessageGroupId": command.queue_group_id},
+                }
+            ]
+        }
+    )
+
+    assert len(await consumer.receive(max_messages=10, wait_seconds=0)) == 1
 
 
 def test_lambda_batch_consumer_rejects_a_forged_message_group() -> None:

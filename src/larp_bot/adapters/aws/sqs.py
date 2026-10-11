@@ -7,6 +7,8 @@ from typing import Any
 from larp_bot.adapters.ymq.client import QueueEnvelope
 from larp_bot.domain.models import OrderedRegistrationCommand
 
+AWS_ORDERED_MESSAGE_GROUP = "ordered"
+
 
 class SqsFifoCommandPublisher:
     """Publish directly to the AWS FIFO queue consumed by Lambda."""
@@ -20,7 +22,10 @@ class SqsFifoCommandPublisher:
             self.client.send_message,
             QueueUrl=self.queue_url,
             MessageBody=command.model_dump_json(),
-            MessageGroupId=command.queue_group_id,
+            # The worker is deliberately limited to one concurrent invocation.
+            # A single FIFO group prevents Lambda's SQS poller from scaling past
+            # that limit and exhausting receives through trigger throttling.
+            MessageGroupId=AWS_ORDERED_MESSAGE_GROUP,
             MessageDeduplicationId=command.operation_id,
         )
 
@@ -54,7 +59,7 @@ class LambdaBatchConsumer:
             if not isinstance(attributes, dict):
                 raise ValueError("SQS record attributes must be an object")
             command = OrderedRegistrationCommand.model_validate_json(body)
-            if attributes.get("MessageGroupId") != command.queue_group_id:
+            if attributes.get("MessageGroupId") not in {AWS_ORDERED_MESSAGE_GROUP, command.queue_group_id}:
                 raise ValueError("SQS message group does not match the ordered command")
             envelopes.append(QueueEnvelope(command=command, receipt_handle=message_id))
             message_ids.append(message_id)
