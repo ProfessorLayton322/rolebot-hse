@@ -28,7 +28,8 @@ async def test_confirmation_schedule_with_real_uuid_has_deliverable_replies(
         def now(cls, tz: Any = None) -> datetime:
             return datetime(2026, 9, 29, 9, 58, tzinfo=MOSCOW_TIMEZONE).astimezone(tz)
 
-    monkeypatch.setattr("larp_bot.application.conversation.datetime", IncidentTime)
+    monkeypatch.setattr("larp_bot.application.conversation_admin_dialog.datetime", IncidentTime)
+    monkeypatch.setattr("larp_bot.application.conversation_admin_games.datetime", IncidentTime)
     scheduled = event.model_copy(
         update={
             "event_id": "2ea09780-4241-469a-829f-227e67b83473",
