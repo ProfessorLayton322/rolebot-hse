@@ -1,5 +1,11 @@
 locals {
   dashboard_period_seconds = 300
+  monitoring_function_names = merge(local.function_names, {
+    alarm_notifier = local.alarm_notifier_name
+  })
+  alarm_notification_actions = [
+    aws_lambda_function.alarm_notifier.arn,
+  ]
 
   lambda_failure_signals = {
     invocation_errors = {
@@ -41,9 +47,9 @@ locals {
   }
 
   lambda_function_index = {
-    for index, key in sort(keys(local.function_names)) : tostring(index) => {
+    for index, key in sort(keys(local.monitoring_function_names)) : tostring(index) => {
       key  = key
-      name = local.function_names[key]
+      name = local.monitoring_function_names[key]
     }
   }
 
@@ -53,7 +59,7 @@ locals {
         "AWS/Lambda",
         "Duration",
         "FunctionName",
-        local.function_names[key],
+        local.monitoring_function_names[key],
         {
           id      = "duration_${key}"
           label   = "${replace(key, "_", " ")} duration"
@@ -73,12 +79,12 @@ locals {
   ]...)
 
   lambda_error_rate_metrics = concat([
-    for index, key in sort(keys(local.function_names)) : [
+    for index, key in sort(keys(local.monitoring_function_names)) : [
       [
         "AWS/Lambda",
         "Invocations",
         "FunctionName",
-        local.function_names[key],
+        local.monitoring_function_names[key],
         {
           id      = "inv_${index}"
           period  = local.dashboard_period_seconds
@@ -90,7 +96,7 @@ locals {
         "AWS/Lambda",
         "Errors",
         "FunctionName",
-        local.function_names[key],
+        local.monitoring_function_names[key],
         {
           id      = "errors_${index}"
           period  = local.dashboard_period_seconds
@@ -111,11 +117,11 @@ locals {
   lambda_failure_count_metrics = concat([
     for signal_key, signal in local.lambda_failure_signals : concat(
       [
-        for index, key in sort(keys(local.function_names)) : [
+        for index, key in sort(keys(local.monitoring_function_names)) : [
           "AWS/Lambda",
           signal.metric_name,
           "FunctionName",
-          local.function_names[key],
+          local.monitoring_function_names[key],
           {
             id      = "${signal.id}_${index}"
             period  = local.dashboard_period_seconds
@@ -126,7 +132,7 @@ locals {
       ],
       [[
         {
-          expression = "SUM([${join(",", [for index, _ in sort(keys(local.function_names)) : "${signal.id}_${index}"])}])"
+          expression = "SUM([${join(",", [for index, _ in sort(keys(local.monitoring_function_names)) : "${signal.id}_${index}"])}])"
           id         = "total_${signal.id}"
           label      = signal.label
         },
@@ -135,7 +141,7 @@ locals {
   ]...)
 
   lambda_async_age_metrics = [
-    for key, name in local.function_names : [
+    for key, name in local.monitoring_function_names : [
       "AWS/Lambda",
       "AsyncEventAge",
       "FunctionName",
@@ -214,6 +220,8 @@ resource "aws_cloudwatch_metric_alarm" "registration_dlq_not_empty" {
   statistic           = "Maximum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   dimensions = {
     QueueName = aws_sqs_queue.registration_command_failures.name
@@ -231,6 +239,8 @@ resource "aws_cloudwatch_metric_alarm" "registration_queue_age" {
   statistic           = "Maximum"
   threshold           = 300
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   dimensions = {
     QueueName = aws_sqs_queue.registration_commands.name
@@ -246,6 +256,8 @@ resource "aws_cloudwatch_metric_alarm" "lambda_failure" {
   evaluation_periods  = 1
   threshold           = 0
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   metric_query {
     id          = "total"
@@ -282,6 +294,8 @@ resource "aws_cloudwatch_metric_alarm" "lambda_async_event_age" {
   datapoints_to_alarm = 2
   threshold           = 300000
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   metric_query {
     id          = "oldest"
@@ -321,6 +335,8 @@ resource "aws_cloudwatch_metric_alarm" "gateway_url_server_errors" {
   statistic           = "Sum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   dimensions = {
     FunctionName = local.function_names.gateway
@@ -338,6 +354,8 @@ resource "aws_cloudwatch_metric_alarm" "registration_event_source_failures" {
   statistic           = "Sum"
   threshold           = 0
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   dimensions = {
     EventSourceMappingUUID = aws_lambda_event_source_mapping.registration_commands.uuid
@@ -352,6 +370,8 @@ resource "aws_cloudwatch_metric_alarm" "registration_retry_storm" {
   datapoints_to_alarm = 2
   threshold           = 2
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   metric_query {
     id          = "amplification"
@@ -398,6 +418,8 @@ resource "aws_cloudwatch_metric_alarm" "scheduler_delivery_failures" {
   evaluation_periods  = 1
   threshold           = 0
   treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_notification_actions
+  ok_actions          = local.alarm_notification_actions
 
   metric_query {
     id          = "total"

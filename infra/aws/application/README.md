@@ -97,9 +97,11 @@ asynchronous-event age, event-source invocation failures, Scheduler delivery
 failures, and a sustained retry storm. The retry-storm alarm requires at least
 five invoked records and more than two invocations per successful delete for
 two consecutive five-minute periods, avoiding a page for a single in-flight
-batch while still exposing lower-volume retries on the graphs. These alarms
-have no notification actions; use the dashboard alarm panel unless an SNS or
-incident destination is deliberately added later.
+batch while still exposing lower-volume retries on the graphs. Every alarm and
+recovery transition invokes the least-privileged `${project_name}-${environment}-alarm-notifier`
+Lambda, which publishes an urgent or recovery message to the validated ntfy.sh
+topic supplied through the `NTFY_TOPIC` GitHub variable. CloudWatch invokes the
+function directly, so this path adds no SNS resource or subscription.
 
 The GB-s/s chart is a compute-usage approximation, not a bill. It excludes
 request, log, storage, and transfer charges, free-tier credits, and small

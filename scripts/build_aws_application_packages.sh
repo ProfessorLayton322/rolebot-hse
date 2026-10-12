@@ -5,11 +5,17 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${repo_dir}/build/aws-application"
 output_dir="${repo_dir}/dist"
 python_build_dir="${build_dir}/python"
+alarm_notifier_build_dir="${build_dir}/alarm-notifier"
 notifier_build_dir="${build_dir}/registration-notifier"
 uploader_build_dir="${build_dir}/disk-uploader"
 
 rm -rf "${build_dir}"
-mkdir -p "${python_build_dir}" "${notifier_build_dir}" "${uploader_build_dir}" "${output_dir}"
+mkdir -p \
+  "${python_build_dir}" \
+  "${alarm_notifier_build_dir}" \
+  "${notifier_build_dir}" \
+  "${uploader_build_dir}" \
+  "${output_dir}"
 
 python3 -m pip install \
   --disable-pip-version-check \
@@ -28,6 +34,13 @@ find "${python_build_dir}" -type f -exec touch -t 198001010000 '{}' +
 python3 "${repo_dir}/scripts/reproducible_zip.py" \
   "${python_build_dir}" \
   "${output_dir}/aws-application-python.zip"
+
+cp "${repo_dir}/aws_alarm_notifier.py" "${alarm_notifier_build_dir}/"
+touch -t 198001010000 "${alarm_notifier_build_dir}/aws_alarm_notifier.py"
+python3 "${repo_dir}/scripts/reproducible_zip.py" \
+  "${alarm_notifier_build_dir}" \
+  "${output_dir}/aws-alarm-notifier.zip" \
+  aws_alarm_notifier.py
 
 zip_bytes="$(stat -c '%s' "${output_dir}/aws-application-python.zip")"
 unzipped_bytes="$(du -sb "${python_build_dir}" | cut -f1)"
@@ -70,7 +83,7 @@ python3 "${repo_dir}/scripts/reproducible_zip.py" \
   "${output_dir}/aws-disk-uploader.zip" \
   bootstrap
 
-for archive in aws-registration-notifier.zip aws-disk-uploader.zip; do
+for archive in aws-alarm-notifier.zip aws-registration-notifier.zip aws-disk-uploader.zip; do
   archive_bytes="$(stat -c '%s' "${output_dir}/${archive}")"
   if ((archive_bytes > 50 * 1024 * 1024)); then
     echo "${archive} exceeds the 50 MiB direct-upload limit" >&2
@@ -80,5 +93,6 @@ done
 
 sha256sum \
   "${output_dir}/aws-application-python.zip" \
+  "${output_dir}/aws-alarm-notifier.zip" \
   "${output_dir}/aws-registration-notifier.zip" \
   "${output_dir}/aws-disk-uploader.zip"

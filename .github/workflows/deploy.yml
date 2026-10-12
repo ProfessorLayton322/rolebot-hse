@@ -48,6 +48,7 @@ jobs:
       TF_VAR_ydb_rehearsal_enabled: ${{ vars.YDB_REHEARSAL_ENABLED || 'false' }}
       TF_VAR_google_folder_id: ${{ vars.GOOGLE_FOLDER_ID }}
       TF_VAR_google_apps_script_url: ${{ vars.GOOGLE_APPS_SCRIPT_URL }}
+      TF_VAR_ntfy_topic: ${{ vars.NTFY_TOPIC }}
       TF_VAR_tg_admin_ids: ${{ vars.TG_ADMIN_IDS }}
       TF_VAR_vk_admin_ids: ${{ vars.VK_ADMIN_IDS }}
       TF_VAR_tg_gamemaster_ids: ${{ vars.TG_GAMEMASTER_IDS }}
