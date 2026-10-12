@@ -355,3 +355,32 @@ async def test_daily_pass_completion_sends_link_before_queueing_its_consistency_
 
     assert len(transport.sent) == 1
     assert transport.sent[0][3].endswith("https://disk.example/daily-passes")
+
+
+@pytest.mark.asyncio
+async def test_daily_pass_consistency_refresh_completion_does_not_queue_another_refresh() -> None:
+    publisher = MemoryCommandPublisher()
+    service = UploadCompletionService(
+        MemoryEventRepository(),
+        MemoryUserRepository(),
+        StaticAdminProvider(),
+        MemoryDeferredTransport(),
+        publisher,
+    )
+    game_date = date(2026, 11, 14)
+
+    await service.handle(
+        {
+            "schema_version": 1,
+            "job_id": "12345678-1234-1234-1234-123456789abc",
+            "success": True,
+            "public_urls": {"pass": "https://disk.example/daily-passes"},
+            "callback": {
+                "kind": "daily_passes",
+                "game_date": game_date.isoformat(),
+                "resource_path": daily_pass_table_path(game_date),
+            },
+        }
+    )
+
+    assert publisher.commands == []
