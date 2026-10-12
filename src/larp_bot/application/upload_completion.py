@@ -363,11 +363,12 @@ class UploadCompletionService:
             ),
             buttons=[admin_menu_button()],
         )
-        # Run the final consistency refresh from the ordered worker, whose
-        # function has a real disk-uploader route. The completion function's
-        # route is deliberately non-routable to avoid a Terraform dependency
-        # cycle, so refreshing inline would prevent this message from arriving.
-        await self._queue_daily_pass_refresh(game_date, job_id)
+        # A requester-driven export gets one final consistency refresh from the
+        # ordered worker. That refresh creates another completion without a
+        # requester, which must stop here instead of perpetually re-enqueueing
+        # itself with a new upload job ID.
+        if callback.get("requester") is not None:
+            await self._queue_daily_pass_refresh(game_date, job_id)
 
     async def handle(self, payload: Mapping[str, Any]) -> None:
         if payload.get("schema_version") != 1:
