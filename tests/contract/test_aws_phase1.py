@@ -68,7 +68,7 @@ def test_standby_controls_cannot_accept_production_traffic() -> None:
     assert 'authorization_type = "NONE"' in lambda_config
     assert 'action                 = "lambda:InvokeFunctionUrl"' in lambda_config
     assert "invoked_via_function_url = true" in lambda_config
-    assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
+    assert "enabled          = var.sqs_event_mapping_enabled" in lambda_config
     assert 'state       = var.scheduler_enabled ? "ENABLED" : "DISABLED"' in scheduler
     assert "APPLICATION_MODE = (" in lambda_config
     assert "var.application_mode" in lambda_config
@@ -93,7 +93,7 @@ def test_fifo_has_a_fifo_dlq_and_disabled_partial_batch_consumer() -> None:
     assert "maxReceiveCount     = 5" in queues
     assert "sqs_managed_sse_enabled     = true" in queues
     assert 'function_response_types            = ["ReportBatchItemFailures"]' in lambda_config
-    assert "enabled                            = var.sqs_event_mapping_enabled" in lambda_config
+    assert "enabled          = var.sqs_event_mapping_enabled" in lambda_config
     assert "batch_size                         = 1" in lambda_config
     assert 'reserved_concurrent_executions = each.key == "ordered_worker" ? 1 : -1' in lambda_config
 
@@ -150,6 +150,8 @@ def test_aws_dashboard_covers_compute_errors_and_retry_storms() -> None:
     assert "evaluation_periods  = 2" in monitoring
     assert "datapoints_to_alarm = 2" in monitoring
     assert 'metrics = ["EventCount"]' in lambda_config
+    assert monitoring.count("alarm_actions       = local.alarm_notification_actions") == 8
+    assert monitoring.count("ok_actions          = local.alarm_notification_actions") == 8
 
     for metric in (
         "TargetErrorCount",
@@ -167,6 +169,35 @@ def test_aws_dashboard_covers_compute_errors_and_retry_storms() -> None:
     assert "Recent application and runtime errors" in monitoring
     assert "SOURCE logGroups(namePrefix:" in monitoring
     assert 'output "cloudwatch_operations_dashboard_url"' in outputs
+
+
+def test_cloudwatch_alarms_publish_to_validated_ntfy_topic() -> None:
+    notifier_config = (APPLICATION / "alarm_notifier.tf").read_text()
+    locals_config = (APPLICATION / "locals.tf").read_text()
+    variables = (APPLICATION / "variables.tf").read_text()
+    workflows = "\n".join(
+        (ROOT / path).read_text()
+        for path in (
+            ".github/workflows/deploy.yml",
+            ".github/workflows/aws-deploy.yml",
+            ".github/workflows/aws-plan.yml",
+        )
+    )
+
+    assert 'alarm_notifier_name = "${local.name_prefix}-alarm-notifier"' in locals_config
+    assert 'handler       = "aws_alarm_notifier.handler"' in notifier_config
+    assert "aws-alarm-notifier.zip" in (ROOT / "scripts/build_aws_application_packages.sh").read_text()
+    assert "memory_size      = 128" in notifier_config
+    assert "NTFY_TOPIC = var.ntfy_topic" in notifier_config
+    assert 'principal      = "lambda.alarms.cloudwatch.amazonaws.com"' in notifier_config
+    assert "source_account = var.aws_account_id" in notifier_config
+    assert 'source_arn     = "arn:aws:cloudwatch:' in notifier_config
+    assert "ssm:" not in notifier_config
+    assert "dynamodb:" not in notifier_config
+    assert "sqs:" not in notifier_config
+    assert 'variable "ntfy_topic"' in variables
+    assert "^[-_A-Za-z0-9]{1,64}$" in variables
+    assert workflows.count("TF_VAR_ntfy_topic: ${{ vars.NTFY_TOPIC }}") == 3
 
 
 def test_generated_cloudwatch_metrics_preserve_row_arrays() -> None:

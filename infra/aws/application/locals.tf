@@ -1,5 +1,6 @@
 locals {
-  name_prefix = "${var.project_name}-${var.environment}"
+  name_prefix         = "${var.project_name}-${var.environment}"
+  alarm_notifier_name = "${local.name_prefix}-alarm-notifier"
 
   tags = {
     Application = var.project_name

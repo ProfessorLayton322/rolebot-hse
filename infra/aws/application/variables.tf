@@ -38,6 +38,12 @@ variable "python_application_zip_path" {
   default     = "../../../dist/aws-application-python.zip"
 }
 
+variable "alarm_notifier_zip_path" {
+  description = "Minimal Python CloudWatch-to-ntfy alarm notifier package."
+  type        = string
+  default     = "../../../dist/aws-alarm-notifier.zip"
+}
+
 variable "registration_notifier_zip_path" {
   description = "AWS-native Go registration notifier package."
   type        = string
@@ -67,6 +73,16 @@ variable "google_apps_script_url" {
   validation {
     condition     = can(regex("^https://script\\.google\\.com/macros/s/[A-Za-z0-9_-]+/exec$", var.google_apps_script_url))
     error_message = "google_apps_script_url must be an https://script.google.com/macros/s/.../exec URL."
+  }
+}
+
+variable "ntfy_topic" {
+  description = "Public ntfy.sh topic receiving CloudWatch alarm and recovery notifications."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[-_A-Za-z0-9]{1,64}$", var.ntfy_topic))
+    error_message = "ntfy_topic must contain 1-64 letters, numbers, underscores, or dashes."
   }
 }
 
