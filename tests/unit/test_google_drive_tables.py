@@ -7,7 +7,11 @@ import pytest
 
 from larp_bot.adapters.google_drive import tables
 from larp_bot.adapters.google_drive.statistics import DriveFile
-from larp_bot.adapters.google_drive.tables import GOOGLE_CALLBACK_URLS, GoogleDriveMirroredUploader
+from larp_bot.adapters.google_drive.tables import (
+    GOOGLE_CALLBACK_URLS,
+    GoogleDriveMirroredUploader,
+    GoogleDriveTableStorage,
+)
 from larp_bot.adapters.yandex_disk.repository import (
     PPTX_MIME_TYPE,
     XLSX_MIME_TYPE,
@@ -89,6 +93,73 @@ class HangingUploader(RecordingUploader):
     ) -> None:
         await super().submit(files, callback=callback, before_invoke=before_invoke)
         await asyncio.Event().wait()
+
+
+class DirectTableDrive:
+    def __init__(self, files: dict[str, DriveFile] | None = None) -> None:
+        self.files = files or {}
+        self.replacements: list[tuple[str, bytes]] = []
+
+    async def find_named_files(self, folder_id: str, name: str) -> list[DriveFile]:
+        assert folder_id == "tables-folder"
+        file = self.files.get(name)
+        return [] if file is None else [file]
+
+    async def replace(self, file_id: str, content: bytes) -> None:
+        self.replacements.append((file_id, content))
+
+
+class OwnerTableDrive(MemoryTableDrive):
+    def __init__(self, direct: DirectTableDrive) -> None:
+        super().__init__()
+        self.direct = direct
+        self.active_creations = 0
+        self.maximum_active_creations = 0
+
+    async def upsert_xlsx(self, folder_id: str, name: str, content: bytes) -> DriveFile:
+        self.active_creations += 1
+        self.maximum_active_creations = max(self.maximum_active_creations, self.active_creations)
+        await asyncio.sleep(0)
+        file = await super().upsert_xlsx(folder_id, name, content)
+        self.direct.files[name] = file
+        self.active_creations -= 1
+        return file
+
+
+@pytest.mark.asyncio
+async def test_existing_google_table_is_updated_without_the_owner_gateway() -> None:
+    name = "events — event-id — master.xlsx"
+    existing = DriveFile(
+        id="existing-file",
+        name=name,
+        mimeType=XLSX_MIME_TYPE,
+        webViewLink="https://drive.example/existing-file",
+    )
+    direct = DirectTableDrive({name: existing})
+    owner = OwnerTableDrive(direct)
+    storage = GoogleDriveTableStorage(direct, owner)
+
+    result = await storage.upsert_xlsx("tables-folder", name, b"updated")
+
+    assert result == existing
+    assert direct.replacements == [("existing-file", b"updated")]
+    assert owner.contents == {}
+
+
+@pytest.mark.asyncio
+async def test_missing_google_tables_are_created_serially_by_the_owner_gateway() -> None:
+    direct = DirectTableDrive()
+    owner = OwnerTableDrive(direct)
+    storage = GoogleDriveTableStorage(direct, owner)
+
+    master, public = await asyncio.gather(
+        storage.upsert_xlsx("tables-folder", "events — event-id — master.xlsx", b"master"),
+        storage.upsert_xlsx("tables-folder", "events — event-id — public.xlsx", b"public"),
+    )
+
+    assert master.name.endswith("master.xlsx")
+    assert public.name.endswith("public.xlsx")
+    assert owner.maximum_active_creations == 1
 
 
 @pytest.mark.asyncio
