@@ -82,6 +82,7 @@ async def _run() -> dict[str, object]:
             },
             links,
             NtfySnapshotAlertPublisher(_required_env("NTFY_TOPIC"), http),
+            required_destinations=frozenset({"google_drive"}),
         )
         result = await service.run()
     return {

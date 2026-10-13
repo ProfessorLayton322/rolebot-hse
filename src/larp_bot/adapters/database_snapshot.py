@@ -71,6 +71,7 @@ class GoogleDriveSnapshotUploader:
 
 class YandexDiskSnapshotUploader:
     API = "https://cloud-api.yandex.net/v1/disk"
+    MAX_ATTEMPTS = 5
     RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
     def __init__(self, token: str, client: httpx.AsyncClient) -> None:
@@ -88,15 +89,17 @@ class YandexDiskSnapshotUploader:
         allowed_status_codes: frozenset[int] = frozenset(),
         **kwargs: Any,
     ) -> httpx.Response:
-        for attempt in range(3):
+        for attempt in range(self.MAX_ATTEMPTS):
             try:
                 response = await self.client.request(method, url, **kwargs)
             except httpx.HTTPError as exc:
-                if attempt < 2:
+                if attempt < self.MAX_ATTEMPTS - 1:
                     await asyncio.sleep(2**attempt)
                     continue
-                raise RuntimeError(f"Yandex Disk {operation} failed after 3 attempts ({type(exc).__name__})") from exc
-            if response.status_code not in self.RETRYABLE_STATUS_CODES or attempt == 2:
+                raise RuntimeError(
+                    f"Yandex Disk {operation} failed after {self.MAX_ATTEMPTS} attempts ({type(exc).__name__})"
+                ) from exc
+            if response.status_code not in self.RETRYABLE_STATUS_CODES or attempt == self.MAX_ATTEMPTS - 1:
                 break
             await asyncio.sleep(2**attempt)
 

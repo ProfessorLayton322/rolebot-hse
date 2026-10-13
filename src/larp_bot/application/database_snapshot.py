@@ -64,6 +64,7 @@ class DatabaseSnapshotService:
         links: SnapshotLinkStore,
         alerts: SnapshotAlertPublisher,
         *,
+        required_destinations: frozenset[str] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not destinations:
@@ -72,6 +73,12 @@ class DatabaseSnapshotService:
         self.destinations = dict(destinations)
         self.links = links
         self.alerts = alerts
+        self.required_destinations = required_destinations or frozenset(self.destinations)
+        unknown_required = self.required_destinations.difference(self.destinations)
+        if unknown_required:
+            raise ValueError(
+                f"required snapshot destinations are not configured: {', '.join(sorted(unknown_required))}"
+            )
         self.clock = clock or (lambda: datetime.now(UTC_PLUS_THREE))
 
     async def _upload_one(self, name: str, destination: SnapshotDestination, content: bytes) -> tuple[str, str]:
@@ -112,7 +119,15 @@ class DatabaseSnapshotService:
 
         if failed:
             await self.alerts.upload_failed(tuple(failed), exported_at)
-            raise DatabaseSnapshotError(f"database snapshot upload failed: {', '.join(failed)}") from causes[0]
+            required_failures = self.required_destinations.intersection(failed)
+            if required_failures:
+                raise DatabaseSnapshotError(
+                    f"database snapshot upload failed: {', '.join(sorted(required_failures))}"
+                ) from causes[0]
+            for name in failed:
+                persisted_url = await self.links.get(name)
+                if persisted_url is not None:
+                    urls[name] = persisted_url
 
         return SnapshotResult(
             exported_at=exported_at,

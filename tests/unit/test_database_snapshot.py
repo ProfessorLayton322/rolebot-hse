@@ -137,6 +137,31 @@ async def test_one_destination_failure_does_not_skip_the_other_and_sends_ntfy_al
 
 
 @pytest.mark.asyncio
+async def test_optional_yandex_failure_alarms_without_blocking_google_readiness() -> None:
+    google = FakeDestination("https://drive.example/stable")
+    yandex = FakeDestination("https://disk.example/stable", error=RuntimeError("unavailable"))
+    links = FakeLinks({"yandex_disk": "https://disk.example/stable"})
+    alerts = FakeAlerts()
+    service = DatabaseSnapshotService(
+        FakeExporter(),
+        {"google_drive": google, "yandex_disk": yandex},
+        links,
+        alerts,
+        required_destinations=frozenset({"google_drive"}),
+        clock=lambda: SNAPSHOT_TIME,
+    )
+
+    result = await service.run()
+
+    assert result.urls == {
+        "google_drive": "https://drive.example/stable",
+        "yandex_disk": "https://disk.example/stable",
+    }
+    assert links.created == {"google_drive": "https://drive.example/stable"}
+    assert alerts.failures == [(("yandex_disk",), "2026-10-13T12:08:07.654321+03:00")]
+
+
+@pytest.mark.asyncio
 async def test_changed_destination_link_fails_closed_and_alarms() -> None:
     links = FakeLinks({"google_drive": "https://drive.example/original"})
     alerts = FakeAlerts()
