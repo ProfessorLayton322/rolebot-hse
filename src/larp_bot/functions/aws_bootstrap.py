@@ -19,6 +19,7 @@ from larp_bot.adapters.google_drive import (
     GoogleDriveMirroredUploader,
     GoogleDriveRestClient,
     GoogleDriveStatisticsRepository,
+    GoogleDriveTableStorage,
 )
 from larp_bot.adapters.transports import CloudflareTelegramEgress, MultiplexedDeferredTransport, VkApiTransport
 from larp_bot.adapters.yandex_disk.repository import YandexDiskRestClient, YandexDiskShowcaseRepository
@@ -100,11 +101,12 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         function_name=settings.aws_disk_uploader_function,
     )
     google_drive = GoogleDriveRestClient(secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    google_tables = GoogleDriveAppsScriptClient(
+    google_table_bootstrap = GoogleDriveAppsScriptClient(
         settings.google_apps_script_url,
         secrets["GOOGLE_APPS_SCRIPT_HMAC_SECRET"],
         settings.google_folder_id,
     )
+    google_tables = GoogleDriveTableStorage(google_drive, google_table_bootstrap)
     mirrored_uploader = GoogleDriveMirroredUploader(disk_uploader, google_tables, settings.google_folder_id)
     showcase = YandexDiskShowcaseRepository(disk, mirrored_uploader)
     player_statistics = GoogleDriveStatisticsRepository(google_drive, settings.google_folder_id)

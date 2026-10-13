@@ -31,6 +31,12 @@ class GoogleTableStorage(Protocol):
     async def publish_file(self, file_id: str) -> None: ...
 
 
+class DirectGoogleTableStorage(Protocol):
+    async def find_named_files(self, folder_id: str, name: str) -> list[DriveFile]: ...
+
+    async def replace(self, file_id: str, content: bytes) -> None: ...
+
+
 def mirrored_table_name(disk_path: str) -> str:
     prefix = "disk:/larp-bot/"
     if not disk_path.startswith(prefix) or not disk_path.lower().endswith(".xlsx"):
@@ -40,6 +46,47 @@ def mirrored_table_name(disk_path: str) -> str:
 
 def drive_file_url(file: DriveFile) -> str:
     return file.web_view_link or f"https://drive.google.com/file/d/{quote(file.file_id, safe='')}/view"
+
+
+class GoogleDriveTableStorage:
+    """Update existing tables directly and use the owner gateway only to create them."""
+
+    def __init__(self, direct: DirectGoogleTableStorage, owner: GoogleTableStorage) -> None:
+        self.direct = direct
+        self.owner = owner
+        self._creation_lock = asyncio.Lock()
+
+    async def _existing(self, folder_id: str, name: str) -> DriveFile | None:
+        files = await self.direct.find_named_files(folder_id, name)
+        if len(files) > 1:
+            raise RuntimeError(f"Google Drive contains duplicate mirrored table {name}")
+        if not files:
+            return None
+        file = files[0]
+        if file.mime_type != XLSX_MIME_TYPE:
+            raise RuntimeError(f"Google Drive mirror destination {name} is not XLSX")
+        return file
+
+    async def upsert_xlsx(self, folder_id: str, name: str, content: bytes) -> DriveFile:
+        file = await self._existing(folder_id, name)
+        if file is not None:
+            await self.direct.replace(file.file_id, content)
+            return file
+        async with self._creation_lock:
+            file = await self._existing(folder_id, name)
+            if file is not None:
+                await self.direct.replace(file.file_id, content)
+                return file
+            return await self.owner.upsert_xlsx(folder_id, name, content)
+
+    async def delete_named_xlsx(self, folder_id: str, name: str) -> None:
+        await self.owner.delete_named_xlsx(folder_id, name)
+
+    async def named_xlsx_exists(self, folder_id: str, name: str) -> bool:
+        return await self._existing(folder_id, name) is not None
+
+    async def publish_file(self, file_id: str) -> None:
+        await self.owner.publish_file(file_id)
 
 
 class GoogleDriveMirroredUploader:

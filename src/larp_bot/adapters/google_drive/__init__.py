@@ -5,7 +5,7 @@ from .statistics import (
     GoogleDriveRestClient,
     GoogleDriveStatisticsRepository,
 )
-from .tables import GOOGLE_CALLBACK_URLS, GoogleDriveMirroredUploader, mirrored_table_name
+from .tables import GOOGLE_CALLBACK_URLS, GoogleDriveMirroredUploader, GoogleDriveTableStorage, mirrored_table_name
 
 __all__ = [
     "ATTENDANCE_FILE_NAME",
@@ -15,5 +15,6 @@ __all__ = [
     "GoogleDriveMirroredUploader",
     "GoogleDriveRestClient",
     "GoogleDriveStatisticsRepository",
+    "GoogleDriveTableStorage",
     "mirrored_table_name",
 ]
