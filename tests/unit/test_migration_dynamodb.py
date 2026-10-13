@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
@@ -172,3 +173,22 @@ async def test_dynamodb_export_rejects_missing_uniqueness_lock() -> None:
 
     with pytest.raises(CanonicalValidationError, match="uniqueness locks"):
         await store.export_document()
+
+
+@pytest.mark.asyncio
+async def test_dynamodb_export_canonicalizes_equivalent_timestamp_offsets_in_payload() -> None:
+    client = FakeDynamoClient()
+    store = DynamoMigrationStore(client, DynamoTableNames.from_prefix("test"))
+    document = _document()
+    await store.import_document(document)
+    event_item = next(item for item in client.tables["test-events"] if _plain(item).get("record_type") == "event")
+    plain = _plain(event_item)
+    payload = json.loads(plain["payload"])
+    payload["registration_open_at"] = "2026-01-01T03:00:00+03:00"
+    plain["payload"] = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    event_item.clear()
+    event_item.update(_serialized(plain))
+
+    exported = await store.export_document()
+
+    assert exported["tables"]["events"][0]["registration_open_at"] == "2026-01-01T00:00:00.000000Z"

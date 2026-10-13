@@ -23,6 +23,7 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 DRIVE_API = "https://www.googleapis.com/drive/v3"
 DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
 XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+JSON_MIME_TYPE = "application/json"
 
 
 class DriveFile(BaseModel):
@@ -168,14 +169,60 @@ class GoogleDriveRestClient:
         return response.content
 
     async def replace(self, file_id: str, content: bytes) -> None:
+        await self.replace_media(file_id, content, XLSX_MIME_TYPE)
+
+    async def replace_media(self, file_id: str, content: bytes, mime_type: str) -> None:
         response = await self._request(
             "PATCH",
             f"{DRIVE_UPLOAD_API}/files/{quote(file_id, safe='')}",
             params={"uploadType": "media", "supportsAllDrives": "true"},
-            headers={"Content-Type": XLSX_MIME_TYPE},
+            headers={"Content-Type": mime_type},
             data=content,
         )
         response.raise_for_status()
+
+    async def replace_with_metadata(
+        self,
+        file_id: str,
+        *,
+        name: str,
+        mime_type: str,
+        content: bytes,
+    ) -> DriveFile:
+        boundary = f"rolebot-{uuid4().hex}"
+        metadata = json.dumps(
+            {"name": name, "mimeType": mime_type},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        body = b"".join(
+            (
+                f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode(),
+                metadata,
+                f"\r\n--{boundary}\r\nContent-Type: {mime_type}\r\n\r\n".encode(),
+                content,
+                f"\r\n--{boundary}--\r\n".encode(),
+            )
+        )
+        response = await self._request(
+            "PATCH",
+            f"{DRIVE_UPLOAD_API}/files/{quote(file_id, safe='')}",
+            params={
+                "uploadType": "multipart",
+                "supportsAllDrives": "true",
+                "fields": "id,name,mimeType,webViewLink",
+            },
+            headers={"Content-Type": f'multipart/related; boundary="{boundary}"'},
+            data=body,
+        )
+        response.raise_for_status()
+        try:
+            return DriveFile.model_validate(response.json())
+        except ValidationError as exc:
+            raise RuntimeError("Google Drive returned invalid updated-file metadata") from exc
+
+    async def find_named_files(self, folder_id: str, name: str) -> list[DriveFile]:
+        return await self._find_files(folder_id, name)
 
     async def _create_xlsx(self, folder_id: str, name: str, content: bytes) -> DriveFile:
         boundary = f"rolebot-{uuid4().hex}"
