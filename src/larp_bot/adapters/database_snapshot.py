@@ -71,6 +71,7 @@ class GoogleDriveSnapshotUploader:
 
 class YandexDiskSnapshotUploader:
     API = "https://cloud-api.yandex.net/v1/disk"
+    RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
     def __init__(self, token: str, client: httpx.AsyncClient) -> None:
         if not token:
@@ -78,15 +79,48 @@ class YandexDiskSnapshotUploader:
         self.client = client
         self.headers = {"Authorization": f"OAuth {token}"}
 
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        operation: str,
+        allowed_status_codes: frozenset[int] = frozenset(),
+        **kwargs: Any,
+    ) -> httpx.Response:
+        for attempt in range(3):
+            try:
+                response = await self.client.request(method, url, **kwargs)
+            except httpx.HTTPError as exc:
+                if attempt < 2:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                raise RuntimeError(f"Yandex Disk {operation} failed after 3 attempts ({type(exc).__name__})") from exc
+            if response.status_code not in self.RETRYABLE_STATUS_CODES or attempt == 2:
+                break
+            await asyncio.sleep(2**attempt)
+
+        if response.is_error and response.status_code not in allowed_status_codes:
+            try:
+                error = response.json()
+            except ValueError:
+                error = None
+            description = error.get("description") if isinstance(error, Mapping) else None
+            detail = f": {description}" if isinstance(description, str) else ""
+            raise RuntimeError(f"Yandex Disk {operation} failed with HTTP {response.status_code}{detail}")
+        return response
+
     async def _metadata(self) -> Mapping[str, Any] | None:
-        response = await self.client.get(
+        response = await self._request(
+            "GET",
             f"{self.API}/resources",
+            operation="metadata lookup",
+            allowed_status_codes=frozenset({404}),
             headers=self.headers,
             params={"path": YANDEX_SNAPSHOT_PATH, "fields": "path,public_url"},
         )
         if response.status_code == 404:
             return None
-        response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, Mapping):
             raise RuntimeError("Yandex Disk returned invalid snapshot metadata")
@@ -100,28 +134,31 @@ class YandexDiskSnapshotUploader:
             if metadata.get("public_url") != expected_url:
                 raise RuntimeError("Yandex Disk database snapshot public URL changed")
 
-        link_response = await self.client.get(
+        link_response = await self._request(
+            "GET",
             f"{self.API}/resources/upload",
+            operation="upload-link request",
             headers=self.headers,
             params={"path": YANDEX_SNAPSHOT_PATH, "overwrite": "true"},
         )
-        link_response.raise_for_status()
         href = link_response.json().get("href")
         if not isinstance(href, str) or not href.startswith("https://"):
             raise RuntimeError("Yandex Disk did not return an HTTPS snapshot upload URL")
 
-        upload_response = await self.client.put(
+        await self._request(
+            "PUT",
             href,
+            operation="content upload",
             headers={"Content-Type": JSON_MIME_TYPE},
             content=content,
         )
-        upload_response.raise_for_status()
-        publish_response = await self.client.put(
+        await self._request(
+            "PUT",
             f"{self.API}/resources/publish",
+            operation="publish",
             headers=self.headers,
             params={"path": YANDEX_SNAPSHOT_PATH},
         )
-        publish_response.raise_for_status()
 
         metadata = await self._metadata()
         public_url = metadata.get("public_url") if metadata is not None else None

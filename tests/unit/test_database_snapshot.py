@@ -258,6 +258,44 @@ async def test_yandex_snapshot_refuses_to_overwrite_a_changed_public_link() -> N
 
 
 @pytest.mark.asyncio
+async def test_yandex_snapshot_retries_transient_upload_failure() -> None:
+    upload_attempts = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal upload_attempts
+        if request.url.path.endswith("/resources/upload"):
+            return httpx.Response(200, json={"href": "https://upload.example/stable"})
+        if request.url.host == "upload.example":
+            upload_attempts += 1
+            return httpx.Response(503 if upload_attempts == 1 else 201)
+        if request.url.path.endswith("/resources/publish"):
+            return httpx.Response(200)
+        return httpx.Response(200, json={"public_url": "https://disk.example/stable"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        uploader = YandexDiskSnapshotUploader("token", client)
+        url = await uploader.upload(b"snapshot", expected_url="https://disk.example/stable")
+
+    assert url == "https://disk.example/stable"
+    assert upload_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_yandex_snapshot_error_does_not_expose_upload_url() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/resources/upload"):
+            return httpx.Response(200, json={"href": "https://upload.example/stable?secret=sensitive"})
+        return httpx.Response(403, json={"description": "upload denied"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        uploader = YandexDiskSnapshotUploader("token", client)
+        with pytest.raises(RuntimeError, match="content upload failed with HTTP 403: upload denied") as caught:
+            await uploader.upload(b"snapshot", expected_url=None)
+
+    assert "sensitive" not in str(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_ntfy_alarm_names_failed_snapshot_destinations() -> None:
     captured: list[dict[str, Any]] = []
 

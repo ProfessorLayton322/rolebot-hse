@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ from typing import Any, Protocol
 from larp_bot.migration.canonical import CanonicalDocument
 
 UTC_PLUS_THREE = timezone(timedelta(hours=3))
+LOGGER = logging.getLogger(__name__)
 
 
 class SnapshotExporter(Protocol):
@@ -101,6 +103,7 @@ class DatabaseSnapshotService:
         causes: list[BaseException] = []
         for name, outcome in zip(names, outcomes, strict=True):
             if isinstance(outcome, BaseException):
+                LOGGER.error("database snapshot destination %s failed: %s", name, outcome)
                 failed.append(name)
                 causes.append(outcome)
             else:
