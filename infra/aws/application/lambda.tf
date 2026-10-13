@@ -25,7 +25,7 @@ resource "aws_lambda_function" "application" {
   reserved_concurrent_executions = each.key == "ordered_worker" ? 1 : -1
 
   environment {
-    variables = {
+    variables = merge({
       APP_LOG_LEVEL = "INFO"
       APPLICATION_MODE = (
         each.key == "registration_notifier" && !var.scheduler_enabled ? "standby" : var.application_mode
@@ -33,24 +33,38 @@ resource "aws_lambda_function" "application" {
       MUTATIONS_ENABLED = tostring(
         each.key == "registration_notifier" && !var.scheduler_enabled ? false : var.mutations_enabled
       )
-      CLOUD_PROVIDER               = "aws"
-      AWS_STORAGE_BUCKET           = aws_s3_bucket.application.id
-      AWS_FIFO_QUEUE_URL           = aws_sqs_queue.registration_commands.id
-      AWS_PARAMETER_PREFIX         = "/${var.project_name}/production/"
-      AWS_DISK_UPLOADER_FUNCTION   = local.function_names.disk_uploader
-      DYNAMODB_TG_USERS_TABLE      = local.runtime_table_names.tg_users
-      DYNAMODB_VK_USERS_TABLE      = local.runtime_table_names.vk_users
-      DYNAMODB_EVENTS_TABLE        = local.runtime_table_names.events
-      DYNAMODB_EVENT_LEADERS_TABLE = local.runtime_table_names.event_leaders
-      DYNAMODB_REGISTRATIONS_TABLE = local.runtime_table_names.registrations
-      TELEGRAM_EGRESS_URL          = "https://${var.project_name}-telegram-egress.${var.cloudflare_workers_subdomain}.workers.dev"
-      GOOGLE_FOLDER_ID             = var.google_folder_id
-      GOOGLE_APPS_SCRIPT_URL       = var.google_apps_script_url
-      TG_ADMIN_IDS                 = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_admin_ids
-      VK_ADMIN_IDS                 = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_admin_ids
-      TG_GAMEMASTER_IDS            = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_gamemaster_ids
-      VK_GAMEMASTER_IDS            = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_gamemaster_ids
-    }
+      CLOUD_PROVIDER             = "aws"
+      AWS_STORAGE_BUCKET         = aws_s3_bucket.application.id
+      AWS_FIFO_QUEUE_URL         = aws_sqs_queue.registration_commands.id
+      AWS_PARAMETER_PREFIX       = "/${var.project_name}/production/"
+      AWS_DISK_UPLOADER_FUNCTION = local.function_names.disk_uploader
+      DYNAMODB_TG_USERS_TABLE = (
+        each.key == "database_snapshot" ? local.table_names.tg_users : local.runtime_table_names.tg_users
+      )
+      DYNAMODB_VK_USERS_TABLE = (
+        each.key == "database_snapshot" ? local.table_names.vk_users : local.runtime_table_names.vk_users
+      )
+      DYNAMODB_EVENTS_TABLE = (
+        each.key == "database_snapshot" ? local.table_names.events : local.runtime_table_names.events
+      )
+      DYNAMODB_EVENT_LEADERS_TABLE = (
+        each.key == "database_snapshot" ? local.table_names.event_leaders : local.runtime_table_names.event_leaders
+      )
+      DYNAMODB_REGISTRATIONS_TABLE = (
+        each.key == "database_snapshot" ? local.table_names.registrations : local.runtime_table_names.registrations
+      )
+      TELEGRAM_EGRESS_URL    = "https://${var.project_name}-telegram-egress.${var.cloudflare_workers_subdomain}.workers.dev"
+      GOOGLE_FOLDER_ID       = var.google_folder_id
+      GOOGLE_APPS_SCRIPT_URL = var.google_apps_script_url
+      TG_ADMIN_IDS           = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_admin_ids
+      VK_ADMIN_IDS           = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_admin_ids
+      TG_GAMEMASTER_IDS      = var.runtime_table_target == "rehearsal" ? "[]" : var.tg_gamemaster_ids
+      VK_GAMEMASTER_IDS      = var.runtime_table_target == "rehearsal" ? "[]" : var.vk_gamemaster_ids
+      }, each.key == "database_snapshot" ? {
+      DATABASE_SNAPSHOT_GOOGLE_URL_PARAMETER = local.parameter_names.database_snapshot_google_url
+      DATABASE_SNAPSHOT_YANDEX_URL_PARAMETER = local.parameter_names.database_snapshot_yandex_url
+      NTFY_TOPIC                             = var.ntfy_topic
+    } : {})
   }
 
   depends_on = [

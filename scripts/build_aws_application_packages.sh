@@ -25,6 +25,7 @@ python3 -m pip install \
 cp -R "${repo_dir}/src/larp_bot" "${python_build_dir}/larp_bot"
 cp \
   "${repo_dir}/aws_gateway.py" \
+  "${repo_dir}/aws_database_snapshot.py" \
   "${repo_dir}/aws_ordered_worker.py" \
   "${repo_dir}/aws_upload_completion.py" \
   "${python_build_dir}/"

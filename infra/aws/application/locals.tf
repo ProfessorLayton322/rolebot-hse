@@ -33,6 +33,7 @@ locals {
     registration_notifier = "${local.name_prefix}-registration-notifier"
     disk_uploader         = "${local.name_prefix}-disk-uploader"
     upload_completion     = "${local.name_prefix}-upload-completion"
+    database_snapshot     = "${local.name_prefix}-database-snapshot"
   }
 
   parameter_names = {
@@ -48,6 +49,8 @@ locals {
     participant_key_hmac_secret    = "/${var.project_name}/production/participant-key-hmac-secret"
     cloudflare_ingress_hmac_secret = "/${var.project_name}/production/cloudflare-ingress-hmac-secret"
     cloudflare_egress_hmac_secret  = "/${var.project_name}/production/cloudflare-egress-hmac-secret"
+    database_snapshot_google_url   = "/${var.project_name}/production/database-snapshot-google-url"
+    database_snapshot_yandex_url   = "/${var.project_name}/production/database-snapshot-yandex-url"
   }
 
   parameter_arns = {
@@ -95,6 +98,11 @@ locals {
       "google_apps_script_hmac_secret",
       "participant_key_hmac_secret",
     ]
+    database_snapshot = [
+      "google_service_account_json",
+      "google_apps_script_hmac_secret",
+      "yandex_disk_token",
+    ]
   }
 
   lambda_definitions = {
@@ -132,6 +140,13 @@ locals {
       package     = var.python_application_zip_path
       memory_size = 512
       timeout     = 30
+    }
+    database_snapshot = {
+      runtime     = "python3.12"
+      handler     = "aws_database_snapshot.handler"
+      package     = var.python_application_zip_path
+      memory_size = 256
+      timeout     = 300
     }
   }
 }

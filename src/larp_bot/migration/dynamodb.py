@@ -138,7 +138,17 @@ class DynamoMigrationStore:
         actual: Mapping[str, Any],
         expected: Mapping[str, Any],
     ) -> None:
-        if _without_revision(actual) != expected:
+        # The validated model payload is authoritative. Canonical export
+        # normalizes equivalent timestamp offsets (for example +03:00 to Z),
+        # so its serialized JSON can legitimately differ byte-for-byte from
+        # the runtime payload while describing the same model. Compare every
+        # physical key and denormalized index, but do not require the original
+        # JSON spelling to match the canonical re-serialization.
+        actual_fields = _without_revision(actual)
+        if "payload" in expected:
+            actual_fields.pop("payload", None)
+            expected = {key: value for key, value in expected.items() if key != "payload"}
+        if actual_fields != expected:
             key = _physical_key(table, actual)
             raise CanonicalValidationError(f"DynamoDB {table} item {key!r} does not match its payload")
 

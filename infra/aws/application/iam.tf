@@ -75,6 +75,16 @@ data "aws_iam_policy_document" "lambda" {
   }
 
   dynamic "statement" {
+    for_each = each.key == "database_snapshot" ? [1] : []
+    content {
+      sid       = "ReadProductionSnapshotTables"
+      effect    = "Allow"
+      actions   = ["dynamodb:DescribeTable", "dynamodb:Scan"]
+      resources = local.dynamodb_table_arns
+    }
+  }
+
+  dynamic "statement" {
     for_each = contains(["gateway", "ordered_worker", "registration_notifier", "upload_completion"], each.key) ? [1] : []
     content {
       sid       = "WriteApplicationTables"
@@ -153,6 +163,19 @@ data "aws_iam_policy_document" "lambda" {
       for key in local.lambda_parameter_keys[each.key] : local.parameter_arns[key]
     ]
   }
+
+  dynamic "statement" {
+    for_each = each.key == "database_snapshot" ? [1] : []
+    content {
+      sid     = "PersistDatabaseSnapshotLinks"
+      effect  = "Allow"
+      actions = ["ssm:GetParameter", "ssm:PutParameter"]
+      resources = [
+        local.parameter_arns.database_snapshot_google_url,
+        local.parameter_arns.database_snapshot_yandex_url,
+      ]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "lambda" {
@@ -182,9 +205,12 @@ resource "aws_iam_role" "scheduler" {
 
 data "aws_iam_policy_document" "scheduler" {
   statement {
-    effect    = "Allow"
-    actions   = ["lambda:InvokeFunction"]
-    resources = [aws_lambda_function.application["registration_notifier"].arn]
+    effect  = "Allow"
+    actions = ["lambda:InvokeFunction"]
+    resources = [
+      aws_lambda_function.application["registration_notifier"].arn,
+      aws_lambda_function.application["database_snapshot"].arn,
+    ]
   }
 }
 

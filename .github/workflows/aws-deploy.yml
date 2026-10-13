@@ -130,6 +130,22 @@ jobs:
           put_secret participant_key_hmac_secret "${PARTICIPANT_KEY_HMAC_SECRET}"
           put_secret cloudflare_ingress_hmac_secret "${CF_TO_AWS_HMAC_SECRET}"
           put_secret cloudflare_egress_hmac_secret "${AWS_TO_CF_EGRESS_HMAC_SECRET}"
+      - name: Create and verify the dual-Drive database snapshot
+        working-directory: infra/aws/application
+        run: |
+          function_name="$(terraform output -raw database_snapshot_function_name)"
+          invocation="$(aws lambda invoke \
+            --function-name "${function_name}" \
+            --cli-binary-format raw-in-base64-out \
+            --payload '{"source":"deployment"}' \
+            /tmp/database-snapshot-result.json)"
+          test "$(jq -r '.FunctionError // empty' <<<"${invocation}")" = ""
+          jq -e '
+            (.exported_at | endswith("+03:00")) and
+            (.payload_sha256 | test("^[0-9a-f]{64}$")) and
+            (.google_drive_url | startswith("https://")) and
+            (.yandex_disk_url | startswith("https://"))
+          ' /tmp/database-snapshot-result.json >/dev/null
       - name: Confirm reversible runtime controls
         working-directory: infra/aws/application
         run: |

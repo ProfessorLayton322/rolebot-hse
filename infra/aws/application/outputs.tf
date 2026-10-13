@@ -55,3 +55,16 @@ output "cloudwatch_operations_dashboard_url" {
   description = "Regional AWS console URL for the production operations dashboard."
   value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards/dashboard/${aws_cloudwatch_dashboard.operations.dashboard_name}"
 }
+
+output "database_snapshot_function_name" {
+  description = "Six-hour canonical database snapshot function invoked once during deployment."
+  value       = aws_lambda_function.application["database_snapshot"].function_name
+}
+
+output "database_snapshot_url_parameters" {
+  description = "Free Standard Parameter Store names holding the permanent Drive URLs after the first snapshot."
+  value = {
+    google_drive = local.parameter_names.database_snapshot_google_url
+    yandex_disk  = local.parameter_names.database_snapshot_yandex_url
+  }
+}

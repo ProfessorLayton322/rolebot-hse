@@ -203,6 +203,39 @@ def test_cloudwatch_alarms_publish_to_validated_ntfy_topic() -> None:
     assert workflows.count("TF_VAR_ntfy_topic: ${{ vars.NTFY_TOPIC }}") == 3
 
 
+def test_database_snapshot_runs_every_six_hours_with_free_tier_components() -> None:
+    scheduler = (APPLICATION / "scheduler.tf").read_text()
+    locals_config = (APPLICATION / "locals.tf").read_text()
+    lambda_config = (APPLICATION / "lambda.tf").read_text()
+    iam = (APPLICATION / "iam.tf").read_text()
+    outputs = (APPLICATION / "outputs.tf").read_text()
+    workflows = "\n".join(
+        (ROOT / path).read_text()
+        for path in (
+            ".github/workflows/deploy.yml",
+            ".github/workflows/aws-deploy.yml",
+        )
+    )
+
+    assert 'database_snapshot     = "${local.name_prefix}-database-snapshot"' in locals_config
+    assert 'handler     = "aws_database_snapshot.handler"' in locals_config
+    assert "memory_size = 256" in locals_config
+    assert "timeout     = 300" in locals_config
+    assert 'resource "aws_scheduler_schedule" "database_snapshot"' in scheduler
+    assert 'schedule_expression          = "cron(0 */6 * * ? *)"' in scheduler
+    assert 'schedule_expression_timezone = "Europe/Moscow"' in scheduler
+    assert 'state       = "ENABLED"' in scheduler
+    assert 'each.key == "database_snapshot" ? local.table_names' in lambda_config
+    assert 'sid       = "ReadProductionSnapshotTables"' in iam
+    assert 'actions   = ["dynamodb:DescribeTable", "dynamodb:Scan"]' in iam
+    assert 'sid     = "PersistDatabaseSnapshotLinks"' in iam
+    assert 'actions = ["ssm:GetParameter", "ssm:PutParameter"]' in iam
+    assert 'output "database_snapshot_url_parameters"' in outputs
+    assert workflows.count("Create and verify the dual-Drive database snapshot") == 2
+    assert workflows.count("aws lambda invoke") == 2
+    assert workflows.count('endswith("+03:00")') == 2
+
+
 def test_generated_cloudwatch_metrics_preserve_row_arrays() -> None:
     monitoring = (APPLICATION / "monitoring.tf").read_text()
     terraform_test = (APPLICATION / "tests/monitoring.tftest.hcl").read_text()
@@ -304,7 +337,7 @@ def test_phase_two_handlers_remain_hard_gated_in_standby() -> None:
     assert "var.mutations_enabled" in lambda_config
     assert re.search(r'variable "application_mode"[^}]+default\s+= "standby"', variables, re.DOTALL)
     assert re.search(r'variable "mutations_enabled"[^}]+default\s+= false', variables, re.DOTALL)
-    assert 'CLOUD_PROVIDER               = "aws"' in lambda_config
+    assert 'CLOUD_PROVIDER             = "aws"' in lambda_config
     assert 'handler     = "aws_gateway.handler"' in locals_config
     assert 'handler     = "aws_ordered_worker.handler"' in locals_config
     assert 'handler     = "aws_upload_completion.handler"' in locals_config
