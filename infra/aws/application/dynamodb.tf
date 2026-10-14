@@ -1,7 +1,10 @@
 resource "aws_dynamodb_table" "tg_users" {
   name           = local.table_names.tg_users
   billing_mode   = "PROVISIONED"
-  read_capacity  = 1
+  # User snapshots are the hottest read path: pass-table refreshes scan this
+  # table while interactive gateway requests still need low-latency point
+  # reads. Ten units absorb the observed burst without leaving the free tier.
+  read_capacity  = 10
   write_capacity = 1
   hash_key       = "tg_id"
   table_class    = "STANDARD"
@@ -96,7 +99,8 @@ resource "aws_dynamodb_table" "vk_users" {
 resource "aws_dynamodb_table" "events" {
   name           = local.table_names.events
   billing_mode   = "PROVISIONED"
-  read_capacity  = 1
+  # Game menus and pass refreshes can scan the event catalog concurrently.
+  read_capacity  = 4
   write_capacity = 1
   hash_key       = "event_id"
   table_class    = "STANDARD"
