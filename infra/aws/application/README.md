@@ -113,10 +113,11 @@ Current pricing must be rechecked before deployment. Free allowances are usage
 limits rather than a promise of zero cost, and data transfer, logs, storage,
 requests, or later feature changes can still incur charges.
 
-The official pricing pages were rechecked on 2026-10-10. At that time:
+The official pricing pages were rechecked on 2026-10-14. At that time:
 
 - [DynamoDB Standard provisioned capacity](https://aws.amazon.com/dynamodb/pricing/)
-  included 25 RCUs, 25 WCUs, and 25 GB per month;
+  included 25 RCUs, 25 WCUs, and 25 GB per month. The production tables and
+  their GSIs provision 22 RCUs and 10 WCUs in total;
 - [Lambda](https://aws.amazon.com/lambda/pricing/) included one million
   requests and 400,000 GB-seconds per month, and
   [Function URLs](https://docs.aws.amazon.com/lambda/latest/dg/furls-http-invoke-decision.html)

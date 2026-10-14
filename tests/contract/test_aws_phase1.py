@@ -48,9 +48,15 @@ def test_dynamodb_mirror_is_protected_and_within_free_tier_capacity() -> None:
     assert dynamodb.count("prevent_destroy = true") == 5
     assert dynamodb.count("enabled = false") == 5
     assert dynamodb.count("global_secondary_index") == 5
-    # Five tables plus five GSIs at one unit each stay below 25 RCUs/WCUs.
-    assert dynamodb.count("read_capacity") == 10
-    assert dynamodb.count("write_capacity") == 10
+    read_capacities = [int(value) for value in re.findall(r"read_capacity\s+=\s+(\d+)", dynamodb)]
+    write_capacities = [int(value) for value in re.findall(r"write_capacity\s+=\s+(\d+)", dynamodb)]
+    assert len(read_capacities) == 10
+    assert len(write_capacities) == 10
+    # Five tables and five GSIs stay inside the per-Region 25 RCU/WCU free allowance.
+    assert sum(read_capacities) == 22
+    assert sum(write_capacities) == 10
+    assert sum(read_capacities) <= 25
+    assert sum(write_capacities) <= 25
 
 
 def test_standby_controls_cannot_accept_production_traffic() -> None:

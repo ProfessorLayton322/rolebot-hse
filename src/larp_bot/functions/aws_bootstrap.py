@@ -48,9 +48,10 @@ from larp_bot.functions.container import (
 
 AWS_DYNAMODB_CONFIG = Config(
     retries={
-        # The production tables deliberately stay at one provisioned capacity
-        # unit. Adaptive mode paces bursts instead of exhausting the standard
-        # retry budget and sending otherwise valid commands back to SQS.
+        # Production uses bounded provisioned capacity inside the DynamoDB free
+        # allowance. Adaptive mode still paces short bursts instead of
+        # exhausting the standard retry budget and sending otherwise valid
+        # commands back to SQS.
         "mode": "adaptive",
         "total_max_attempts": 20,
     }
