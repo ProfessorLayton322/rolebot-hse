@@ -12,7 +12,10 @@ from larp_bot.domain.models import (
     BotIdentity,
     Button,
     Event,
+    NotificationPayload,
+    Operation,
     Platform,
+    ReplyContext,
     event_name_with_date,
 )
 
@@ -228,7 +231,9 @@ class TelegramChatManagementService:
         bound_event = await self.events.get(event.event_id)
         if bound_event is None or bound_event.telegram_chat_id != update.chat_id:
             raise RuntimeError("Telegram chat binding was not persisted")
-        if bound_event.telegram_chat_invite_link is None:
+        invite_link = bound_event.telegram_chat_invite_link
+        invite_link_created = invite_link is None
+        if invite_link is None:
             invite_link = await self.telegram.ensure_primary_invite_link(
                 chat_id=update.chat_id,
                 request_id=f"telegram-chat:{update.update_id}:invite",
@@ -237,6 +242,19 @@ class TelegramChatManagementService:
             bound_event = await self.events.get(event.event_id)
             if bound_event is None or bound_event.telegram_chat_invite_link != invite_link:
                 raise RuntimeError("Telegram chat invite link was not persisted")
+
+        if invite_link_created:
+            if update.actor_user_id is None:
+                raise RuntimeError("Telegram chat binding has no actor")
+            await self.registrations.enqueue(
+                operation=Operation.SEND_CONFIRMED_NOTIFICATION,
+                event_id=event.event_id,
+                platform=Platform.TELEGRAM,
+                user_id=update.actor_user_id,
+                payload=NotificationPayload(text=invite_link),
+                reply_context=ReplyContext(),
+                idempotency_key=f"telegram-chat:{update.update_id}:send-confirmed-link",
+            )
 
         await self.telegram.answer_callback(
             callback_query_id=update.callback_query_id or "",
@@ -248,14 +266,16 @@ class TelegramChatManagementService:
                 message_id=update.message_id,
                 request_id=f"telegram-chat:{update.update_id}:delete-picker",
             )
+        confirmation_text = (
+            f"Чат был привязан к игре {event.name}.\n\n"
+            "Ссылка сохранена и поставлена в очередь на отправку подтверждённым игрокам основного состава."
+            if invite_link_created
+            else f"Этот чат уже привязан к игре {event.name}. Ссылка повторно не отправлена."
+        )
         await self.telegram.send_message(
             chat_id=update.chat_id,
             request_id=f"telegram-chat:{update.update_id}:confirmation",
-            text=(
-                f"Чат был привязан к игре {event.name}.\n\n"
-                "Ссылка сохранена, но игрокам ещё не отправлена. Откройте игру в личном чате с ботом "
-                "и выберите «Уведомления» → «Отправить подтвержденным ссылку на чат», затем подтвердите отправку."
-            ),
+            text=confirmation_text,
         )
 
     async def _handle_callback(self, update: TelegramGroupUpdate) -> None:

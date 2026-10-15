@@ -26,6 +26,7 @@ from larp_bot.domain.models import (
     BotIdentity,
     EmptyPayload,
     Event,
+    NotificationPayload,
     Operation,
     OrderedRegistrationCommand,
     Platform,
@@ -257,7 +258,7 @@ async def test_master_only_sees_led_games_while_bot_admin_sees_all_games() -> No
 async def test_tie_persists_and_reuses_exactly_one_primary_invite_link() -> None:
     event = make_event(1)
     events = MemoryEventRepository([event])
-    service, gateway, _ = chat_service(events)
+    service, gateway, registrations = chat_service(events)
     await events.add_leader(event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=42))
     gateway.members[(-1001, 42)] = {"status": "creator"}
     await service.handle(TelegramGroupUpdate("1", "tie_command", -1001, actor_user_id=42))
@@ -283,9 +284,19 @@ async def test_tie_persists_and_reuses_exactly_one_primary_invite_link() -> None
     assert gateway.deleted[-1][:2] == (-1001, 77)
     assert gateway.sent[-1][2] == (
         f"Чат был привязан к игре {event.name}.\n\n"
-        "Ссылка сохранена, но игрокам ещё не отправлена. Откройте игру в личном чате с ботом "
-        "и выберите «Уведомления» → «Отправить подтвержденным ссылку на чат», затем подтвердите отправку."
+        "Ссылка сохранена и поставлена в очередь на отправку подтверждённым игрокам основного состава."
     )
+    publisher = registrations.publisher
+    assert isinstance(publisher, MemoryCommandPublisher)
+    assert len(publisher.commands) == 1
+    invitation = publisher.commands[0]
+    assert invitation.operation is Operation.SEND_CONFIRMED_NOTIFICATION
+    assert invitation.event_id == event.event_id
+    assert invitation.platform is Platform.TELEGRAM
+    assert invitation.platform_user_id == 42
+    assert isinstance(invitation.payload, NotificationPayload)
+    assert invitation.payload.text == stored.telegram_chat_invite_link
+    assert invitation.participant_key is None
 
     await service.handle(TelegramGroupUpdate("3", "tie_command", -1001, actor_user_id=42))
     repeated_button = next(button for button in gateway.sent[-1][3] if button.value.startswith("tie:e:"))
@@ -304,6 +315,7 @@ async def test_tie_persists_and_reuses_exactly_one_primary_invite_link() -> None
     repeated = await events.get(event.event_id)
     assert repeated is not None
     assert repeated.telegram_chat_invite_link == stored.telegram_chat_invite_link
+    assert len(publisher.commands) == 1
 
 
 @pytest.mark.asyncio
