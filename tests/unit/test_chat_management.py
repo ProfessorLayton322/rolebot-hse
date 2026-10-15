@@ -281,7 +281,11 @@ async def test_tie_persists_and_reuses_exactly_one_primary_invite_link() -> None
     assert stored.telegram_chat_invite_link == "https://t.me/+chat1001"
     assert gateway.export_count == 1
     assert gateway.deleted[-1][:2] == (-1001, 77)
-    assert gateway.sent[-1][2] == f"Чат был привязан к игре {event.name}"
+    assert gateway.sent[-1][2] == (
+        f"Чат был привязан к игре {event.name}.\n\n"
+        "Ссылка сохранена, но игрокам ещё не отправлена. Откройте игру в личном чате с ботом "
+        "и выберите «Уведомления» → «Отправить подтвержденным ссылку на чат», затем подтвердите отправку."
+    )
 
     await service.handle(TelegramGroupUpdate("3", "tie_command", -1001, actor_user_id=42))
     repeated_button = next(button for button in gateway.sent[-1][3] if button.value.startswith("tie:e:"))

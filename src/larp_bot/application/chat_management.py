@@ -251,7 +251,11 @@ class TelegramChatManagementService:
         await self.telegram.send_message(
             chat_id=update.chat_id,
             request_id=f"telegram-chat:{update.update_id}:confirmation",
-            text=f"Чат был привязан к игре {event.name}",
+            text=(
+                f"Чат был привязан к игре {event.name}.\n\n"
+                "Ссылка сохранена, но игрокам ещё не отправлена. Откройте игру в личном чате с ботом "
+                "и выберите «Уведомления» → «Отправить подтвержденным ссылку на чат», затем подтвердите отправку."
+            ),
         )
 
     async def _handle_callback(self, update: TelegramGroupUpdate) -> None:
