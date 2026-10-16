@@ -33,6 +33,24 @@ async def test_vk_transport_sends_keyboard_when_chatbot_feature_is_enabled() -> 
 
 
 @pytest.mark.asyncio
+async def test_vk_transport_retries_a_timeout_with_the_same_random_id() -> None:
+    requests: list[dict[str, list[str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(parse_qs(request.content.decode()))
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("temporary VK timeout", request=request)
+        return httpx.Response(200, json={"response": 1})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = VkApiTransport("token", client=client)
+        await transport.send(user_id=42, request_id="request-timeout", text="Hello")
+
+    assert len(requests) == 2
+    assert requests[0]["random_id"] == requests[1]["random_id"]
+
+
+@pytest.mark.asyncio
 async def test_vk_transport_shortens_long_cyrillic_labels_without_changing_callbacks() -> None:
     requests: list[dict[str, list[str]]] = []
 

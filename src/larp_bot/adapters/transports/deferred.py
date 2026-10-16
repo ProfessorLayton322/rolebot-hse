@@ -299,6 +299,7 @@ class CloudflareTelegramEgress:
 
 class VkApiTransport:
     API_BASE = "https://api.vk.com/method"
+    REQUEST_ATTEMPTS = 2
     KEYBOARD_ERROR_CODES = frozenset({911, 912})
     # 901: the person forbade community messages; 902: their privacy settings
     # forbid this conversation. Both stay refused until the person changes them.
@@ -315,7 +316,13 @@ class VkApiTransport:
         self.client = client or httpx.AsyncClient(timeout=10.0)
 
     async def _post(self, method: str, data: dict[str, str | int]) -> dict[str, object]:
-        response = await self.client.post(f"{self.API_BASE}/{method}", data=data)
+        for attempt in range(self.REQUEST_ATTEMPTS):
+            try:
+                response = await self.client.post(f"{self.API_BASE}/{method}", data=data)
+                break
+            except httpx.TimeoutException:
+                if attempt + 1 == self.REQUEST_ATTEMPTS:
+                    raise
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
