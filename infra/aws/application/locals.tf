@@ -95,6 +95,7 @@ locals {
       "tg_bot_token",
       "tg_bot_username",
       "vk_access_token",
+      "vk_group_id",
       "cloudflare_egress_hmac_secret",
       "yandex_disk_token",
       "google_service_account_json",

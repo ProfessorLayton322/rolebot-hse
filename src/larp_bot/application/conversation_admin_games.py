@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, date, datetime
 from uuid import NAMESPACE_URL, uuid5
 
@@ -94,6 +95,14 @@ from .table_links import google_event_tables_ready
 class AdministrationGamesMixin(ConversationContext):
     """Game lifecycle, file, notification, and scheduling actions."""
 
+    async def _telegram_signup_link(self, event: Event) -> str | None:
+        if event.signup_token is None:
+            return None
+        telegram_username = await self.admins.get_secret("TG_BOT_USERNAME")
+        if re.fullmatch(r"[A-Za-z0-9_]{5,32}", telegram_username) is None:
+            raise RuntimeError("TG_BOT_USERNAME is invalid")
+        return f"https://t.me/{telegram_username}?start={event.signup_token}"
+
     async def _game_management(self, user: User, event: Event) -> BotResponse:
         if event.archived_at is not None:
             if not await self._is_admin(user):
@@ -120,10 +129,12 @@ class AdministrationGamesMixin(ConversationContext):
             self._is_admin(user),
             self._can_view_unassigned_games(user),
         )
+        telegram_signup_link = await self._telegram_signup_link(event)
         text = (
             f"Управление игрой {event_reference(event.name, event.game_date)}\n\n"
             f"Количество игроков: {event.player_amount}\n"
             f"Статус: {EVENT_STATUS_LABELS[event.status]}\n"
+            f"Ссылка для записи: {telegram_signup_link or 'недоступна для старой игры'}\n"
             f"Пост в Telegram: {event.telegram_post_url or 'не добавлен'}\n"
             f"Пост во VK: {event.vk_post_url or 'не добавлен'}"
         )
