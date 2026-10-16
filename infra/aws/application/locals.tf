@@ -38,6 +38,7 @@ locals {
 
   parameter_names = {
     tg_bot_token                   = "/${var.project_name}/production/tg-bot-token"
+    tg_bot_username                = "/${var.project_name}/production/tg-bot-username"
     tg_webhook_secret              = "/${var.project_name}/production/tg-webhook-secret"
     vk_access_token                = "/${var.project_name}/production/vk-access-token"
     vk_callback_secret             = "/${var.project_name}/production/vk-callback-secret"
@@ -61,6 +62,7 @@ locals {
   lambda_parameter_keys = {
     gateway = [
       "tg_bot_token",
+      "tg_bot_username",
       "tg_webhook_secret",
       "vk_access_token",
       "vk_callback_secret",
@@ -91,6 +93,7 @@ locals {
     ]
     upload_completion = [
       "tg_bot_token",
+      "tg_bot_username",
       "vk_access_token",
       "cloudflare_egress_hmac_secret",
       "yandex_disk_token",

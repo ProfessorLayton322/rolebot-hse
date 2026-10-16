@@ -184,7 +184,11 @@ jobs:
               --overwrite >/dev/null
           }
 
+          telegram_bot_username="$(curl --fail-with-body --silent --show-error \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/getMe" \
+            | jq -er '.result.username | select(type == "string" and test("^[A-Za-z0-9_]{5,32}$"))')"
           put_secret tg_bot_token "${TG_BOT_TOKEN}"
+          put_secret tg_bot_username "${telegram_bot_username}"
           put_secret tg_webhook_secret "${TG_WEBHOOK_SECRET}"
           put_secret vk_access_token "${VK_ACCESS_TOKEN}"
           put_secret vk_callback_secret "${VK_CALLBACK_SECRET}"

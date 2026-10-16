@@ -279,6 +279,25 @@ def test_ssm_secrets_never_flow_through_terraform_inputs() -> None:
     assert "TF_VAR_AWS_TO_CF_EGRESS_HMAC_SECRET" not in workflow
 
 
+def test_telegram_bot_username_is_derived_and_scoped_to_link_renderers() -> None:
+    locals_config = (APPLICATION / "locals.tf").read_text()
+    runtime_config = (ROOT / "src/larp_bot/adapters/aws/runtime_config.py").read_text()
+    workflows = [
+        (ROOT / ".github/workflows/deploy.yml").read_text(),
+        (ROOT / ".github/workflows/aws-deploy.yml").read_text(),
+    ]
+
+    assert '"TG_BOT_USERNAME": "tg-bot-username"' in runtime_config
+    assert 'tg_bot_username                = "/${var.project_name}/production/tg-bot-username"' in locals_config
+    assert re.search(r'gateway\s*=\s*\[[^]]+"tg_bot_username"', locals_config, re.DOTALL)
+    assert re.search(r'upload_completion\s*=\s*\[[^]]+"tg_bot_username"', locals_config, re.DOTALL)
+    assert not re.search(r'ordered_worker\s*=\s*\[[^]]+"tg_bot_username"', locals_config, re.DOTALL)
+    for workflow in workflows:
+        assert 'telegram_bot_username="$(curl --fail-with-body --silent --show-error' in workflow
+        assert "api.telegram.org/bot${TG_BOT_TOKEN}/getMe" in workflow
+        assert 'put_secret tg_bot_username "${telegram_bot_username}"' in workflow
+
+
 def test_aws_workflows_use_oidc_and_deploy_only_manually() -> None:
     plan = (ROOT / ".github/workflows/aws-plan.yml").read_text()
     deploy = (ROOT / ".github/workflows/aws-deploy.yml").read_text()
