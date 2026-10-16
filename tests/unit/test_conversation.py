@@ -4081,9 +4081,11 @@ async def test_admin_creation_master_picker_returns_to_question_and_rechecks_adm
 async def test_admin_controls_existing_game_without_becoming_its_master(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
+    signup_token = "Lesnoi_predel_14_11_2026_A7z"
+    linked_event = event.model_copy(update={"signup_token": signup_token})
     engine, _, _, _ = await engine_setup(
         disk_store,
-        event,
+        linked_event,
         admin=True,
         tg_admin_ids={20},
         vk_admin_ids={30},
@@ -4095,6 +4097,7 @@ async def test_admin_controls_existing_game_without_becoming_its_master(
     assert event.name in next(button.label for button in games.buttons if button.value.startswith("ag:manage:"))
     assert f"Управление игрой «{event.name}»" in selected.text
     assert f"Количество игроков: {event.player_amount}" in selected.text
+    assert f"Ссылка для записи: https://t.me/rolebot_test_bot?start={signup_token}" in selected.text
     assert EDIT_GAME in {button.label for button in selected.buttons}
     edit_menu = await engine.handle(inbound(20, f"ag:edit:{event.event_id}", callback=True))
     assert {CHANGE_STATUS, CHANGE_GAME_DETAILS} <= {button.label for button in edit_menu.buttons}

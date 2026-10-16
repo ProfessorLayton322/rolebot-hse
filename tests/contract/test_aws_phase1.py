@@ -291,6 +291,7 @@ def test_telegram_bot_username_is_derived_and_scoped_to_link_renderers() -> None
     assert 'tg_bot_username                = "/${var.project_name}/production/tg-bot-username"' in locals_config
     assert re.search(r'gateway\s*=\s*\[[^]]+"tg_bot_username"', locals_config, re.DOTALL)
     assert re.search(r'upload_completion\s*=\s*\[[^]]+"tg_bot_username"', locals_config, re.DOTALL)
+    assert re.search(r'upload_completion\s*=\s*\[[^]]+"vk_group_id"', locals_config, re.DOTALL)
     assert not re.search(r'ordered_worker\s*=\s*\[[^]]+"tg_bot_username"', locals_config, re.DOTALL)
     for workflow in workflows:
         assert 'telegram_bot_username="$(curl --fail-with-body --silent --show-error' in workflow
