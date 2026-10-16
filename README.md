@@ -491,7 +491,7 @@ YANDEX_OIDC_AUDIENCE
 YANDEX_SERVICE_ACCOUNT_IDS
 ```
 
-`TG_BOT_USERNAME` is not a separately managed GitHub value. During deployment, `scripts/update_cloudflare_secrets.sh` resolves it from Telegram's authenticated `getMe` response and installs it with the other egress bindings so the Yandex application can render direct bot links without receiving `TG_BOT_TOKEN`.
+`TG_BOT_USERNAME` is not a separately managed GitHub value. During deployment, the AWS parameter step and `scripts/update_cloudflare_secrets.sh` resolve it from Telegram's authenticated `getMe` response. AWS stores it in the narrowly scoped Standard SecureString used by link-rendering Lambdas, while Cloudflare installs it with the other egress bindings so the Yandex application can render direct bot links without receiving `TG_BOT_TOKEN`.
 
 ## First deployment
 

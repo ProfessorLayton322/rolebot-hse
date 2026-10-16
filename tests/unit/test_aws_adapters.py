@@ -185,10 +185,11 @@ async def test_ssm_provider_uses_allowlisted_paths_and_warm_cache() -> None:
         environment={"TG_ADMIN_IDS": "[10]", "VK_ADMIN_IDS": "[]"},
     )
 
+    assert await provider.get_secret("TG_BOT_USERNAME") == "value:tg-bot-username"
     assert await provider.get_secret("VK_GROUP_ID") == "value:vk-group-id"
     assert await provider.get_secret("VK_ACCESS_TOKEN") == "value:vk-access-token"
     assert await provider.get_secret("GOOGLE_APPS_SCRIPT_HMAC_SECRET") == "value:google-apps-script-hmac-secret"
-    assert client.calls == 3
+    assert client.calls == 4
     assert [identity.platform_user_id for identity in await provider.list_admins()] == [10]
     with pytest.raises(RuntimeError, match="not allowed"):
         await provider.get_secret("UNSCOPED_SECRET")

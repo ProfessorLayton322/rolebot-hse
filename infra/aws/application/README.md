@@ -31,7 +31,8 @@ secret, X-Ray tracing, or provisioned Lambda concurrency is created.
 
 The manual `AWS standby deploy` workflow is the only application deployment
 path. It authenticates with GitHub OIDC, applies this root, then creates or
-updates SSM Standard SecureStrings from GitHub environment secrets. Terraform
+updates SSM Standard SecureStrings from GitHub environment secrets and the
+Telegram bot username derived from the authenticated `getMe` response. Terraform
 owns the canonical parameter names and exact IAM ARNs, but deliberately has no
 `aws_ssm_parameter` resources: the pinned provider decrypts SecureStrings on
 refresh even when a write-only argument is used. Therefore no real or sentinel

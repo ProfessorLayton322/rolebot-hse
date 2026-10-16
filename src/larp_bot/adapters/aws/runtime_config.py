@@ -15,6 +15,7 @@ class SsmRuntimeConfigProvider:
 
     SECRET_NAMES: ClassVar[Mapping[str, str]] = {
         "TG_BOT_TOKEN": "tg-bot-token",
+        "TG_BOT_USERNAME": "tg-bot-username",
         "TG_WEBHOOK_SECRET": "tg-webhook-secret",
         "VK_ACCESS_TOKEN": "vk-access-token",
         "VK_CALLBACK_SECRET": "vk-callback-secret",
