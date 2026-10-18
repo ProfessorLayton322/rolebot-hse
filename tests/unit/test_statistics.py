@@ -789,7 +789,21 @@ async def test_statistics_actions_are_denied_to_moderators_even_with_forged_call
 
 async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(event: Event) -> None:
     event.game_date = date(2026, 11, 14)
-    engine, users, publisher, registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    future_event = event.model_copy(
+        update={
+            "event_id": "event-future",
+            "name": "Следующая игра",
+            "disk_resource_path": "disk:/larp-bot/events/event-future-game.xlsx",
+            "public_registration_url": "https://disk.example/public/future",
+            "registrations_migrated_at": datetime.now(UTC),
+        }
+    )
+    engine, users, publisher, registrations = await engine_setup(
+        MemoryDiskStore(),
+        event,
+        future_event,
+        admin=True,
+    )
     admin = await users.get(Platform.TELEGRAM, 1)
     assert admin is not None
     admin.larp_experience = False
@@ -836,6 +850,17 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
                 )
             ]
         )
+    await registrations.import_missing(
+        [
+            Registration(
+                event_id=future_event.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, 1, future_event.event_id),
+                display_name="Иван Иванов",
+                attendance_status=AttendanceStatus.WAITING,
+                wish_play="Без пожеланий",
+            )
+        ]
+    )
     drive = MemoryGoogleDrive(template(), master_template())
     service = StatisticsService(
         GoogleDriveStatisticsRepository(drive, "stats-folder"),
@@ -853,7 +878,13 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
         platform_user_id=1,
         payload=StatisticsPayload(action="game", game_id=event.event_id),
     )
-    assert "2026-2027" in await service.apply(command)
+    with patch.object(
+        engine.administration,
+        "refresh_event_tables",
+        new=AsyncMock(wraps=engine.administration.refresh_event_tables),
+    ) as refresh_event_tables:
+        assert "2026-2027" in await service.apply(command)
+    refresh_event_tables.assert_awaited_once_with(event.event_id)
     current = sheet(drive.content)
     assert current["A4"].value == "Новый Игрок"
     assert current["A5"].value == "Второй Игрок"
@@ -872,8 +903,16 @@ async def test_game_addition_uses_confirmed_cyrillic_names_and_is_idempotent(eve
     experienced_vk = await users.get(Platform.VK, 7)
     assert experienced_admin is not None and experienced_admin.larp_experience is True
     assert experienced_vk is not None and experienced_vk.larp_experience is True
+    source_registrations = await registrations.list_for_event(event.event_id)
+    confirmed = [row for row in source_registrations if row.attendance_status is AttendanceStatus.CONFIRMED]
+    assert [(row.display_name, row.larp_experience) for row in confirmed] == [
+        ("Иван Иванов", True),
+        ("Второй Игрок", True),
+    ]
     profile_updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
-    assert [command.event_id for command in profile_updates] == [event.event_id, event.event_id]
+    assert [(command.event_id, command.platform, command.platform_user_id) for command in profile_updates] == [
+        (future_event.event_id, Platform.TELEGRAM, 1)
+    ]
     retry = command.model_copy(update={"operation_id": str(uuid4())})
     assert "уже есть" in await service.apply(retry)
     assert len(drive.replacements) == 2
@@ -902,7 +941,13 @@ async def test_game_addition_includes_only_non_admin_chat_profiles_that_are_not_
         ),
         7: TelegramUser(tg_id=7, full_name="Ограниченный Игрок"),
         8: TelegramUser(tg_id=8, full_name="Выбывший Игрок"),
-        9: TelegramUser(tg_id=9, full_name="Заявленный Игрок"),
+        9: TelegramUser(
+            tg_id=9,
+            full_name="Заявленный Игрок",
+            crossplay=False,
+            needs_pass=False,
+            vk_url="https://vk.com/id9",
+        ),
     }
     for profile in telegram_profiles.values():
         await users.save(profile)
@@ -977,10 +1022,12 @@ async def test_game_addition_includes_only_non_admin_chat_profiles_that_are_not_
         & names
     )
     assert {call.kwargs["user_id"] for call in telegram.get_chat_member.await_args_list} == set(range(1, 10))
-    assert await registrations.list_for_event(event.event_id) == registrations_before
-    assert disk_store.files == files_before
+    current_registrations = await registrations.list_for_event(event.event_id)
+    assert len(current_registrations) == len(registrations_before)
+    assert current_registrations[0].larp_experience is True
+    assert disk_store.files != files_before
     profile_updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
-    assert [(command.platform, command.platform_user_id) for command in profile_updates] == [(Platform.TELEGRAM, 9)]
+    assert profile_updates == []
 
 
 async def test_statistics_stages_both_workbooks_before_replacing_either(event: Event) -> None:
