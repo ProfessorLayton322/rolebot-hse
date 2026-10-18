@@ -71,12 +71,12 @@ class StatisticsService:
         operation_id: str,
     ) -> None:
         users = await self.administration.users.list_all()
-        experienced = []
+        experienced: list[User] = []
         for user in users:
             platform, user_id = self._identity(user)
             key = participant_key(self.administration.participant_secret, platform, user_id, event_id)
             if key in confirmed_participant_keys:
-                experienced.append((platform, user_id))
+                experienced.append(user)
 
         # Each profile refresh itself fans out database reads across games.
         # Bound this outer fanout and cancel siblings on failure: gather would
@@ -84,19 +84,33 @@ class StatisticsService:
         # after the statistics command has already failed.
         semaphore = asyncio.Semaphore(3)
 
-        async def grant(platform: Platform, user_id: int) -> None:
+        async def grant(user: User) -> None:
             async with semaphore:
+                platform, user_id = self._identity(user)
                 await self.administration.users.grant_larp_experience(platform, user_id)
                 await self.registrations.enqueue_profile_updates(
                     platform,
                     user_id,
                     idempotency_key=f"{operation_id}:statistics-experience",
                     concurrency=1,
+                    excluded_event_ids=(event_id,),
                 )
 
         async with asyncio.TaskGroup() as tasks:
-            for platform, user_id in experienced:
-                tasks.create_task(grant(platform, user_id))
+            for user in experienced:
+                tasks.create_task(grant(user))
+
+        refreshed = await asyncio.gather(
+            *(self.administration.users.get(*self._identity(user)) for user in experienced)
+        )
+        refreshed_users = [user for user in refreshed if user is not None]
+        projected = await self.registrations.project_profiles_for_event(
+            event_id,
+            refreshed_users,
+            operation_id=f"{operation_id}:statistics-experience",
+        )
+        if projected:
+            await self.administration.refresh_event_tables(event_id)
 
     async def sync_profile(self, command: OrderedRegistrationCommand) -> str:
         payload = command.payload

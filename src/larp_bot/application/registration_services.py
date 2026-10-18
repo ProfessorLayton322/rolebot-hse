@@ -32,6 +32,7 @@ from larp_bot.domain.models import (
     TelegramUser,
     User,
     normalize_telegram_handle,
+    surname_and_name,
 )
 from larp_bot.domain.security import participant_key
 
@@ -765,22 +766,27 @@ class RegistrationService:
         idempotency_key: str,
         page_size: int = MAX_EVENT_PAGE_SIZE,
         concurrency: int = 10,
+        excluded_event_ids: Collection[str] = (),
     ) -> int:
         """Queue a profile projection refresh for every unarchived game containing the user.
 
         The page size must stay within the event repository's cap. A larger page
         makes storage reject the very first scan, so no game table would ever
-        receive the edited name, nickname or pass data.
+        receive the edited name, nickname or pass data. Callers that already
+        project and refresh an event as one batch can exclude it from the
+        per-user fanout.
         """
 
         identities = await self._identities(platform, user_id)
+        excluded = frozenset(excluded_event_ids)
         queued = 0
         after: tuple[datetime, str] | None = None
         semaphore = asyncio.Semaphore(concurrency)
         while True:
-            events = list(await self.events.list_page(after=after, archived=False, limit=page_size))
-            if not events:
+            page = list(await self.events.list_page(after=after, archived=False, limit=page_size))
+            if not page:
                 return queued
+            events = [event for event in page if event.event_id not in excluded]
 
             async def participation_for(event: Event) -> tuple[Event, list[BotIdentity]]:
                 async with semaphore:
@@ -817,10 +823,56 @@ class RegistrationService:
                     )
                     queued += 1
 
-            if len(events) < page_size:
+            if len(page) < page_size:
                 return queued
-            last = events[-1]
+            last = page[-1]
             after = (last.created_at, last.event_id)
+
+    async def project_profiles_for_event(
+        self,
+        event_id: str,
+        users: Sequence[User],
+        *,
+        operation_id: str,
+    ) -> int:
+        """Update several registration snapshots without rebuilding tables per row."""
+
+        event = await self._event(event_id)
+        await self.catalog.ensure_migrated(event)
+        projected = 0
+        for user in users:
+            if not user.profile_complete or user.full_name is None:
+                continue
+            platform, user_id = _user_identity(user)
+            key = self.key(platform, user_id, event.event_id)
+            if await self.catalog.registrations.get(event.event_id, key) is None:
+                continue
+            if isinstance(user, TelegramUser):
+                vk_profile = user.vk_url or ""
+            else:
+                vk_profile = f"https://vk.com/id{user.vk_id}"
+            telegram_profile = (
+                None if user.telegram_handle is None else f"https://t.me/{user.telegram_handle.removeprefix('@')}"
+            )
+            projection_id = str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"larp-bot:{operation_id}:profile-projection:{platform.value}:{user_id}:{event.event_id}",
+                )
+            )
+            await self.catalog.registrations.update_profile(
+                event.event_id,
+                operation_id=projection_id,
+                participant_key=key,
+                display_name=surname_and_name(user.full_name),
+                nickname=user.nickname,
+                larp_experience=bool(user.larp_experience),
+                crossplay=bool(user.crossplay),
+                vk_profile=vk_profile,
+                telegram_profile=telegram_profile,
+            )
+            projected += 1
+        return projected
 
     async def enqueue(
         self,
