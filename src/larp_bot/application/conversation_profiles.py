@@ -146,7 +146,11 @@ class ProfileConversationMixin(ConversationContext):
         if signup_event_id is not None:
             user.dialog_context["signup_event_id"] = signup_event_id
         return BotResponse(
-            text=CYRILLIC_FULL_NAME_PROMPT,
+            text=(
+                CYRILLIC_FULL_NAME_PROMPT
+                if editing_existing
+                else f"Перед записью на игру необходимо обязательно заполнить профиль.\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+            ),
             buttons=[profile_dialog_exit_button(user)],
         )
 

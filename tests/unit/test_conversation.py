@@ -298,14 +298,17 @@ async def test_game_deep_link_starts_signup_for_complete_profile(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("preexisting_user", [False, True])
 async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
+    preexisting_user: bool,
     disk_store: MemoryDiskStore,
     event: Event,
 ) -> None:
     signup_token = "Lesnoi_predel_14_11_2026_A7z"
     linked_event = event.model_copy(update={"signup_token": signup_token, "game_date": date(2026, 11, 14)})
     engine, users, _, _ = await engine_setup(disk_store, linked_event)
-    await users.save(TelegramUser(tg_id=2))
+    if preexisting_user:
+        await users.save(TelegramUser(tg_id=2))
 
     unknown = await engine.handle(inbound(1, "/start missing_token", user_id=1))
     started = await engine.handle(inbound(2, f"/start {signup_token}", user_id=2))
@@ -317,7 +320,10 @@ async def test_incomplete_profile_deep_link_continues_into_concrete_game_signup(
     saved = await users.get(Platform.TELEGRAM, 2)
 
     assert unknown.text.startswith("Привет!")
-    assert started.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert started.text == (
+        f"{WELCOME_TEXT}\n\nПеред записью на игру необходимо обязательно заполнить профиль.\n\n"
+        f"{CYRILLIC_FULL_NAME_PROMPT}"
+    )
     assert pending is not None and pending.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert pending.dialog_context["signup_event_id"] == event.event_id
     assert completed.text.startswith(
@@ -342,7 +348,10 @@ async def test_incomplete_user_start_greets_and_immediately_begins_profile(
     response = await engine.handle(inbound(1, "/start", user_id=2))
     saved = await users.get(Platform.TELEGRAM, 2)
 
-    assert response.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert response.text == (
+        f"{WELCOME_TEXT}\n\nПеред записью на игру необходимо обязательно заполнить профиль.\n\n"
+        f"{CYRILLIC_FULL_NAME_PROMPT}"
+    )
     assert [button.value for button in response.buttons] == ["Отмена"]
     assert saved is not None and saved.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert saved.dialog_context == {
@@ -372,7 +381,10 @@ async def test_archived_game_link_is_not_retained_during_new_user_profile(
         completed = await engine.handle(inbound(update, answer, user_id=2))
     saved = await users.get(Platform.TELEGRAM, 2)
 
-    assert started.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert started.text == (
+        f"{WELCOME_TEXT}\n\nПеред записью на игру необходимо обязательно заполнить профиль.\n\n"
+        f"{CYRILLIC_FULL_NAME_PROMPT}"
+    )
     assert pending is not None and "signup_event_id" not in pending.dialog_context
     assert completed.text == "✅ Профиль успешно заполнен."
     assert completed.buttons == [Button(label=MAIN_MENU_LABEL, value=MAIN_MENU)]
@@ -1006,7 +1018,10 @@ async def test_vk_start_messages_greet_new_users_and_begin_profiles(disk_store: 
     vk_user = await users.get(Platform.VK, 8)
 
     assert vk_start == slash_start
-    assert slash_start.text == f"{WELCOME_TEXT}\n\n{CYRILLIC_FULL_NAME_PROMPT}"
+    assert slash_start.text == (
+        f"{WELCOME_TEXT}\n\nПеред записью на игру необходимо обязательно заполнить профиль.\n\n"
+        f"{CYRILLIC_FULL_NAME_PROMPT}"
+    )
     assert slash_user is not None and slash_user.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert vk_user is not None and vk_user.dialog_state == "PROFILE_FULL_NAME_CYRILLIC"
     assert not publisher.commands
@@ -1618,7 +1633,10 @@ async def test_profile_collects_one_cyrillic_full_name_and_keeps_hyphenated_part
         saved = await engine.handle(inbound(update, answer, user_id=2))
 
     profile = await users.get(Platform.TELEGRAM, 2)
-    assert full_name_prompt.text == "Введите ФИО кириллицей (фамилию имя, если отчества нету):"
+    assert full_name_prompt.text == (
+        "Перед записью на игру необходимо обязательно заполнить профиль.\n\n"
+        "Введите ФИО кириллицей (фамилию имя, если отчества нету):"
+    )
     assert [button.value for button in full_name_prompt.buttons] == ["Отмена"]
     assert invalid_full_name.text == "Введите ФИО кириллицей, либо фамилию имя, если отчества нету"
     assert [button.value for button in invalid_full_name.buttons] == ["Отмена"]
