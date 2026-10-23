@@ -61,7 +61,9 @@ jobs:
       - run: ruff check .
       - run: mypy
       - run: pytest
-      - run: pip-audit --strict --requirement requirements.txt
+      # Production runs only the AWS artifact. The YDB/aiohttp closure in
+      # requirements.txt is the frozen legacy package and is not deployed.
+      - run: pip-audit --strict --requirement requirements-aws.txt
       - run: python scripts/check_storage_constraint.py
       - run: bash scripts/check_telegram_isolation.sh
 

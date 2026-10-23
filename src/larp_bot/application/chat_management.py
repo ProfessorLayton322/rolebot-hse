@@ -16,6 +16,7 @@ from larp_bot.domain.models import (
     Operation,
     Platform,
     ReplyContext,
+    TelegramBotPermissionError,
     event_name_with_date,
 )
 
@@ -28,6 +29,7 @@ LOGGER = logging.getLogger("larp_bot.application.chat_management")
 CHAT_PAGE_SIZE = 5
 _TIE_TEXT = "Выберите игру, к которой нужно привязать этот чат:"
 _TIE_PRIVILEGE_DENIED_TEXT = "Недостаточно привилегий для вызова этой команды"
+_BOT_ADMIN_REQUIRED_TEXT = "Назначьте бота администратором чата с правом приглашать пользователей и повторите /tie."
 _EXPLICIT_ADMIN_RIGHTS = frozenset(
     {
         "can_change_info",
@@ -234,10 +236,24 @@ class TelegramChatManagementService:
         invite_link = bound_event.telegram_chat_invite_link
         invite_link_created = invite_link is None
         if invite_link is None:
-            invite_link = await self.telegram.ensure_primary_invite_link(
-                chat_id=update.chat_id,
-                request_id=f"telegram-chat:{update.update_id}:invite",
-            )
+            try:
+                invite_link = await self.telegram.ensure_primary_invite_link(
+                    chat_id=update.chat_id,
+                    request_id=f"telegram-chat:{update.update_id}:invite",
+                )
+            except TelegramBotPermissionError as exc:
+                LOGGER.warning(
+                    "Telegram chat %s remains bound to event %s until bot permissions are granted: %s",
+                    update.chat_id,
+                    event.event_id,
+                    exc,
+                )
+                await self.telegram.answer_callback(
+                    callback_query_id=update.callback_query_id or "",
+                    request_id=f"telegram-chat:{update.update_id}:bot-admin-required",
+                    text=_BOT_ADMIN_REQUIRED_TEXT,
+                )
+                return
             await self.events.set_telegram_chat_invite_link(event.event_id, update.chat_id, invite_link)
             bound_event = await self.events.get(event.event_id)
             if bound_event is None or bound_event.telegram_chat_invite_link != invite_link:

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress, VkApiTransport
-from larp_bot.domain.models import Button, UnreachableRecipient
+from larp_bot.domain.models import Button, TelegramBotPermissionError, UnreachableRecipient
 
 
 @pytest.mark.asyncio
@@ -339,6 +339,27 @@ async def test_telegram_egress_exports_primary_invite_only_when_missing() -> Non
 
     assert link == "https://t.me/+created"
     assert methods == ["getChat", "exportChatInviteLink"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_egress_reports_missing_invite_permission_as_chat_setup_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        method = json.loads(request.content)["method"]
+        if method == "getChat":
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: not enough rights to manage chat invite link",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        with pytest.raises(TelegramBotPermissionError, match="not enough rights"):
+            await egress.ensure_primary_invite_link(chat_id=-1001, request_id="invite-3")
 
 
 @pytest.mark.asyncio

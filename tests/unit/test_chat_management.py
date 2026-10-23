@@ -30,6 +30,7 @@ from larp_bot.domain.models import (
     Operation,
     OrderedRegistrationCommand,
     Platform,
+    TelegramBotPermissionError,
     TelegramUser,
     VkUser,
 )
@@ -54,6 +55,7 @@ def chat_service(
     tables: MemoryRegistrationRepository | None = None,
     users: MemoryUserRepository | None = None,
     admins: StaticAdminProvider | None = None,
+    gateway: MemoryTelegramChatGateway | None = None,
 ) -> tuple[TelegramChatManagementService, MemoryTelegramChatGateway, RegistrationService]:
     tables = tables or MemoryRegistrationRepository()
     users = users or MemoryUserRepository()
@@ -65,7 +67,7 @@ def chat_service(
         "participant-secret",
         users,
     )
-    gateway = MemoryTelegramChatGateway()
+    gateway = gateway or MemoryTelegramChatGateway()
     return (
         TelegramChatManagementService(
             events,
@@ -315,6 +317,68 @@ async def test_tie_persists_and_reuses_exactly_one_primary_invite_link() -> None
     repeated = await events.get(event.event_id)
     assert repeated is not None
     assert repeated.telegram_chat_invite_link == stored.telegram_chat_invite_link
+    assert len(publisher.commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_tie_handles_missing_bot_admin_permission_and_resumes_after_grant() -> None:
+    class PermissionAwareGateway(MemoryTelegramChatGateway):
+        invite_permission = False
+
+        async def ensure_primary_invite_link(self, *, chat_id: int, request_id: str) -> str:
+            if not self.invite_permission:
+                raise TelegramBotPermissionError("not enough rights to manage chat invite link")
+            return await super().ensure_primary_invite_link(chat_id=chat_id, request_id=request_id)
+
+    event = make_event(1)
+    events = MemoryEventRepository([event])
+    gateway = PermissionAwareGateway()
+    service, _, registrations = chat_service(events, gateway=gateway)
+    await events.add_leader(event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=42))
+    gateway.members[(-1001, 42)] = {"status": "creator"}
+    await service.handle(TelegramGroupUpdate("1", "tie_command", -1001, actor_user_id=42))
+    event_button = next(button for button in gateway.sent[-1][3] if button.value.startswith("tie:e:"))
+
+    await service.handle(
+        TelegramGroupUpdate(
+            "2",
+            "tie_callback",
+            -1001,
+            actor_user_id=42,
+            message_id=77,
+            callback_query_id="callback-1",
+            callback_data=event_button.value,
+        )
+    )
+
+    stored = await events.get(event.event_id)
+    assert stored is not None
+    assert stored.telegram_chat_id == -1001
+    assert stored.telegram_chat_invite_link is None
+    assert gateway.answered[-1][2] == (
+        "Назначьте бота администратором чата с правом приглашать пользователей и повторите /tie."
+    )
+    assert gateway.deleted == []
+    publisher = registrations.publisher
+    assert isinstance(publisher, MemoryCommandPublisher)
+    assert publisher.commands == []
+
+    gateway.invite_permission = True
+    await service.handle(
+        TelegramGroupUpdate(
+            "3",
+            "tie_callback",
+            -1001,
+            actor_user_id=42,
+            message_id=77,
+            callback_query_id="callback-2",
+            callback_data=event_button.value,
+        )
+    )
+
+    recovered = await events.get(event.event_id)
+    assert recovered is not None
+    assert recovered.telegram_chat_invite_link == "https://t.me/+chat1001"
     assert len(publisher.commands) == 1
 
 

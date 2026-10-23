@@ -33,6 +33,7 @@ variables {
   tg_gamemaster_ids              = "[]"
   vk_gamemaster_ids              = "[]"
   python_application_zip_path    = "../../../dist/function-package.zip"
+  alarm_notifier_zip_path        = "../../../dist/function-package.zip"
   registration_notifier_zip_path = "../../../dist/registration-notifier.zip"
   disk_uploader_zip_path         = "../../../dist/disk-uploader.zip"
 }
