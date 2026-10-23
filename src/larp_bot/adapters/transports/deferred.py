@@ -11,7 +11,13 @@ import httpx
 
 from larp_bot.adapters.telegram.callbacks import encode_callback
 from larp_bot.adapters.vk import vk_keyboard
-from larp_bot.domain.models import Button, Platform, UnreachableRecipient, normalize_vk_url
+from larp_bot.domain.models import (
+    Button,
+    Platform,
+    TelegramBotPermissionError,
+    UnreachableRecipient,
+    normalize_vk_url,
+)
 from larp_bot.domain.security import sign_request
 
 # Telegram reports a permanently undeliverable chat with these texts. Any other
@@ -22,6 +28,12 @@ TELEGRAM_UNREACHABLE_DESCRIPTIONS = (
     "user is deactivated",
     "chat not found",
     "bot can't initiate conversation with a user",
+)
+TELEGRAM_INVITE_PERMISSION_DESCRIPTIONS = (
+    "not enough rights to manage chat invite link",
+    "not enough rights to invite users",
+    "need administrator rights",
+    "chat_admin_required",
 )
 TELEGRAM_ADMINISTRATOR_PERMISSION_FIELDS = (
     "can_manage_chat",
@@ -112,6 +124,12 @@ class CloudflareTelegramEgress:
                 and any(marker in description.casefold() for marker in TELEGRAM_UNREACHABLE_DESCRIPTIONS)
             ):
                 raise UnreachableRecipient(f"telegram {payload.get('chat_id')}: {description}")
+            if (
+                method == "exportChatInviteLink"
+                and description is not None
+                and any(marker in description.casefold() for marker in TELEGRAM_INVITE_PERMISSION_DESCRIPTIONS)
+            ):
+                raise TelegramBotPermissionError(f"telegram {payload.get('chat_id')}: {description}")
         response.raise_for_status()
         result = response.json()
         if not isinstance(result, dict) or result.get("ok") is not True:

@@ -163,6 +163,10 @@ class UnreachableRecipient(RuntimeError):
     """
 
 
+class TelegramBotPermissionError(RuntimeError):
+    """The bot needs additional Telegram chat administrator permissions."""
+
+
 class EventStatus(StrEnum):
     CREATED = "CREATED"
     CONFIRMATION_OPEN = "CONFIRMATION_OPEN"
