@@ -53,20 +53,23 @@ _EXPLICIT_ADMIN_RIGHTS = frozenset(
 
 
 def telegram_administrator_title(display_name: str, *, limit: int = 16) -> str:
-    """Fit ``surname name`` into Telegram's administrator-title limit."""
+    """Show the given name first, shortening the surname to fit the title."""
 
     parts = display_name.split()
-    surname = parts[0] if parts else "Игрок"
-    if len(parts) > 1:
-        full = f"{surname} {parts[1]}"
-        if len(full) <= limit:
-            return full
-        abbreviated = f"{surname} {parts[1][0]}."
-        if len(abbreviated) <= limit:
-            return abbreviated
-    if len(surname) <= limit:
-        return surname
-    return surname[:limit]
+    if len(parts) < 2:
+        return (parts[0] if parts else "Игрок")[:limit]
+    surname, given_name = parts[:2]
+    full = f"{given_name} {surname}"
+    if len(full) <= limit:
+        return full
+    surname_room = limit - len(given_name) - 1
+    if surname_room >= 2:
+        surname_prefix = surname[: surname_room - 1].rstrip("-")
+        return f"{given_name} {surname_prefix}."
+    if limit >= 5:
+        given_prefix = given_name[: limit - 4].rstrip("-")
+        return f"{given_prefix}… {surname[0]}."
+    return given_name[:limit]
 
 
 def _event_token(event_id: str) -> str:
