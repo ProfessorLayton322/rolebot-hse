@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime
 
@@ -68,7 +69,19 @@ class ConversationCoreMixin(ConversationContext):
         self.vk_user_ids = vk_user_ids
 
     async def _main(self, user: User, text: str = "Выберите действие:") -> BotResponse:
-        return BotResponse(text=text, buttons=main_buttons(await self._has_admin_access(user)))
+        identity = self._identity(user)
+        availability, has_admin_access = await asyncio.gather(
+            self.registrations.game_menu_availability(identity.platform, identity.platform_user_id),
+            self._has_admin_access(user),
+        )
+        return BotResponse(
+            text=text,
+            buttons=main_buttons(
+                has_admin_access,
+                has_registrations=availability.has_registrations,
+                has_available_games=availability.has_available_games,
+            ),
+        )
 
     async def _save(self, user: User, message: InboundMessage) -> None:
         user.last_update_id = message.update_id

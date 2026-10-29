@@ -335,8 +335,13 @@ def nickname_buttons(user: User) -> list[Button]:
     return buttons
 
 
-def main_buttons(has_admin_access: bool) -> list[Button]:
-    labels = [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+def main_buttons(has_admin_access: bool, *, has_registrations: bool, has_available_games: bool) -> list[Button]:
+    labels = [PROFILE]
+    if has_available_games:
+        labels.append(ENLIST)
+    labels.append(CONFIRM)
+    if has_registrations:
+        labels.extend([GAME_WISHES, CANCEL, MY_GAMES])
     if has_admin_access:
         labels.append(ADMIN)
     return [Button(label=label, value=label) for label in labels]
