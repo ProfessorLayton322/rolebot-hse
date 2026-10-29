@@ -84,10 +84,20 @@ def chat_service(
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("Иванов Иван", "Иванов Иван"),
-        ("Смирнова Анастасия", "Смирнова А."),
-        ("Александровский Иван", "Александровский"),
-        ("Оченьдлиннаяфамилия Иван", "Оченьдлиннаяфами"),
+        ("Иванов Иван", "Иван Иванов"),
+        ("Смирнова Анастасия", "Анастасия Смирн."),
+        ("Александровский Иван", "Иван Александро."),
+        ("Оченьдлиннаяфамилия Иван", "Иван Оченьдлинн."),
+        ("  Иванов   Иван   Иванович ", "Иван Иванов"),
+        ("Семёнова-Звенигородская Ева-Лотта", "Ева-Лотта Семён."),
+        ("Александров Иван", "Иван Александров"),
+        ("Александрова Иван", "Иван Александро."),
+        ("Семёнова-Звенигородская Павел", "Павел Семёнова."),
+        ("Иванова Александра-Мария", "Александра-М… И."),
+        ("Иванов", "Иванов"),
+        ("Оченьдлиннаяфамилия", "Оченьдлиннаяфами"),
+        ("", "Игрок"),
+        ("   ", "Игрок"),
     ],
 )
 def test_telegram_administrator_title_follows_name_fallbacks(name: str, expected: str) -> None:
@@ -383,7 +393,17 @@ async def test_tie_handles_missing_bot_admin_permission_and_resumes_after_grant(
 
 
 @pytest.mark.asyncio
-async def test_joined_registration_is_promoted_by_stored_telegram_handle() -> None:
+@pytest.mark.parametrize(
+    ("display_name", "expected_title"),
+    [
+        ("Иванов Иван", "Иван Иванов"),
+        ("Смирнова Анастасия", "Анастасия Смирн."),
+        ("Иванова Александра-Мария", "Александра-М… И."),
+    ],
+)
+async def test_joined_registration_is_promoted_by_stored_telegram_handle(
+    display_name: str, expected_title: str
+) -> None:
     event = make_event(1)
     event.telegram_chat_id = -1001
     events = MemoryEventRepository([event])
@@ -392,7 +412,7 @@ async def test_joined_registration_is_promoted_by_stored_telegram_handle() -> No
         event.event_id,
         operation_id="enlist",
         participant_key="v" * 43,
-        display_name="Смирнова Анастасия",
+        display_name=display_name,
         wish_play="A",
         telegram_profile="@ivan_player",
     )
@@ -409,7 +429,7 @@ async def test_joined_registration_is_promoted_by_stored_telegram_handle() -> No
     )
 
     assert gateway.promoted[-1][:2] == (-1001, 77)
-    assert gateway.titles[-1][:3] == (-1001, 77, "Смирнова А.")
+    assert gateway.titles[-1][:3] == (-1001, 77, expected_title)
 
 
 @pytest.mark.asyncio
