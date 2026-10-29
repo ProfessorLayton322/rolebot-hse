@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
+from unittest.mock import AsyncMock
 
 import pytest
 from openpyxl import load_workbook
@@ -413,14 +414,7 @@ async def test_scheduled_game_deep_link_reports_not_open_and_returns_to_main_men
     assert response.text == (
         "Регистрация на игру «Будущая игра» (10.01.41) ещё не открыта. Она откроется 31.12.40 18:00 (МСК)."
     )
-    assert [button.value for button in response.buttons] == [
-        PROFILE,
-        ENLIST,
-        CONFIRM,
-        GAME_WISHES,
-        CANCEL,
-        MY_GAMES,
-    ]
+    assert [button.value for button in response.buttons] == [PROFILE, CONFIRM]
     assert saved is not None and saved.dialog_state == "IDLE"
 
 
@@ -986,14 +980,7 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
             "Сначала заполните профиль и запишитесь на игру, даже если пока не уверены, что сможете прийти. "
             "У вас ещё будет время подтвердить или отменить участие — мы сообщим, когда откроется подтверждение."
         )
-        assert [button.value for button in response.buttons] == [
-            PROFILE,
-            ENLIST,
-            CONFIRM,
-            GAME_WISHES,
-            CANCEL,
-            MY_GAMES,
-        ]
+        assert [button.value for button in response.buttons] == [PROFILE, ENLIST, CONFIRM]
         assert saved is not None and saved.dialog_state == "IDLE"
         assert saved.dialog_context == {}
 
@@ -1668,7 +1655,7 @@ async def test_profile_completion_shows_confirmation_before_main_menu(
     assert not completed.deferred and not completed.command_enqueued
 
     menu = await engine.handle(inbound(6, MAIN_MENU, callback=True, user_id=2))
-    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM]
 
 
 @pytest.mark.asyncio
@@ -5537,3 +5524,168 @@ async def test_my_game_page_lists_master_names_and_profiles(disk_store: MemoryDi
         "Смирнова Анна — https://t.me/anna_master\n\n"
         "Таблица участников: https://disk.example/public/my-game-0000"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "archived", "scheduled", "registration_status", "has_signup", "has_registered"),
+    [
+        (EventStatus.CREATED, False, False, None, True, False),
+        (EventStatus.CONFIRMATION_OPEN, False, False, AttendanceStatus.WAITING, False, True),
+        (EventStatus.CREATED, False, False, AttendanceStatus.CONFIRMED, False, True),
+        (EventStatus.CREATED, False, False, AttendanceStatus.CANCELLED, True, False),
+        (EventStatus.CLOSED, False, False, None, False, False),
+        (EventStatus.CLOSED, False, False, AttendanceStatus.CONFIRMED, False, True),
+        (EventStatus.CREATED, True, False, AttendanceStatus.WAITING, False, False),
+        (EventStatus.CREATED, False, True, None, False, False),
+    ],
+)
+async def test_main_menu_only_offers_actions_with_matching_games(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    status: EventStatus,
+    archived: bool,
+    scheduled: bool,
+    registration_status: AttendanceStatus | None,
+    has_signup: bool,
+    has_registered: bool,
+) -> None:
+    game = event.model_copy(
+        update={
+            "event_id": "12345678-1234-5678-1234-567812345678",
+            "status": status,
+            "archived_at": datetime.now(UTC) if archived else None,
+            "registration_open_at": datetime.now(UTC) + timedelta(days=1) if scheduled else None,
+        }
+    )
+    engine, _, _, tables = await engine_setup(disk_store, game, admin=True)
+    if registration_status is not None:
+        await tables.import_missing([my_games_registration(engine, game, registration_status)])
+
+    menu = await engine.handle(inbound(1, MAIN_MENU, callback=True))
+    values = [button.value for button in menu.buttons]
+
+    assert (ENLIST in values) is has_signup
+    for action in (GAME_WISHES, CANCEL, MY_GAMES):
+        assert (action in values) is has_registered
+    assert PROFILE in values and CONFIRM in values and ADMIN in values
+    inline = telegram_inline_payload(menu, 1)
+    deferred = CloudflareTelegramEgress._message_payload(1, menu.text, menu.buttons)
+    for payload in (inline, deferred):
+        callbacks = [button["callback_data"] for row in payload["reply_markup"]["inline_keyboard"] for button in row]
+        assert all(1 <= len(value.encode("utf-8")) <= 64 for value in callbacks)
+        assert [decode_callback(value) for value in callbacks] == values
+
+
+@pytest.mark.asyncio
+async def test_main_menu_shows_both_game_action_groups_and_hides_them_after_archive(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    second = event.model_copy(
+        update={"event_id": "second-game", "disk_resource_path": "disk:/larp-bot/events/second-game.xlsx"}
+    )
+    engine, _, _, tables = await engine_setup(disk_store, event, second)
+    await tables.import_missing([my_games_registration(engine, event)])
+    menu = await engine.handle(inbound(1, MAIN_MENU, callback=True))
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+
+    await engine.events.archive(event.event_id, datetime.now(UTC))
+    await engine.events.archive(second.event_id, datetime.now(UTC))
+    updated = await engine.handle(inbound(2, MAIN_MENU, callback=True))
+    assert [button.value for button in updated.buttons] == [PROFILE, CONFIRM]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_cancelled", [False, True])
+@pytest.mark.parametrize("mutually_linked", [True, False])
+@pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.VK])
+async def test_main_menu_respects_global_registration_and_requires_mutual_account_links(
+    disk_store: MemoryDiskStore, event: Event, mutually_linked: bool, platform: Platform, local_cancelled: bool
+) -> None:
+    engine, users, _, tables = await engine_setup(disk_store, event)
+    engine.registrations.users = users
+    await users.save(
+        TelegramUser(
+            tg_id=1,
+            full_name="Иванов Иван",
+            vk_url="https://vk.com/id22",
+            linked_vk_id=22,
+            telegram_handle="@linked_player",
+            crossplay=True,
+            needs_pass=False,
+        )
+    )
+    await users.save(
+        VkUser(
+            vk_id=22,
+            full_name="Иванов Иван",
+            telegram_handle="@linked_player" if mutually_linked else "@other",
+            crossplay=True,
+            needs_pass=False,
+        )
+    )
+    other_platform = Platform.VK if platform is Platform.TELEGRAM else Platform.TELEGRAM
+    other_id = 22 if other_platform is Platform.VK else 1
+    await tables.import_missing(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=engine.registrations.key(other_platform, other_id, event.event_id),
+                display_name="Иванов Иван",
+                wish_play="Без пожеланий",
+            )
+        ]
+    )
+    identity = BotIdentity(platform=platform, platform_user_id=1 if platform is Platform.TELEGRAM else 22)
+    if local_cancelled:
+        await tables.import_missing(
+            [
+                Registration(
+                    event_id=event.event_id,
+                    participant_key=engine.registrations.key(platform, identity.platform_user_id, event.event_id),
+                    display_name="Иванов Иван",
+                    wish_play="Без пожеланий",
+                    attendance_status=AttendanceStatus.CANCELLED,
+                )
+            ]
+        )
+    message = InboundMessage(identity=identity, update_id="1", text=MAIN_MENU, telegram_username="linked_player")
+    menu = await engine.handle(message)
+    values = [button.value for button in menu.buttons]
+    assert (ENLIST in values) is not mutually_linked
+    for action in (GAME_WISHES, CANCEL, MY_GAMES):
+        assert (action in values) is mutually_linked
+
+
+@pytest.mark.asyncio
+async def test_main_menu_scans_beyond_first_event_page_without_migrating_workbooks(
+    disk_store: MemoryDiskStore,
+) -> None:
+    games = [my_games_event(index, status=EventStatus.CLOSED) for index in range(12)]
+    games[-1].status = EventStatus.CREATED
+    engine, _, _, tables = await engine_setup(disk_store, games[0], *games[1:])
+    await tables.import_missing([my_games_registration(engine, games[-2])])
+    original_migration_dates = [(await engine.events.get(game.event_id)).registrations_migrated_at for game in games]
+
+    menu = await engine.handle(inbound(1, MAIN_MENU, callback=True))
+
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+    assert [
+        (await engine.events.get(game.event_id)).registrations_migrated_at for game in games
+    ] == original_migration_dates
+
+
+@pytest.mark.asyncio
+async def test_main_menu_stops_after_finding_both_action_groups(
+    disk_store: MemoryDiskStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    games = [my_games_event(index) for index in range(12)]
+    engine, _, _, tables = await engine_setup(disk_store, games[0], *games[1:])
+    await tables.import_missing([my_games_registration(engine, games[0])])
+    list_page = AsyncMock(wraps=engine.events.list_page)
+    monkeypatch.setattr(engine.events, "list_page", list_page)
+
+    menu = await engine.handle(inbound(1, MAIN_MENU, callback=True))
+
+    assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
+    assert list_page.await_count == 1

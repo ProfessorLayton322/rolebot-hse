@@ -324,6 +324,12 @@ async def _daily_pass_profiles(
 
 
 @dataclass(frozen=True)
+class PlayerGameMenuAvailability:
+    has_registrations: bool
+    has_available_games: bool
+
+
+@dataclass(frozen=True)
 class RegisteredGamesPage:
     rows: list[tuple[Event, Registration]]
     first_event: Event | None
@@ -574,6 +580,50 @@ class RegistrationService:
             identities=identities,
             conflicts_with=conflicts_with,
         )
+
+    async def game_menu_availability(self, platform: Platform, user_id: int) -> PlayerGameMenuAvailability:
+        """Find actionable games for one global user, with bounded reads and early exit."""
+
+        identities = await self._identities(platform, user_id)
+        has_registrations = False
+        has_available_games = False
+        after: tuple[datetime, str] | None = None
+        now = datetime.now(UTC)
+        semaphore = asyncio.Semaphore(3)
+
+        def open_for_signup(event: Event) -> bool:
+            return event.status in {EventStatus.CREATED, EventStatus.CONFIRMATION_OPEN} and event.registration_is_open(
+                now
+            )
+
+        async def registration_for(event: Event) -> Registration | None:
+            async with semaphore:
+                # Menu reads must not trigger legacy workbook migration or table refreshes.
+                registrations = await asyncio.gather(
+                    *(
+                        self.catalog.registrations.get(
+                            event.event_id, self.key(identity.platform, identity.platform_user_id, event.event_id)
+                        )
+                        for identity in identities
+                    )
+                )
+                return _effective_registration([row for row in registrations if row is not None])
+
+        while True:
+            page = list(await self.events.list_page(archived=False, after=after, limit=MAX_EVENT_PAGE_SIZE))
+            candidates = [
+                event for event in page if not has_registrations or (not has_available_games and open_for_signup(event))
+            ]
+            registrations = await asyncio.gather(*(registration_for(event) for event in candidates))
+            for event, registration in zip(candidates, registrations, strict=True):
+                if registration is not None and registration.attendance_status is not AttendanceStatus.CANCELLED:
+                    has_registrations = True
+                elif open_for_signup(event):
+                    has_available_games = True
+            if (has_registrations and has_available_games) or len(page) < MAX_EVENT_PAGE_SIZE:
+                return PlayerGameMenuAvailability(has_registrations, has_available_games)
+            last = page[-1]
+            after = (last.created_at, last.event_id)
 
     async def registered_games_page(
         self,
