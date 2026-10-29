@@ -62,6 +62,7 @@ from .conversation_support import (
     MANAGE_PLAYERS,
     MANAGE_SCHEDULED_EVENTS,
     MANAGE_STATISTICS,
+    MASTER_TABLE_DISCLAIMER,
     PRIVILEGED_ROLE_LABELS,
     PROMOTE_RESERVE_PLAYER,
     REMOVE_PLAYER,
@@ -145,6 +146,12 @@ class AdministrationGamesMixin(ConversationContext):
             text += f"\nАвтоматическое закрытие: {format_confirmation_deadline(event.scheduled_close_at)} (МСК)"
         if event.confirmation_deadline is not None:
             text += f"\nДедлайн подтверждения: {format_confirmation_deadline(event.confirmation_deadline)}"
+        if is_leader or is_admin or can_view_unassigned:
+            text += (
+                "\n\nАдминистративная таблица (Google Drive):\n"
+                f"{event.master_table_google_url or 'Ссылка ещё не подготовлена'}\n\n"
+                f"{MASTER_TABLE_DISCLAIMER}"
+            )
         if not is_leader and not is_admin:
             if can_view_unassigned:
                 view_actions = [
