@@ -62,10 +62,9 @@ def telegram_administrator_title(display_name: str, *, limit: int = 16) -> str:
     full = f"{given_name} {surname}"
     if len(full) <= limit:
         return full
-    surname_room = limit - len(given_name) - 1
-    if surname_room >= 2:
-        surname_prefix = surname[: surname_room - 1].rstrip("-")
-        return f"{given_name} {surname_prefix}."
+    abbreviated = f"{given_name} {surname[0]}."
+    if len(abbreviated) <= limit:
+        return abbreviated
     if limit >= 5:
         given_prefix = given_name[: limit - 4].rstrip("-")
         return f"{given_prefix}… {surname[0]}."
