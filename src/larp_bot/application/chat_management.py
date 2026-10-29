@@ -27,7 +27,11 @@ from .services import RegistrationService
 LOGGER = logging.getLogger("larp_bot.application.chat_management")
 
 CHAT_PAGE_SIZE = 5
-_TIE_TEXT = "Выберите игру, к которой нужно привязать этот чат:"
+_TIE_TEXT = (
+    "Выберите игру, к которой нужно привязать этот чат:\n\n"
+    "⚠️ Сразу после успешной привязки бот автоматически запустит рассылку приглашений "
+    "подтверждённым игрокам основного состава. Убедитесь, что чат готов к их вступлению."
+)
 _TIE_PRIVILEGE_DENIED_TEXT = "Недостаточно привилегий для вызова этой команды"
 _BOT_ADMIN_REQUIRED_TEXT = "Назначьте бота администратором чата с правом приглашать пользователей и повторите /tie."
 _EXPLICIT_ADMIN_RIGHTS = frozenset(
