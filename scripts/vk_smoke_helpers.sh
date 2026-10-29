@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Sourced by smoke_test.sh; callers provide response_file and VK configuration.
+source "$(dirname "${BASH_SOURCE[0]}")/smoke_http_helpers.sh"
 
 vk_history_request() {
   local history_status
-  history_status="$(curl --silent --show-error --connect-timeout 5 --max-time 10 \
+  history_status="$(smoke_curl "VK message history" --silent --show-error --connect-timeout 5 --max-time 10 \
     --output "${response_file}" --write-out '%{http_code}' \
     --request POST \
     --data-urlencode "access_token=${VK_ACCESS_TOKEN}" \

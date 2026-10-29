@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/smoke_http_helpers.sh"
+
 required=(
   TG_BOT_TOKEN
   TG_WEBHOOK_SECRET
@@ -53,7 +55,8 @@ vk_admin_id="$(first_admin_id "${VK_ADMIN_IDS}")"
 
 # The token, registered URL and public ingress route must all be live. A disabled
 # workers.dev route previously returned Cloudflare 1042 before the Worker ran.
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "Telegram getWebhookInfo" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   "https://api.telegram.org/bot${TG_BOT_TOKEN}/getWebhookInfo")"
 test "${status}" = "200" || unexpected_response "Telegram getWebhookInfo" "${status}"
 python3 - "${response_file}" "${TELEGRAM_INGRESS_URL}" <<'PY'
@@ -72,7 +75,8 @@ PY
 # authentication layer before sending either signed or user-visible probes.
 ingress_ready=false
 for attempt in $(seq 1 12); do
-  status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+  status="$(smoke_curl "Telegram ingress authentication probe" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
     --request POST \
     --header 'Content-Type: application/json' \
     --data '{}' \
@@ -94,7 +98,8 @@ test "${ingress_ready}" = true || unexpected_response "Telegram ingress authenti
 # waiting here instead of retrying it with an aging timestamp and deadline.
 gateway_ready=false
 for attempt in $(seq 1 24); do
-  status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+  status="$(smoke_curl "Telegram gateway readiness probe" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
     --request POST \
     --header 'Content-Type: application/json' \
     --data '{}' \
@@ -141,7 +146,8 @@ body_hash = hashlib.sha256(body.encode()).hexdigest()
 canonical = "\n".join((timestamp, request_id, "POST", path, body_hash))
 print(hmac.new(os.environ["SIGNING_SECRET"].encode(), canonical.encode(), hashlib.sha256).hexdigest())
 ' "${tg_timestamp}" "${tg_request_id}" "${tg_path}" "${tg_body}")"
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "Telegram gateway application probe" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --header "X-Gateway-Request-Id: ${tg_request_id}" \
@@ -183,7 +189,8 @@ print(json.dumps({
     },
 }, separators=(",", ":")))
 ' "${tg_ingress_update_id}" "${tg_admin_id}")"
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "Telegram ingress live update" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --header "X-Telegram-Bot-Api-Secret-Token: ${TG_WEBHOOK_SECRET}" \
@@ -217,7 +224,8 @@ body_hash = hashlib.sha256(body.encode()).hexdigest()
 canonical = "\n".join((timestamp, request_id, "POST", "/telegram/send", body_hash))
 print(hmac.new(os.environ["SIGNING_SECRET"].encode(), canonical.encode(), hashlib.sha256).hexdigest())
 ' "${egress_timestamp}" "${egress_request_id}" "${egress_body}")"
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "Telegram egress live send" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --header "X-Timestamp: ${egress_timestamp}" \
@@ -238,7 +246,8 @@ PY
 # VK authentication, confirmation and real delivered admin messages are all
 # separate checks so the smoke test catches callback drift, application stalls,
 # and VK API failures after the callback has been accepted.
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "VK authentication probe" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --data '{}' \
@@ -251,7 +260,8 @@ import sys
 
 print(json.dumps({"type": "confirmation", "group_id": int(sys.argv[1]), "secret": sys.argv[2]}))
 ' "${VK_GROUP_ID}" "${VK_CALLBACK_SECRET}")"
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "VK confirmation probe" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "${vk_confirmation_body}" \
@@ -281,7 +291,8 @@ print(json.dumps({
 vk_before_start="$(vk_latest_message_id)"
 vk_event_id="smoke-vk-start-${GITHUB_RUN_ID:-manual}-${RANDOM}"
 vk_body="$(vk_message_body "${vk_event_id}" "/start")"
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "VK live /start update" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "${vk_body}" \
@@ -296,7 +307,8 @@ vk_assert_outgoing_after "${vk_before_start}" "Привет! Этот бот п�
 vk_before_admin="$(vk_latest_message_id)"
 vk_event_id="smoke-vk-admin-${GITHUB_RUN_ID:-manual}-${RANDOM}"
 vk_body="$(vk_message_body "${vk_event_id}" "🛠 Администрирование")"
-status="$(curl --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
+status="$(smoke_curl "VK live admin authorization" \
+  --silent --show-error --output "${response_file}" --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --data "${vk_body}" \
