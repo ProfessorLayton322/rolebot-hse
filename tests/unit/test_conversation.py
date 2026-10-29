@@ -5689,3 +5689,76 @@ async def test_main_menu_stops_after_finding_both_action_groups(
 
     assert [button.value for button in menu.buttons] == [PROFILE, ENLIST, CONFIRM, GAME_WISHES, CANCEL, MY_GAMES]
     assert list_page.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.VK])
+@pytest.mark.parametrize(
+    ("role", "admin", "leader", "allowed"),
+    [
+        (None, True, False, True),
+        (PrivilegedRole.GAMEMASTER, False, True, True),
+        (PrivilegedRole.GAMEMASTER_VIEWER, False, False, True),
+        (PrivilegedRole.PASS_MANAGER, False, False, True),
+        (PrivilegedRole.GAMEMASTER, False, False, False),
+        (None, False, False, False),
+    ],
+)
+async def test_game_management_shows_google_admin_roster_only_to_existing_table_viewers(
+    disk_store: MemoryDiskStore,
+    event: Event,
+    platform: Platform,
+    role: PrivilegedRole | None,
+    admin: bool,
+    leader: bool,
+    allowed: bool,
+) -> None:
+    google_url = "https://drive.google.com/file/d/private-administrative-roster/view"
+    game = event.model_copy(update={"master_table_google_url": google_url})
+    engine, users, publisher, _ = await engine_setup(
+        disk_store, game, privileged_role=role, admin=admin, vk_admin_ids={22} if admin else set()
+    )
+    identity = BotIdentity(platform=platform, platform_user_id=1 if platform is Platform.TELEGRAM else 22)
+    if platform is Platform.VK:
+        await users.save(
+            VkUser(vk_id=22, full_name="Петрова Анна", privileged_role=role, is_gamemaster=role is not None)
+        )
+    if leader:
+        await engine.events.add_leader(game.event_id, identity)
+
+    menu = await engine.handle(
+        InboundMessage(identity=identity, update_id="management-google-link", callback=f"ag:manage:{game.event_id}")
+    )
+
+    assert (google_url in menu.text) is allowed
+    assert ("Административная таблица (Google Drive):" in menu.text) is allowed
+    if allowed:
+        assert menu.text.count(google_url) == 1
+        assert MASTER_TABLE_DISCLAIMER in menu.text
+        assert GAME_FILES in [button.label for button in menu.buttons]
+    assert game.public_registration_url not in menu.text
+    assert publisher.commands == []
+    assert not menu.command_enqueued and not menu.deferred
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.VK])
+async def test_game_management_missing_google_roster_link_does_not_start_table_refresh(
+    disk_store: MemoryDiskStore, event: Event, platform: Platform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine, _, publisher, _ = await engine_setup(disk_store, event, admin=True, vk_admin_ids={22})
+    engine.administration.showcase.mirrors_google_tables = True
+    ensure_tables = AsyncMock(side_effect=AssertionError("opening management must not refresh tables"))
+    monkeypatch.setattr(engine.administration, "ensure_event_tables", ensure_tables)
+    identity = BotIdentity(platform=platform, platform_user_id=1 if platform is Platform.TELEGRAM else 22)
+
+    menu = await engine.handle(
+        InboundMessage(identity=identity, update_id="management-missing-link", callback=f"ag:manage:{event.event_id}")
+    )
+
+    assert "Административная таблица (Google Drive):\nСсылка ещё не подготовлена" in menu.text
+    assert event.public_registration_url not in menu.text
+    assert GAME_FILES in [button.label for button in menu.buttons]
+    assert publisher.commands == []
+    ensure_tables.assert_not_awaited()
+    assert not menu.command_enqueued and not menu.deferred
