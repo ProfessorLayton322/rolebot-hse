@@ -544,3 +544,36 @@ async def test_vk_cancellation_uses_telegram_member_learned_from_game_registrati
     await notifications.kick_cancelled_participant(command)
 
     assert gateway.kicked[-1][:2] == (-1001, 77)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["bot_admin_granted", "tie_command", "tie_callback"])
+async def test_tie_picker_warns_before_selection_without_starting_invitations(action: str) -> None:
+    events = MemoryEventRepository([make_event(index) for index in range(7)])
+    service, gateway, registrations = chat_service(events, admins=StaticAdminProvider(tg_ids={42}))
+    gateway.members[(-1001, 42)] = {"status": "creator"}
+    update = TelegramGroupUpdate(
+        "warning-test",
+        action,
+        -1001,
+        actor_user_id=42,
+        message_id=77,
+        callback_query_id="page-callback",
+        callback_data="tie:p:1" if action == "tie_callback" else None,
+    )
+
+    await service.handle(update)
+
+    text = gateway.edited[-1][3] if action == "tie_callback" else gateway.sent[-1][2]
+    buttons = gateway.edited[-1][4] if action == "tie_callback" else gateway.sent[-1][3]
+    assert text.startswith("Выберите игру, к которой нужно привязать этот чат:")
+    assert (
+        "⚠️ Сразу после успешной привязки бот автоматически запустит рассылку приглашений "
+        "подтверждённым игрокам основного состава. Убедитесь, что чат готов к их вступлению."
+    ) in text
+    assert any(button.value.startswith("tie:e:") for button in buttons)
+    assert gateway.export_count == 0
+    publisher = registrations.publisher
+    assert isinstance(publisher, MemoryCommandPublisher)
+    assert publisher.commands == []
+    assert all(event.telegram_chat_id is None for event in events.rows.values())
