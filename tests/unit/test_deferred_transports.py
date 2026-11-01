@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs
 
 import httpx
@@ -8,6 +9,81 @@ import pytest
 
 from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress, VkApiTransport
 from larp_bot.domain.models import Button, TelegramBotPermissionError, UnreachableRecipient
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError])
+async def test_telegram_chat_member_retries_transport_failures(error_type: type[httpx.TransportError]) -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) < 3:
+            raise error_type("temporary egress failure", request=request)
+        return httpx.Response(200, json={"ok": True, "result": {"status": "member"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = CloudflareTelegramEgress("https://egress.example", "secret", client=client)
+        with patch("larp_bot.adapters.transports.deferred.asyncio.sleep", new_callable=AsyncMock):
+            result = await transport.get_chat_member(chat_id=-1004398023029, user_id=5647623989, request_id="lookup")
+
+    assert result == {"status": "member"}
+    assert len(requests) == 3
+    assert all(request == requests[0] for request in requests)
+
+
+async def test_telegram_chat_member_exhausted_timeout_remains_retryable() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("egress unavailable", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = CloudflareTelegramEgress("https://egress.example", "secret", client=client)
+        with (
+            patch("larp_bot.adapters.transports.deferred.asyncio.sleep", new_callable=AsyncMock),
+            pytest.raises(httpx.ReadTimeout),
+        ):
+            await transport.get_chat_member(chat_id=-1004398023029, user_id=5647623989, request_id="lookup")
+
+    assert calls == 3
+
+
+@pytest.mark.parametrize("description", ["Bad Request: user not found", "Bad Request: chat not found"])
+async def test_telegram_chat_member_keeps_missing_user_and_chat_errors_distinct(description: str) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"ok": False, "description": description})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = CloudflareTelegramEgress("https://egress.example", "secret", client=client)
+        if "user not found" in description:
+            assert await transport.get_chat_member(chat_id=-1004398023029, user_id=42, request_id="lookup") is None
+        else:
+            with pytest.raises(httpx.HTTPStatusError):
+                await transport.get_chat_member(chat_id=-1004398023029, user_id=42, request_id="lookup")
+
+    assert calls == 1
+
+
+async def test_telegram_message_timeout_does_not_retry_a_possible_delivery() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("response lost", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = CloudflareTelegramEgress("https://egress.example", "secret", client=client)
+        with pytest.raises(httpx.ReadTimeout):
+            await transport.send(user_id=42, request_id="send", text="Hello")
+
+    assert calls == 1
 
 
 @pytest.mark.asyncio

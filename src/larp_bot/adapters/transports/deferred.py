@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -77,6 +78,7 @@ def _telegram_error_description(response: httpx.Response) -> str | None:
 
 class CloudflareTelegramEgress:
     PATH = "/telegram/send"
+    CHAT_MEMBER_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -212,18 +214,27 @@ class CloudflareTelegramEgress:
         user_id: int,
         request_id: str,
     ) -> dict[str, object] | None:
-        try:
-            result = await self._call(
-                method="getChatMember",
-                payload={"chat_id": chat_id, "user_id": user_id},
-                request_id=request_id,
-            )
-        except httpx.HTTPStatusError as exc:
-            description = _telegram_error_description(exc.response)
-            missing_user = description is not None and "user not found" in description.casefold()
-            if exc.response.status_code == 400 and missing_user:
-                return None
-            raise
+        # This read is safe to repeat after a lost response. Retry the failed
+        # lookup here so one timeout does not cancel the entire attendance scan.
+        # Keep writes outside this retry loop: Telegram sends are not idempotent.
+        for attempt in range(self.CHAT_MEMBER_ATTEMPTS):
+            try:
+                result = await self._call(
+                    method="getChatMember",
+                    payload={"chat_id": chat_id, "user_id": user_id},
+                    request_id=request_id,
+                )
+                break
+            except httpx.TransportError:
+                if attempt + 1 == self.CHAT_MEMBER_ATTEMPTS:
+                    raise
+                await asyncio.sleep(0.5 * 2**attempt)
+            except httpx.HTTPStatusError as exc:
+                description = _telegram_error_description(exc.response)
+                missing_user = description is not None and "user not found" in description.casefold()
+                if exc.response.status_code == 400 and missing_user:
+                    return None
+                raise
         if not isinstance(result, dict):
             raise RuntimeError("Telegram getChatMember response is not an object")
         return cast(dict[str, object], result)

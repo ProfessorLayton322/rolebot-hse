@@ -5,6 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -21,6 +25,55 @@ type fakeSSM struct {
 
 type fakeAWSSQS struct {
 	inputs []*sqs.SendMessageInput
+}
+
+func TestAWSNotificationsCompleteForPermanentlyUnreachableVKRecipient(t *testing.T) {
+	for _, code := range []int{901, 902, 5, 6, 10, 100} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests++
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(writer, `{"error":{"error_code":%d,"error_msg":"refused"}}`, code)
+			}))
+			defer server.Close()
+			now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+			events := &fakeEventRepository{events: []plannedEvent{{EventID: "game", RegistrationOpenAt: timePointer(now)}}}
+			service := scheduler{
+				events:     events,
+				recipients: fakeRecipients{identities: []identity{{Platform: "vk", UserID: 407619043}}},
+				notifier: &directNotifier{
+					client:                      server.Client(),
+					vkURL:                       server.URL,
+					skipUnreachableVKRecipients: true,
+				},
+				publisher: &fakePublisher{},
+			}
+			for range 2 {
+				if _, err := service.run(context.Background(), now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code == 901 || code == 902 {
+				if requests != 1 || len(events.completed) != 1 {
+					t.Fatalf("permanent refusal retried: requests=%d completed=%v", requests, events.completed)
+				}
+			} else if requests != 2 || len(events.completed) != 0 {
+				t.Fatalf("retryable rejection discarded: requests=%d completed=%v", requests, events.completed)
+			}
+		})
+	}
+}
+
+func TestLegacyNotifierKeepsVKRefusalBehavior(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"error":{"error_code":901,"error_msg":"refused"}}`)
+	}))
+	defer server.Close()
+	notifier := directNotifier{client: server.Client(), vkURL: server.URL}
+	if err := notifier.sendVK(context.Background(), 42, "request", "text", nil); err == nil {
+		t.Fatal("legacy refusal behavior changed")
+	}
 }
 
 func (client *fakeAWSSQS) SendMessage(

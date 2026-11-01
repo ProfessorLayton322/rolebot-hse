@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -222,11 +223,12 @@ type button struct {
 }
 
 type directNotifier struct {
-	client         *http.Client
-	telegramURL    string
-	telegramSecret string
-	vkURL          string
-	vkAccessToken  string
+	client                      *http.Client
+	telegramURL                 string
+	telegramSecret              string
+	vkURL                       string
+	vkAccessToken               string
+	skipUnreachableVKRecipients bool
 }
 
 func newDirectNotifier(
@@ -408,6 +410,10 @@ func (notifier *directNotifier) sendVK(
 		}
 	}
 	if payload.Error != nil {
+		if notifier.skipUnreachableVKRecipients && (payload.Error.Code == 901 || payload.Error.Code == 902) {
+			slog.Warn("registration_open_recipient_unreachable", "platform", "vk", "platform_user_id", userID, "error_code", payload.Error.Code)
+			return nil
+		}
 		return fmt.Errorf("VK API error code %d: %s", payload.Error.Code, payload.Error.Message)
 	}
 	return nil

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -41,6 +42,7 @@ from larp_bot.application.conversation import (
     STATS_CONFIRM_ADD_GAME,
     STATS_LINKS,
 )
+from larp_bot.application.game_closings import ScheduledGameClosingDispatcher, ScheduledGameClosingService
 from larp_bot.application.services import DomainError, OrderedMutationService
 from larp_bot.application.statistics import StatisticsService, current_season_year
 from larp_bot.application.worker import OrderedWorker
@@ -50,6 +52,7 @@ from larp_bot.domain.models import (
     BotResponse,
     Button,
     Event,
+    EventStatus,
     Operation,
     OrderedRegistrationCommand,
     Platform,
@@ -1028,6 +1031,74 @@ async def test_game_addition_includes_only_non_admin_chat_profiles_that_are_not_
     assert disk_store.files != files_before
     profile_updates = [command for command in publisher.commands if command.operation is Operation.UPDATE_PROFILE]
     assert profile_updates == []
+
+
+async def test_scheduled_close_completes_after_membership_timeouts_without_losing_attendance(event: Event) -> None:
+    event.event_id = "400155ad-4ac0-4b9c-a089-a52d89abf0f0"
+    event.game_date = date(2026, 10, 31)
+    event.scheduled_close_at = datetime(2026, 11, 1, tzinfo=UTC)
+    event.telegram_chat_id = -1004398023029
+    engine, users, publisher, registrations = await engine_setup(MemoryDiskStore(), event, admin=True)
+    await engine.events.add_leader(event.event_id, BotIdentity(platform=Platform.TELEGRAM, platform_user_id=1))
+    for user_id in range(2, 196):
+        await users.save(TelegramUser(tg_id=user_id, full_name="Ручной Игрок"))
+    await registrations.import_missing(
+        [
+            Registration(
+                event_id=event.event_id,
+                participant_key=engine.registrations.key(Platform.TELEGRAM, 3, event.event_id),
+                display_name="Заявленный Игрок",
+                attendance_status=AttendanceStatus.CONFIRMED,
+                wish_play="Без пожеланий",
+            )
+        ]
+    )
+    calls: Counter[int] = Counter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        envelope = json.loads(request.content)
+        assert envelope["method"] == "getChatMember"
+        user_id = envelope["payload"]["user_id"]
+        calls[user_id] += 1
+        if user_id <= 8 and calls[user_id] < 3:
+            raise httpx.ReadTimeout("temporary egress timeout", request=request)
+        status = {1: "administrator", 2: "member"}.get(user_id, "left")
+        return httpx.Response(200, json={"ok": True, "result": {"status": status}})
+
+    drive = MemoryGoogleDrive(template(), master_template())
+    transport = MemoryDeferredTransport()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        statistics = StatisticsService(
+            GoogleDriveStatisticsRepository(drive, "stats-folder"),
+            GoogleDriveStatisticsRepository.masters(drive, "stats-folder"),
+            engine.admins,
+            engine.administration,
+            engine.registrations,
+            season_year=lambda: 2026,
+            telegram_chat=CloudflareTelegramEgress("https://egress.example", "secret", client=client),
+        )
+        closing = ScheduledGameClosingService(engine.events, statistics, transport, publisher)
+        await ScheduledGameClosingDispatcher(engine.events, publisher).dispatch_due(now=event.scheduled_close_at)
+        await closing.apply(publisher.commands[-1])
+        statistics_command = publisher.commands[-1]
+        with patch("larp_bot.adapters.transports.deferred.asyncio.sleep", new_callable=AsyncMock):
+            await closing.apply(statistics_command)
+        finalize_command = publisher.commands[-1]
+        await closing.apply(finalize_command)
+        await closing.apply(statistics_command)
+        await closing.apply(finalize_command)
+
+    stored = await engine.events.get(event.event_id)
+    assert stored is not None and stored.status is EventStatus.CLOSED
+    assert stored.archived_at is not None and stored.scheduled_close_completed_at is not None
+    assert set(calls) == set(range(1, 196))
+    assert all(calls[user_id] == (3 if user_id <= 8 else 1) for user_id in calls)
+    assert len(drive.replacements) == 2
+    current = sheet(drive.content)
+    attendance = {current[f"A{row}"].value: current[f"N{row}"].value for row in range(2, current.max_row + 1)}
+    assert attendance["Ручной Игрок"] == 1
+    assert attendance["Заявленный Игрок"] == 1
+    assert len(transport.sent) == 1
 
 
 async def test_statistics_stages_both_workbooks_before_replacing_either(event: Event) -> None:
