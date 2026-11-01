@@ -532,6 +532,9 @@ func handleAWSSchedule(ctx context.Context, _ json.RawMessage) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
+	// Permanent recipient refusals must not keep an AWS lifecycle notification
+	// pending forever. Leave the frozen legacy notifier behavior unchanged.
+	notifier.skipUnreachableVKRecipients = true
 	service := scheduler{
 		events:                    &awsEventRepository{client: dynamodb.NewFromConfig(config), table: env.EventsTable},
 		recipients:                runtimeConfig,
