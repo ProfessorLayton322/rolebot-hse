@@ -310,9 +310,11 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
     [
         ("Сычёв, Фёдор", "Professor Layton", False),
         ("Быков", "Professor Layton", False),
-        ("Professor", "Professor Layton", False),
-        ("Layton", "Professor Layton", False),
-        ("Фёдор Professor", "Professor Layton", False),
+        ("Professor", "Professor Layton", True),
+        ("Layton", "Professor Layton", True),
+        ("Фёдор Professor", "Professor Layton", True),
+        ("Фёдор", None, False),
+        ("Быков", None, False),
         ("Без пожеланий", "Professor Layton", False),
         ("Фёдор, Быков", "Professor Layton", True),
         ("Хочу играть с фЁдОром Быковым", "Professor Layton", False),
@@ -320,7 +322,7 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
         ("ФЁДОР,,БЫКОВ", None, True),
         ("LAYTON,,PROFESSOR", "Professor Layton", True),
         ("Professor Layton", "Professor,Layton", True),
-        ("Professor Layton", "Professor,Layton Holmes", False),
+        ("Professor Layton", "Professor,Layton Holmes", True),
         ("Play with LAYTON please; professor", "Professor Layton", True),
         ("кен eyep", "Канеки Кен/Eyepatch", False),
         ("Хочу с КЕН/EYEPATCH или кем-то ещё; Канеки", "Канеки Кен/Eyepatch", True),
@@ -331,9 +333,13 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
         (",, ФИР,,,", "Фир", True),
         ("Фир-Фир", "Фир", False),
         ("Без пожеланий", ",,,", False),
+        ("Ксандр", "Ксандр Германович", True),
+        ("кСаНдР", "Ксандр Германович", True),
+        ("Германович", "Ксандр Германович", True),
+        ("Ксанд", "Ксандр Германович", False),
     ],
 )
-def test_co_player_wishes_require_all_words_of_real_name_or_nickname(
+def test_co_player_wishes_require_all_name_words_or_any_nickname_word(
     wish: str, nickname: str | None, matches: bool, reverse_order: bool
 ) -> None:
     registrations = [
@@ -370,7 +376,7 @@ def test_co_player_wishes_require_all_words_of_real_name_or_nickname(
             workbook.close()
 
 
-def test_partial_name_and_nickname_wishes_do_not_join_separate_player_groups() -> None:
+def test_first_names_and_nickname_substrings_do_not_join_separate_player_groups() -> None:
     registrations = [
         Registration(
             event_id="event-a1",
@@ -423,6 +429,47 @@ def test_partial_name_and_nickname_wishes_do_not_join_separate_player_groups() -
             assert sheet["B4"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
             assert sheet["B5"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
             assert sheet["B6"].fill.fill_type is None
+        finally:
+            workbook.close()
+
+
+def test_single_nickname_word_connects_players_without_matching_first_names_alone() -> None:
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key="a" * 43,
+            display_name="Шалин Александр",
+            nickname="Ксандр Германович",
+            wish_play="Без пожеланий",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="b" * 43,
+            display_name="Дорогавцев Александр",
+            wish_play="Ксандр, Лейтон, Лада, Евгения Столетова",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="c" * 43,
+            display_name="Бояркина Лада",
+            wish_play="Без пожеланий",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="d" * 43,
+            display_name="Столетова Евгения",
+            wish_play="Без пожеланий",
+        ),
+    ]
+
+    for content in (showcase_workbook_bytes(registrations), public_showcase_workbook_bytes(registrations)):
+        workbook = load_workbook(BytesIO(content))
+        try:
+            sheet = workbook.active
+            for row in (2, 3, 5):
+                assert sheet.cell(row, 2).fill.fill_type == "solid"
+                assert sheet.cell(row, 2).fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+            assert sheet["B4"].fill.fill_type is None
         finally:
             workbook.close()
 
