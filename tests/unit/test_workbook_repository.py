@@ -272,7 +272,7 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
             event_id="event-a1",
             participant_key="d" * 43,
             display_name="Орлов Олег Олегович",
-            wish_play="фёдор фёд",
+            wish_play="Хочу играть с фёдоров Фёдор",
         ),
         Registration(
             event_id="event-a1",
@@ -304,27 +304,96 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
             workbook.close()
 
 
-def test_co_player_wishes_match_all_whitespace_tokens_against_name_or_nickname_substrings() -> None:
+@pytest.mark.parametrize("reverse_order", [False, True])
+@pytest.mark.parametrize(
+    ("wish", "nickname", "matches"),
+    [
+        ("Сычёв, Фёдор", "Professor Layton", False),
+        ("Быков", "Professor Layton", False),
+        ("Professor", "Professor Layton", False),
+        ("Layton", "Professor Layton", False),
+        ("Фёдор Professor", "Professor Layton", False),
+        ("Без пожеланий", "Professor Layton", False),
+        ("Фёдор, Быков", "Professor Layton", True),
+        ("Хочу играть с фЁдОром Быковым", "Professor Layton", True),
+        ("БЫКОВ\nФЁДОР", None, True),
+        ("Play with LAYTON please; professor", "Professor Layton", True),
+        ("кен eyep", "Канеки Кен/Eyepatch", False),
+        ("Хочу с КЕН/EYEPATCH или кем-то ещё; Канеки", "Канеки Кен/Eyepatch", True),
+        ("КЕН, Быков", "Кен", True),
+    ],
+)
+def test_co_player_wishes_require_all_words_of_real_name_or_nickname(
+    wish: str, nickname: str | None, matches: bool, reverse_order: bool
+) -> None:
     registrations = [
         Registration(
             event_id="event-a1",
             participant_key="a" * 43,
             display_name="Ищущий Игрок",
-            wish_play="кен eyep",
+            wish_play=wish,
         ),
         Registration(
             event_id="event-a1",
             participant_key="b" * 43,
-            display_name="Сасаки Хайсе",
-            nickname="Канеки Кен/Eyepatch",
+            display_name="Быков Фёдор Сергеевич",
+            nickname=nickname,
             wish_play="Без пожеланий",
+        ),
+    ]
+    if reverse_order:
+        registrations.reverse()
+    # Fix queue order too, since the renderers sort registrations before matching.
+    for index, registration in enumerate(registrations):
+        registration.created_at = datetime(2026, 11, 5, tzinfo=UTC) + timedelta(seconds=index)
+
+    for content in (showcase_workbook_bytes(registrations), public_showcase_workbook_bytes(registrations)):
+        workbook = load_workbook(BytesIO(content))
+        try:
+            for cell in (workbook.active["B2"], workbook.active["B3"]):
+                if matches:
+                    assert cell.fill.fill_type == "solid"
+                    assert cell.fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
+                else:
+                    assert cell.fill.fill_type is None
+        finally:
+            workbook.close()
+
+
+def test_first_name_only_wish_does_not_join_separate_player_groups() -> None:
+    registrations = [
+        Registration(
+            event_id="event-a1",
+            participant_key="a" * 43,
+            display_name="Быков Фёдор",
+            nickname="Professor Layton",
+            wish_play="Владимир Ткаченко",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="b" * 43,
+            display_name="Ткаченко Владимир",
+            wish_play="Фёдор Быков",
         ),
         Registration(
             event_id="event-a1",
             participant_key="c" * 43,
-            display_name="Иванов Пётр",
-            nickname="Кен",
+            display_name="Кузьмич Александра",
+            nickname="Шура (Кузьмич)",
+            wish_play="Сычёв, Фёдор",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="d" * 43,
+            display_name="Шуренкова Ольга",
+            wish_play="Кузьмич Александра",
+        ),
+        Registration(
+            event_id="event-a1",
+            participant_key="e" * 43,
+            display_name="Сычёв Фёдор",
             wish_play="Без пожеланий",
+            attendance_status=AttendanceStatus.CANCELLED,
         ),
     ]
 
@@ -334,7 +403,8 @@ def test_co_player_wishes_match_all_whitespace_tokens_against_name_or_nickname_s
             sheet = workbook.active
             assert sheet["B2"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
             assert sheet["B3"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
-            assert sheet["B4"].fill.fill_type is None
+            assert sheet["B4"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
+            assert sheet["B5"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
         finally:
             workbook.close()
 

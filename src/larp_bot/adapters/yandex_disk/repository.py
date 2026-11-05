@@ -198,26 +198,26 @@ def _ordered_active_registrations(registrations: Sequence[Registration]) -> list
 def _player_component_colors(registrations: Sequence[Registration]) -> dict[str, str]:
     identifiers = [
         tuple(
-            identifier.casefold()
+            identifier.casefold().split()
             for identifier in (surname_and_name(registration.display_name), registration.nickname)
             if identifier
         )
         for registration in registrations
     ]
+    wishes = [registration.wish_play.casefold() for registration in registrations]
 
     adjacency = [set[int]() for _ in registrations]
-    for index, registration in enumerate(registrations):
-        for wished_name in registration.wish_play.split(","):
-            tokens = wished_name.casefold().split()
-            if not tokens:
-                continue
-            for wished_index, candidate_identifiers in enumerate(identifiers):
-                if wished_index == index:
-                    continue
-                if not any(all(token in candidate for token in tokens) for candidate in candidate_identifiers):
-                    continue
-                adjacency[index].add(wished_index)
-                adjacency[wished_index].add(index)
+    for first_index, first_identifiers in enumerate(identifiers):
+        for second_index in range(first_index + 1, len(registrations)):
+            first_mentions_second = any(
+                all(word in wishes[first_index] for word in words) for words in identifiers[second_index]
+            )
+            second_mentions_first = any(
+                all(word in wishes[second_index] for word in words) for words in first_identifiers
+            )
+            if first_mentions_second or second_mentions_first:
+                adjacency[first_index].add(second_index)
+                adjacency[second_index].add(first_index)
 
     components: list[list[int]] = []
     visited: set[int] = set()
