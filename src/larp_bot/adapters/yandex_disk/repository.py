@@ -200,23 +200,20 @@ def _co_player_words(value: str) -> set[str]:
 
 
 def _player_component_colors(registrations: Sequence[Registration]) -> dict[str, str]:
-    identifiers = [
-        tuple(
-            _co_player_words(identifier)
-            for identifier in (surname_and_name(registration.display_name), registration.nickname)
-            if identifier
-        )
-        for registration in registrations
-    ]
+    names = [_co_player_words(surname_and_name(registration.display_name)) for registration in registrations]
+    nicknames = [_co_player_words(registration.nickname or "") for registration in registrations]
     wishes = [_co_player_words(registration.wish_play) for registration in registrations]
 
     adjacency = [set[int]() for _ in registrations]
-    for first_index, first_identifiers in enumerate(identifiers):
+    for first_index, first_wish in enumerate(wishes):
         for second_index in range(first_index + 1, len(registrations)):
-            first_mentions_second = any(
-                words.issubset(wishes[first_index]) for words in identifiers[second_index] if words
+            second_wish = wishes[second_index]
+            first_mentions_second = (bool(names[second_index]) and names[second_index].issubset(first_wish)) or bool(
+                nicknames[second_index] & first_wish
             )
-            second_mentions_first = any(words.issubset(wishes[second_index]) for words in first_identifiers if words)
+            second_mentions_first = (bool(names[first_index]) and names[first_index].issubset(second_wish)) or bool(
+                nicknames[first_index] & second_wish
+            )
             if first_mentions_second or second_mentions_first:
                 adjacency[first_index].add(second_index)
                 adjacency[second_index].add(first_index)
