@@ -15,11 +15,13 @@ from larp_bot.domain.models import (
     Platform,
     PrivilegedRole,
     Registration,
+    RegistrationQuestion,
     ScheduledLifecycleEvent,
     TelegramUser,
     User,
     UserPassPreference,
 )
+from larp_bot.domain.registration_queues import queue_key
 
 
 class MemoryUserRepository:
@@ -465,6 +467,12 @@ class MemoryEventRepository:
         event.updated_at = datetime.now(event.updated_at.tzinfo)
         return changed
 
+    async def set_registration_question(self, event_id: str, question: RegistrationQuestion) -> None:
+        event = self.rows[event_id]
+        event.registration_question = question.model_copy(deep=True)
+        event.player_amount = sum(option.player_amount for option in question.options)
+        event.updated_at = datetime.now(UTC)
+
     async def set_details(self, event_id: str, name: str, game_date: date) -> bool:
         event = self.rows.get(event_id)
         if event is None:
@@ -858,6 +866,7 @@ class MemoryRegistrationRepository:
         crossplay: bool | None = None,
         vk_profile: str = "",
         telegram_profile: str | None = None,
+        answer_id: str | None = None,
     ) -> bool:
         key = (event_id, participant_key)
         registration = self.rows.get(key)
@@ -867,7 +876,7 @@ class MemoryRegistrationRepository:
         if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
             latest = max(
                 (
-                    row.created_at
+                    queue_key(row)[0]
                     for (stored_event_id, _), row in self.rows.items()
                     if stored_event_id == event_id and row.attendance_status is not AttendanceStatus.CANCELLED
                 ),
@@ -900,8 +909,41 @@ class MemoryRegistrationRepository:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 registration.attendance_status = AttendanceStatus.WAITING
                 registration.created_at = queue_time
+        registration.answer_id = answer_id
+        registration.answer_queue_at = queue_time if answer_id is not None else None
         registration.last_operation_id = operation_id
         registration.updated_at = datetime.now(UTC)
+        return True
+
+    async def update_answer(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        answer_id: str,
+    ) -> bool:
+        rows = [self.rows[(event_id, key)] for key in participant_keys if (event_id, key) in self.rows]
+        if not rows or all(row.last_operation_id == operation_id for row in rows):
+            return False
+        if all(row.answer_id == answer_id for row in rows):
+            return False
+        latest = max(
+            (
+                queue_key(row)[0]
+                for (stored, _), row in self.rows.items()
+                if stored == event_id
+                and row.answer_id == answer_id
+                and row.attendance_status is not AttendanceStatus.CANCELLED
+            ),
+            default=datetime.now(UTC),
+        )
+        queue_time = max(datetime.now(UTC), latest + timedelta(microseconds=1))
+        for row in rows:
+            row.answer_id = answer_id
+            row.answer_queue_at = queue_time
+            row.last_operation_id = operation_id
+            row.updated_at = datetime.now(UTC)
         return True
 
     async def update_profile(
@@ -1092,11 +1134,14 @@ class MemoryRegistrationRepository:
         ]
         if not active:
             return
-        created_times = [registration.created_at for registration in active]
+        created_times = [queue_key(registration)[0] for registration in active]
         shift = max(created_times) - min(created_times) + timedelta(microseconds=1)
         for registration in active:
             if registration.attendance_status is AttendanceStatus.WAITING:
-                registration.created_at += shift
+                if registration.answer_id is not None:
+                    registration.answer_queue_at = queue_key(registration)[0] + shift
+                else:
+                    registration.created_at += shift
 
     async def swap_queue_positions(
         self,
@@ -1115,10 +1160,16 @@ class MemoryRegistrationRepository:
         if promoted.last_operation_id == operation_id and demoted.last_operation_id == operation_id:
             return False
         now = datetime.now(UTC)
-        promoted.created_at = demoted_created_at
+        if promoted.answer_id is not None:
+            promoted.answer_queue_at = demoted_created_at
+        else:
+            promoted.created_at = demoted_created_at
         promoted.last_operation_id = operation_id
         promoted.updated_at = now
-        demoted.created_at = promoted_created_at
+        if demoted.answer_id is not None:
+            demoted.answer_queue_at = promoted_created_at
+        else:
+            demoted.created_at = promoted_created_at
         demoted.last_operation_id = operation_id
         demoted.updated_at = now
         return True

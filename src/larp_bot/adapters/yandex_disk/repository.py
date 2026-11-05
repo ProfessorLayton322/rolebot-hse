@@ -27,8 +27,10 @@ from larp_bot.domain.models import (
     Event,
     PassDetails,
     Registration,
+    RegistrationQuestion,
     surname_and_name,
 )
+from larp_bot.domain.registration_queues import queue_key
 
 VISIBLE_HEADERS = (
     "№",
@@ -192,7 +194,7 @@ def _ordered_active_registrations(registrations: Sequence[Registration]) -> list
         for registration in registrations
         if registration.attendance_status is not AttendanceStatus.CANCELLED
     ]
-    return sorted(active, key=lambda row: (row.created_at, row.participant_key))
+    return sorted(active, key=queue_key)
 
 
 def _co_player_words(value: str) -> set[str]:
@@ -276,51 +278,61 @@ def showcase_workbook_bytes(
     *,
     needs_pass_by_key: Mapping[str, bool | None] | None = None,
     player_amount: int = DEFAULT_PLAYER_AMOUNT,
+    question: RegistrationQuestion | None = None,
 ) -> bytes:
     workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Регистрация"
-    sheet.append(VISIBLE_HEADERS)
-    # Keep the first player_amount rows fixed as main-roster slots. Padding
-    # prevents the green separator from moving while later signups flow below.
-    ordered_registrations = _ordered_active_registrations(registrations)
-    component_colors = _player_component_colors(ordered_registrations)
-    for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
-        sheet.append(
-            (
-                number,
-                safe_cell(_registration_table_name(registration.display_name)),
-                safe_cell(registration.vk_profile),
-                safe_cell(registration.telegram_profile or ""),
-                _bool_cell(registration.larp_experience),
-                _bool_cell(registration.crossplay),
-                safe_cell(registration.wish_play),
-                character_wish_cell(registration.character_wish),
-                registration.attendance_status.value,
-                _bool_cell((needs_pass_by_key or {}).get(registration.participant_key)),
+    workbook.remove(workbook.active)
+    all_rows = _ordered_active_registrations(registrations)
+    component_colors = _player_component_colors(all_rows)
+    groups = (
+        [
+            (option.name, option.player_amount, [row for row in all_rows if row.answer_id == option.option_id])
+            for option in question.options
+        ]
+        if question
+        else [("Регистрация", player_amount, all_rows)]
+    )
+    for title, player_amount, ordered_registrations in groups:
+        sheet = workbook.create_sheet(title)
+        sheet.append(VISIBLE_HEADERS)
+        # Keep the first player_amount rows fixed as main-roster slots. Padding
+        # prevents the green separator from moving while later signups flow below.
+        for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
+            sheet.append(
+                (
+                    number,
+                    safe_cell(_registration_table_name(registration.display_name)),
+                    safe_cell(registration.vk_profile),
+                    safe_cell(registration.telegram_profile or ""),
+                    _bool_cell(registration.larp_experience),
+                    _bool_cell(registration.crossplay),
+                    safe_cell(registration.wish_play),
+                    character_wish_cell(registration.character_wish),
+                    registration.attendance_status.value,
+                    _bool_cell((needs_pass_by_key or {}).get(registration.participant_key)),
+                )
             )
-        )
-        _paint_player_name(sheet, registration, component_colors)
-    for number in range(len(ordered_registrations) + 1, player_amount + 1):
-        sheet.append((number,))
-    _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(VISIBLE_HEADERS))
-    for number, registration in enumerate(ordered_registrations[player_amount:], start=player_amount + 1):
-        sheet.append(
-            (
-                number,
-                safe_cell(_registration_table_name(registration.display_name)),
-                safe_cell(registration.vk_profile),
-                safe_cell(registration.telegram_profile or ""),
-                _bool_cell(registration.larp_experience),
-                _bool_cell(registration.crossplay),
-                safe_cell(registration.wish_play),
-                character_wish_cell(registration.character_wish),
-                registration.attendance_status.value,
-                _bool_cell((needs_pass_by_key or {}).get(registration.participant_key)),
+            _paint_player_name(sheet, registration, component_colors)
+        for number in range(len(ordered_registrations) + 1, player_amount + 1):
+            sheet.append((number,))
+        _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(VISIBLE_HEADERS))
+        for number, registration in enumerate(ordered_registrations[player_amount:], start=player_amount + 1):
+            sheet.append(
+                (
+                    number,
+                    safe_cell(_registration_table_name(registration.display_name)),
+                    safe_cell(registration.vk_profile),
+                    safe_cell(registration.telegram_profile or ""),
+                    _bool_cell(registration.larp_experience),
+                    _bool_cell(registration.crossplay),
+                    safe_cell(registration.wish_play),
+                    character_wish_cell(registration.character_wish),
+                    registration.attendance_status.value,
+                    _bool_cell((needs_pass_by_key or {}).get(registration.participant_key)),
+                )
             )
-        )
-        _paint_player_name(sheet, registration, component_colors)
-    _format_sheet(sheet, (8, 30, 32, 32, 25, 26, 35, 45, 18, 24))
+            _paint_player_name(sheet, registration, component_colors)
+        _format_sheet(sheet, (8, 30, 32, 32, 25, 26, 35, 45, 18, 24))
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -331,43 +343,53 @@ def public_showcase_workbook_bytes(
     registrations: Sequence[Registration] = (),
     *,
     player_amount: int = DEFAULT_PLAYER_AMOUNT,
+    question: RegistrationQuestion | None = None,
 ) -> bytes:
     """Render the player-safe projection without Telegram or VK contacts."""
 
     workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Регистрация"
-    sheet.append(PUBLIC_HEADERS)
-    ordered_registrations = _ordered_active_registrations(registrations)
-    component_colors = _player_component_colors(ordered_registrations)
-    for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
-        sheet.append(
-            (
-                number,
-                safe_cell(registration.nickname or _registration_table_name(registration.display_name)),
-                _bool_cell(registration.crossplay),
-                safe_cell(registration.wish_play),
-                character_wish_cell(registration.character_wish),
-                registration.attendance_status.value,
+    workbook.remove(workbook.active)
+    all_rows = _ordered_active_registrations(registrations)
+    component_colors = _player_component_colors(all_rows)
+    groups = (
+        [
+            (option.name, option.player_amount, [row for row in all_rows if row.answer_id == option.option_id])
+            for option in question.options
+        ]
+        if question
+        else [("Регистрация", player_amount, all_rows)]
+    )
+    for title, player_amount, ordered_registrations in groups:
+        sheet = workbook.create_sheet(title)
+        sheet.append(PUBLIC_HEADERS)
+        for number, registration in enumerate(ordered_registrations[:player_amount], start=1):
+            sheet.append(
+                (
+                    number,
+                    safe_cell(registration.nickname or _registration_table_name(registration.display_name)),
+                    _bool_cell(registration.crossplay),
+                    safe_cell(registration.wish_play),
+                    character_wish_cell(registration.character_wish),
+                    registration.attendance_status.value,
+                )
             )
-        )
-        _paint_player_name(sheet, registration, component_colors)
-    for number in range(len(ordered_registrations) + 1, player_amount + 1):
-        sheet.append((number,))
-    _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(PUBLIC_HEADERS))
-    for number, registration in enumerate(ordered_registrations[player_amount:], start=player_amount + 1):
-        sheet.append(
-            (
-                number,
-                safe_cell(registration.nickname or _registration_table_name(registration.display_name)),
-                _bool_cell(registration.crossplay),
-                safe_cell(registration.wish_play),
-                character_wish_cell(registration.character_wish),
-                registration.attendance_status.value,
+            _paint_player_name(sheet, registration, component_colors)
+        for number in range(len(ordered_registrations) + 1, player_amount + 1):
+            sheet.append((number,))
+        _append_reserve_separator(sheet, player_amount=player_amount, column_count=len(PUBLIC_HEADERS))
+        for number, registration in enumerate(ordered_registrations[player_amount:], start=player_amount + 1):
+            sheet.append(
+                (
+                    number,
+                    safe_cell(registration.nickname or _registration_table_name(registration.display_name)),
+                    _bool_cell(registration.crossplay),
+                    safe_cell(registration.wish_play),
+                    character_wish_cell(registration.character_wish),
+                    registration.attendance_status.value,
+                )
             )
-        )
-        _paint_player_name(sheet, registration, component_colors)
-    _format_sheet(sheet, (8, 30, 26, 35, 45, 18))
+            _paint_player_name(sheet, registration, component_colors)
+        _format_sheet(sheet, (8, 30, 26, 35, 45, 18))
     output = BytesIO()
     workbook.save(output)
     workbook.close()
@@ -578,10 +600,13 @@ class YandexDiskShowcaseRepository:
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
+        question: RegistrationQuestion | None = None,
         callback: dict[str, object] | None = None,
         before_invoke: UploadReadyCallback | None = None,
     ) -> str | None:
-        content = await asyncio.to_thread(showcase_workbook_bytes, registrations, player_amount=player_amount)
+        content = await asyncio.to_thread(
+            showcase_workbook_bytes, registrations, player_amount=player_amount, question=question
+        )
         return await self._submit_one(
             disk_path,
             content,
@@ -598,10 +623,13 @@ class YandexDiskShowcaseRepository:
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
+        question: RegistrationQuestion | None = None,
         callback: dict[str, object] | None = None,
         before_invoke: UploadReadyCallback | None = None,
     ) -> str | None:
-        content = await asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=player_amount)
+        content = await asyncio.to_thread(
+            public_showcase_workbook_bytes, registrations, player_amount=player_amount, question=question
+        )
         return await self._submit_one(
             disk_path,
             content,
@@ -620,12 +648,13 @@ class YandexDiskShowcaseRepository:
         pass_profiles: Sequence[PassDetails],
         *,
         player_amount: int,
+        question: RegistrationQuestion | None = None,
         callback: dict[str, object],
         before_invoke: UploadReadyCallback | None = None,
     ) -> dict[str, str] | None:
         master, public, passes = await asyncio.gather(
-            asyncio.to_thread(showcase_workbook_bytes, player_amount=player_amount),
-            asyncio.to_thread(public_showcase_workbook_bytes, player_amount=player_amount),
+            asyncio.to_thread(showcase_workbook_bytes, player_amount=player_amount, question=question),
+            asyncio.to_thread(public_showcase_workbook_bytes, player_amount=player_amount, question=question),
             asyncio.to_thread(pass_table_workbook_bytes, pass_profiles),
         )
         return await self.uploader.submit(
@@ -760,9 +789,15 @@ class YandexDiskShowcaseRepository:
                 showcase_workbook_bytes,
                 registrations,
                 player_amount=event.player_amount,
+                question=event.registration_question,
                 needs_pass_by_key=needs_pass_by_key,
             ),
-            asyncio.to_thread(public_showcase_workbook_bytes, registrations, player_amount=event.player_amount),
+            asyncio.to_thread(
+                public_showcase_workbook_bytes,
+                registrations,
+                player_amount=event.player_amount,
+                question=event.registration_question,
+            ),
         )
         uploads = [
             DiskUpload(

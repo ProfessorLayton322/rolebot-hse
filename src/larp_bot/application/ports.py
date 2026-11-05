@@ -16,6 +16,7 @@ from larp_bot.domain.models import (
     Platform,
     PrivilegedRole,
     Registration,
+    RegistrationQuestion,
     ScheduledLifecycleEvent,
     TelegramUser,
     User,
@@ -417,6 +418,39 @@ class RegistrationRepository(Protocol):
     async def delete_for_event(self, event_id: str) -> None: ...
 
 
+class QuestionEventRepository(Protocol):
+    """AWS capability; the frozen YDB repository deliberately does not implement it."""
+
+    async def set_registration_question(self, event_id: str, question: RegistrationQuestion) -> None: ...
+
+
+class QuestionRegistrationRepository(RegistrationRepository, Protocol):
+    async def enlist(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_key: str,
+        display_name: str,
+        nickname: str | None = None,
+        wish_play: str,
+        larp_experience: bool | None = None,
+        crossplay: bool | None = None,
+        vk_profile: str = "",
+        telegram_profile: str | None = None,
+        answer_id: str | None = None,
+    ) -> bool: ...
+
+    async def update_answer(
+        self,
+        event_id: str,
+        *,
+        operation_id: str,
+        participant_keys: Sequence[str],
+        answer_id: str,
+    ) -> bool: ...
+
+
 class RegistrationShowcaseRepository(Protocol):
     deferred_uploads: bool
 
@@ -436,6 +470,7 @@ class RegistrationShowcaseRepository(Protocol):
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
+        question: RegistrationQuestion | None = None,
         callback: dict[str, object] | None = None,
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> str | None: ...
@@ -446,6 +481,7 @@ class RegistrationShowcaseRepository(Protocol):
         registrations: Sequence[Registration] = (),
         *,
         player_amount: int = DEFAULT_PLAYER_AMOUNT,
+        question: RegistrationQuestion | None = None,
         callback: dict[str, object] | None = None,
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> str | None: ...
@@ -458,6 +494,7 @@ class RegistrationShowcaseRepository(Protocol):
         pass_profiles: Sequence[PassDetails],
         *,
         player_amount: int,
+        question: RegistrationQuestion | None = None,
         callback: dict[str, object],
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, str] | None: ...

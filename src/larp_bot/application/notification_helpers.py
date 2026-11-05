@@ -6,7 +6,8 @@ import re
 from collections.abc import Sequence
 from urllib.parse import urlsplit
 
-from larp_bot.domain.models import AttendanceStatus, Registration
+from larp_bot.domain.models import AttendanceStatus, Event, Registration
+from larp_bot.domain.registration_queues import main_roster
 
 _TELEGRAM_CHAT_HOSTS = frozenset(
     {"t.me", "www.t.me", "telegram.me", "www.telegram.me", "telegram.dog", "www.telegram.dog"}
@@ -40,7 +41,9 @@ def is_plain_chat_link(value: str) -> bool:
     return host in {"vk.me", "www.vk.me"} and bool(_VK_CHAT_PATH_RE.fullmatch(parsed.path))
 
 
-def _active_main_roster(registrations: Sequence[Registration], player_amount: int) -> list[Registration]:
+def _active_main_roster(registrations: Sequence[Registration], player_amount: int | Event) -> list[Registration]:
+    if isinstance(player_amount, Event):
+        return main_roster(player_amount, registrations)
     active = [
         registration
         for registration in registrations
@@ -50,7 +53,7 @@ def _active_main_roster(registrations: Sequence[Registration], player_amount: in
     return active[:player_amount]
 
 
-def _chat_link_recipient_keys(registrations: Sequence[Registration], player_amount: int) -> set[str]:
+def _chat_link_recipient_keys(registrations: Sequence[Registration], player_amount: int | Event) -> set[str]:
     """Stored chat links belong only to confirmed players inside the active main roster."""
 
     return {

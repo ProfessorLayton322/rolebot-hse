@@ -24,6 +24,11 @@ from larp_bot.domain.models import (
     event_reference,
     surname_and_name,
 )
+from larp_bot.domain.registration_queues import (
+    active_queue,
+    answer_capacity,
+    answer_text,
+)
 from larp_bot.domain.security import participant_key
 
 from .deadlines import format_confirmation_deadline
@@ -94,7 +99,7 @@ def cancellation_master_text(
 def _current_sift_entries(
     snapshot: Sequence[str],
     registrations: Sequence[Registration],
-    player_amount: int,
+    player_amount: int | Event,
 ) -> set[str]:
     """Keep the saved confirmation-sift moves that still match the current roster.
 
@@ -229,10 +234,12 @@ def enlistment_success_text(
     *,
     masters: Sequence[tuple[BotIdentity, User | None]],
     same_day_warning: bool = False,
+    answer_id: str | None = None,
 ) -> str:
+    capacity = answer_capacity(event, answer_id)
     if event.public_table_public_url is None:
         raise RuntimeError("public game table is not initialized")
-    if queue_position <= event.player_amount:
+    if queue_position <= capacity:
         position_text = (
             f"Вы записались на игру {event_reference(event.name, event.game_date)}!\n\n"
             "Сейчас вы в основном составе.\n\n"
@@ -240,7 +247,7 @@ def enlistment_success_text(
             f"{public_table_links(event).for_player()}"
         )
     else:
-        cancellations_needed = queue_position - event.player_amount
+        cancellations_needed = queue_position - capacity
         position_text = (
             f"Вы записались на игру {event_reference(event.name, event.game_date)}!\n\n"
             f"Сейчас вы в запасе. Перед вами: {cancellations_needed}.\n\n"
@@ -264,6 +271,10 @@ def enlistment_success_text(
         f"{position_text}\n\n{confirmation_text}\n\n"
         "Пожелания по соигрокам всегда можно изменить позже через «🎭 Пожелания по игре»."
     )
+    if event.registration_question is not None:
+        option = event.registration_question.option(answer_id)
+        if option is not None:
+            text += f"\n\nВаш ответ: {option.name}"
     if same_day_warning and event.game_date is not None:
         text = f"{text}\n\n{same_day_signup_warning(event.game_date)}"
     masters_text = event_masters_text(masters)
@@ -349,10 +360,7 @@ class ConfirmationNotificationService:
         await self.catalog.ensure_migrated(event)
         all_registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
         main_roster_keys = (
-            {
-                registration.participant_key
-                for registration in _active_main_roster(all_registrations, event.player_amount)
-            }
+            {registration.participant_key for registration in _active_main_roster(all_registrations, event)}
             if main_roster_only
             else None
         )
@@ -462,7 +470,7 @@ class ConfirmationNotificationService:
             )
             return 0
         registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
-        link_recipients = _chat_link_recipient_keys(registrations, event.player_amount)
+        link_recipients = _chat_link_recipient_keys(registrations, event)
         delivered_notifications = [
             (index, stored_text)
             for index, stored_text in enumerate(event.confirmed_notifications)
@@ -496,7 +504,12 @@ class ConfirmationNotificationService:
     ) -> int:
         """Notify the one reserve player promoted by this roster mutation."""
 
-        if command.operation not in {Operation.CANCEL, Operation.CONFIRM, Operation.REMOVE_PARTICIPANT}:
+        if command.operation not in {
+            Operation.CANCEL,
+            Operation.CONFIRM,
+            Operation.REMOVE_PARTICIPANT,
+            Operation.UPDATE_ANSWER,
+        }:
             raise ValueError("command does not promote a reserve participant")
         event = await self.events.get(event_id or command.event_id)
         if event is None:
@@ -555,7 +568,12 @@ class ConfirmationNotificationService:
     ) -> int:
         """Replay chat links when a confirmed reserve player enters the confirmed-player limit."""
 
-        if command.operation not in {Operation.CANCEL, Operation.CONFIRM, Operation.REMOVE_PARTICIPANT}:
+        if command.operation not in {
+            Operation.CANCEL,
+            Operation.CONFIRM,
+            Operation.REMOVE_PARTICIPANT,
+            Operation.UPDATE_ANSWER,
+        }:
             raise ValueError("command does not promote a confirmed link recipient")
         event = await self.events.get(event_id or command.event_id)
         if event is None:
@@ -622,10 +640,7 @@ class ConfirmationNotificationService:
         if registration.attendance_status is not expected:
             return 0
         rows = await self.catalog.registrations.list_for_event(event.event_id)
-        active = sorted(
-            (row for row in rows if row.attendance_status is not AttendanceStatus.CANCELLED),
-            key=lambda row: (row.created_at, row.participant_key),
-        )
+        active = active_queue(rows, registration.answer_id if event.registration_question else None)
         position = next(
             index for index, row in enumerate(active, 1) if row.participant_key == registration.participant_key
         )
@@ -636,11 +651,13 @@ class ConfirmationNotificationService:
             player_name += f" ({registration.nickname})"
         action = "📝" if command.operation is Operation.ENLIST else "✅"
         verb = "записался на игру" if command.operation is Operation.ENLIST else "подтвердил участие в игре"
-        roster = "Основной состав" if position <= event.player_amount else "Запас"
+        roster = "Основной состав" if position <= answer_capacity(event, registration.answer_id) else "Запас"
         text = (
             f"{action} {player_name} {verb} {event_reference(event.name, event.game_date)}.\n"
             f"{roster}, место {position}."
         )
+        if event.registration_question is not None:
+            text += "\n" + answer_text(event, registration)
         buttons = [Button(label="Управление игрой", value=f"ag:manage:{event.event_id}")]
         actor_identities = {
             (item.platform, item.platform_user_id)
@@ -1031,7 +1048,7 @@ class ConfirmationNotificationService:
         current_entries = _current_sift_entries(
             event.participant_removal_keys,
             await self.catalog.registrations.list_for_event(event.event_id),
-            event.player_amount,
+            event,
         )
         for snapshot_entry in event.participant_removal_keys:
             if snapshot_entry in notified_entries:

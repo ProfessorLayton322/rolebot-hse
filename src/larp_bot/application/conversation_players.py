@@ -265,6 +265,11 @@ class PlayerConversationMixin(ConversationContext):
             buttons=[
                 Button(label=CHARACTER_WISHES, value=f"wishes:character:{event.event_id}"),
                 Button(label=CO_PLAYER_WISHES, value=f"wishes:co-player:{event.event_id}"),
+                *(
+                    [Button(label="Изменить ответ на дополнительный вопрос", value=f"select:answer:{event.event_id}")]
+                    if event.registration_question
+                    else []
+                ),
             ],
         )
 
@@ -349,6 +354,14 @@ class PlayerConversationMixin(ConversationContext):
             return BotResponse(text="Вы больше не участвуете в этой игре.")
         # A lone game skips the list, so a way back to it would only reopen this page.
         buttons = [Button(label=BACK, value=MY_GAMES)] if from_list else []
+        if (
+            event.registration_question
+            and overview.participation.registration is not None
+            and event.status is not EventStatus.CLOSED
+        ):
+            buttons.append(
+                Button(label="Изменить ответ на дополнительный вопрос", value=f"select:answer:{event.event_id}")
+            )
         return BotResponse(text=_my_game_text(event, overview, masters), buttons=[*buttons, main_menu_button()])
 
     async def _show_registered(
@@ -450,6 +463,8 @@ class PlayerConversationMixin(ConversationContext):
             return BotResponse(text="Игра не найдена.")
         platform = message.identity.platform
         uid = message.identity.platform_user_id
+        if flow == "answer":
+            return await self._start_answer_change(user, message, event)
         if flow == "enlist":
             if not is_profile_complete(user):
                 return BotResponse(
@@ -672,6 +687,8 @@ class PlayerConversationMixin(ConversationContext):
             )
         if not value:
             return BotResponse(text="Введите ответ текстом.")
+        if user.dialog_state == "ENLIST_ANSWER":
+            return await self._answer_step(user, message, value)
         if user.dialog_state == "ENLIST_WISH_PLAY":
             if message.callback is not None and value != "enlist:wish-play:skip":
                 return BotResponse(
@@ -707,6 +724,12 @@ class PlayerConversationMixin(ConversationContext):
         if event.archived_at is not None:
             await self._clear(user)
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        if (
+            event.registration_question is not None
+            and event.registration_question.option(str(context.get("answer_id", ""))) is None
+        ):
+            user.dialog_state = "ENLIST_ANSWER"
+            return self._answer_prompt(event)
         registration = await self.registrations.get_registration(
             event.event_id,
             message.identity.platform,
@@ -729,6 +752,7 @@ class PlayerConversationMixin(ConversationContext):
             platform=message.identity.platform,
             user_id=message.identity.platform_user_id,
             payload=EnlistPayload(
+                answer_id=str(context["answer_id"]) if context.get("answer_id") else None,
                 display_name=surname_and_name(user.full_name or ""),
                 nickname=user.nickname,
                 wish_play=str(context["wish_play"]),

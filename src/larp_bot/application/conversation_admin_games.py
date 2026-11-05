@@ -301,7 +301,11 @@ class AdministrationGamesMixin(ConversationContext):
             buttons=[
                 Button(label=CHANGE_STATUS, value=f"ag:status:{event.event_id}"),
                 Button(label=CHANGE_GAME_DETAILS, value=f"ag:details:{event.event_id}"),
-                Button(label=CHANGE_PLAYER_AMOUNT, value=f"ag:player-amount:{event.event_id}"),
+                *(
+                    [Button(label="Дополнительный вопрос", value=f"ag:question:{event.event_id}")]
+                    if event.registration_question
+                    else [Button(label=CHANGE_PLAYER_AMOUNT, value=f"ag:player-amount:{event.event_id}")]
+                ),
                 Button(label=ADD_POST_LINKS, value=f"ag:post-links:{event.event_id}"),
                 Button(label=ARCHIVE_GAME, value=f"ag:archive:{event.event_id}"),
                 game_management_button(event.event_id),
@@ -552,7 +556,11 @@ class AdministrationGamesMixin(ConversationContext):
                 text=f"Текущее название: {event.name}.\n\nВведите новое название игры:",
                 buttons=[edit_game_button(event.event_id)],
             )
+        if action == "question":
+            return self._question_edit_menu(user, event)
         if action == "player-amount":
+            if event.registration_question is not None:
+                return self._question_edit_menu(user, event)
             user.dialog_state = "ADMIN_UPDATE_PLAYER_AMOUNT"
             return BotResponse(
                 text=(

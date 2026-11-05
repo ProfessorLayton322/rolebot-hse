@@ -254,6 +254,7 @@ class OrderedWorker:
                             command_response_delivered = True
                         elif notifications_enabled and command.operation in {
                             Operation.CANCEL,
+                            Operation.UPDATE_ANSWER,
                             Operation.REMOVE_PARTICIPANT,
                             Operation.REMOVE_WAITING_PARTICIPANTS,
                             Operation.PROMOTE_RESERVE_PARTICIPANT,
@@ -266,7 +267,11 @@ class OrderedWorker:
                                     Operation.PROMOTE_RESERVE_PARTICIPANT,
                                 }:
                                     await self.notifications.notify_sifted_participants(command)
-                                if command.operation in {Operation.CANCEL, Operation.REMOVE_PARTICIPANT}:
+                                if command.operation in {
+                                    Operation.CANCEL,
+                                    Operation.REMOVE_PARTICIPANT,
+                                    Operation.UPDATE_ANSWER,
+                                }:
                                     await self.notifications.notify_reserve_promotion(command)
                                     await self.notifications.notify_confirmed_link_promotion(command)
                                 if command.operation is Operation.CANCEL:

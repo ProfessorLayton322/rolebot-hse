@@ -15,8 +15,13 @@ from larp_bot.domain.models import (
     Event,
     Platform,
     Registration,
+    RegistrationQuestion,
     TelegramUser,
     User,
+)
+from larp_bot.domain.registration_queues import (
+    main_roster,
+    reserve_roster,
 )
 from larp_bot.domain.security import participant_key
 
@@ -94,12 +99,15 @@ class EventAdministrationService:
         confirmation_deadline: datetime | None = None,
         scheduled_close_at: datetime | None = None,
         *,
+        question: RegistrationQuestion | None = None,
         requester: BotIdentity | None = None,
         reply_user_id: int | None = None,
         master_label: str | None = None,
         masters_pending: bool = False,
         before_invoke: Callable[[], Awaitable[None]] | None = None,
     ) -> Event | None:
+        if question is not None:
+            player_amount = sum(option.player_amount for option in question.options)
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Название игры не может быть пустым")
@@ -144,6 +152,7 @@ class EventAdministrationService:
                 "name": clean_name,
                 "game_date": game_date.isoformat(),
                 "player_amount": player_amount,
+                "registration_question": question.model_dump(mode="json") if question else None,
                 "disk_resource_path": master_path,
                 "public_table_resource_path": public_path,
                 "pass_table_resource_path": pass_path,
@@ -169,6 +178,7 @@ class EventAdministrationService:
             pass_path,
             leader_pass_profiles,
             player_amount=player_amount,
+            question=question,
             callback=callback,
             before_invoke=before_invoke,
         )
@@ -179,6 +189,7 @@ class EventAdministrationService:
             name=clean_name,
             game_date=game_date,
             player_amount=player_amount,
+            registration_question=question,
             disk_resource_path=master_path,
             public_registration_url=urls["master"],
             master_table_google_url=urls.get("google:master"),
@@ -344,7 +355,9 @@ class EventAdministrationService:
         active.sort(key=lambda registration: (registration.created_at, registration.participant_key))
         reserve = [
             registration
-            for registration in active[event.player_amount :]
+            for registration in sorted(
+                reserve_roster(event, active), key=lambda row: (row.created_at, row.participant_key)
+            )
             if registration.attendance_status is AttendanceStatus.CONFIRMED
         ]
         if after is not None:
@@ -368,7 +381,9 @@ class EventAdministrationService:
 
         all_reserve = [
             registration
-            for registration in active[event.player_amount :]
+            for registration in sorted(
+                reserve_roster(event, active), key=lambda row: (row.created_at, row.participant_key)
+            )
             if registration.attendance_status is AttendanceStatus.CONFIRMED
         ]
         first_cursor = (rows[0].created_at, rows[0].participant_key)
@@ -394,12 +409,20 @@ class EventAdministrationService:
             if registration.attendance_status is not AttendanceStatus.CANCELLED
         ]
         active.sort(key=lambda registration: (registration.created_at, registration.participant_key))
+        selected = next((row for row in active if row.participant_key == participant_key), None)
+        if selected is None:
+            return False
+        main = main_roster(event, active)
         return any(
-            registration.attendance_status is AttendanceStatus.WAITING for registration in active[: event.player_amount]
+            registration.attendance_status is AttendanceStatus.WAITING
+            and (event.registration_question is None or registration.answer_id == selected.answer_id)
+            for registration in main
         ) and any(
             registration.participant_key == participant_key
             and registration.attendance_status is AttendanceStatus.CONFIRMED
-            for registration in active[event.player_amount :]
+            for registration in sorted(
+                reserve_roster(event, active), key=lambda row: (row.created_at, row.participant_key)
+            )
         )
 
     async def has_unconfirmed_main_slot(self, event_id: str) -> bool:
@@ -410,7 +433,7 @@ class EventAdministrationService:
         registrations = await self.catalog.registrations.list_for_event(event_id)
         return any(
             registration.attendance_status is AttendanceStatus.WAITING
-            for registration in _active_main_roster(registrations, event.player_amount)
+            for registration in _active_main_roster(registrations, event)
         )
 
     async def waiting_registration_count(self, event_id: str) -> int:
@@ -430,7 +453,7 @@ class EventAdministrationService:
         await self.catalog.ensure_migrated(event)
         registrations = list(await self.catalog.registrations.list_for_event(event_id))
         if main_roster_only:
-            registrations = _active_main_roster(registrations, event.player_amount)
+            registrations = _active_main_roster(registrations, event)
         return sum(registration.attendance_status is AttendanceStatus.CONFIRMED for registration in registrations)
 
     async def active_registration_count(self, event_id: str) -> int:
@@ -451,7 +474,7 @@ class EventAdministrationService:
         registrations = await self.catalog.registrations.list_for_event(event_id)
         return any(
             registration.participant_key == participant_key
-            for registration in _active_main_roster(registrations, event.player_amount)
+            for registration in _active_main_roster(registrations, event)
         )
 
     async def registration_user(self, event_id: str, registration_key: str) -> User | None:

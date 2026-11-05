@@ -23,6 +23,7 @@ from larp_bot.domain.models import (
     normalize_telegram_handle,
     normalize_telegram_profile,
 )
+from larp_bot.domain.registration_queues import answer_text
 
 from .deadlines import (
     NEAREST_FRIDAY,
@@ -231,6 +232,12 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "PROFILE_PASS_PHONE",
         "PROFILE_PASS_EMAIL_ADDRESS",
         "ENLIST_WISH_PLAY",
+        "ENLIST_ANSWER",
+        "ANSWER_EDIT",
+        "ADMIN_QUESTION_CREATE_TEXT",
+        "ADMIN_QUESTION_CREATE_NAME",
+        "ADMIN_QUESTION_CREATE_CAPACITY",
+        "ADMIN_QUESTION_EDIT_VALUE",
         "CONFIRM_WISH",
         "CHARACTER_EDIT",
         "CO_PLAYER_EDIT",
@@ -448,6 +455,8 @@ def _my_game_text(
     game_date = format_game_date(event.game_date) if event.game_date is not None else "не указана"
     status = "; ".join(statuses)
     text = f"Игра: «{event.name}»\nДата: {game_date}\nВаш статус: {status}"
+    if registration is not None and event.registration_question is not None:
+        text += "\n\n" + answer_text(event, registration)
     masters_text = event_masters_text(masters)
     if masters_text:
         text = f"{text}\n\n{masters_text}"

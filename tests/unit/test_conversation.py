@@ -3365,6 +3365,7 @@ async def test_created_game_confirmation_includes_all_table_links(disk_store: Me
         Button(label="Не хочу планировать закрытие", value="create:close:cancel"),
     ]
     amount_prompt = await engine.handle(inbound(40, "create:close:cancel", callback=True))
+    amount_prompt = await engine.handle(inbound(4001, "rq:create:no", callback=True))
     assert amount_prompt.text == "Введите количество игроков (от 1 до 10000):"
     invalid = await engine.handle(inbound(5, "много"))
     assert invalid.text == "Введите целое количество игроков от 1 до 10000:"
@@ -3457,6 +3458,7 @@ async def test_admin_can_choose_next_saturday_as_game_date(
     date_prompt = await engine.handle(inbound(2, "Игра в субботу"))
     close_prompt = await engine.handle(inbound(3, date_prompt.buttons[0].value, callback=True))
     amount_prompt = await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    amount_prompt = await engine.handle(inbound(3001, "rq:create:no", callback=True))
 
     creator = await users.get(Platform.TELEGRAM, 1)
     assert creator is not None
@@ -3500,6 +3502,7 @@ async def test_creator_can_schedule_automatic_closing_after_the_game_date(
     assert "Минуты должны быть 00" in non_hour.text
 
     amount = await engine.handle(inbound(6, closing_value, callback=callback))
+    amount = await engine.handle(inbound(601, "rq:create:no", callback=True))
     assert amount.text == "Введите количество игроков (от 1 до 10000):"
     await engine.handle(inbound(7, "20"))
     await engine.handle(inbound(8, "create:schedule:no", callback=True))
@@ -3522,6 +3525,7 @@ async def test_creator_can_schedule_confirmation_opening_and_deadline(
     await engine.handle(inbound(2, "Игра с расписанием"))
     await engine.handle(inbound(3, "15.11.40"))
     await engine.handle(inbound(4, "create:close:next-night", callback=True))
+    await engine.handle(inbound(401, "rq:create:no", callback=True))
     await engine.handle(inbound(5, "20"))
     await engine.handle(inbound(6, "create:schedule:yes", callback=True))
     confirmation_question = await engine.handle(inbound(7, "01.10.40 18:00"))
@@ -3658,6 +3662,7 @@ async def test_privileged_user_can_schedule_registration_with_strict_moscow_time
     await engine.handle(inbound(2, "Отложенная игра"))
     await engine.handle(inbound(3, "15.11.40"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:master-self", callback=True))
     schedule = await engine.handle(inbound(6, "create:schedule:yes", callback=True))
@@ -3712,6 +3717,7 @@ async def test_nearest_friday_button_schedules_registration_and_cancel_aborts_cr
     await engine.handle(inbound(2, "Пятничная игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:schedule:yes", callback=True))
     confirmation_question = await engine.handle(inbound(6, "create:schedule:nearest-friday", callback=True))
@@ -3728,6 +3734,7 @@ async def test_nearest_friday_button_schedules_registration_and_cancel_aborts_cr
     await engine.handle(inbound(8, "Отменённая игра"))
     await engine.handle(inbound(9, "15.11.26"))
     await engine.handle(inbound(90, "create:close:cancel", callback=True))
+    await engine.handle(inbound(9001, "rq:create:no", callback=True))
     await engine.handle(inbound(10, "20"))
     menu = await engine.handle(inbound(11, "create:schedule:yes", callback=True))
     cancelled = await engine.handle(inbound(12, menu.buttons[-1].value, callback=True))
@@ -3750,6 +3757,7 @@ async def test_gamemaster_created_game_seeds_only_its_creator(disk_store: Memory
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     question = await engine.handle(inbound(4, "20"))
     assert question.text == SCHEDULE_REGISTRATION_QUESTION
     confirmation_question = await engine.handle(inbound(5, "create:schedule:no", callback=True))
@@ -3774,6 +3782,7 @@ async def test_game_creation_returns_pending_while_production_upload_runs_asynch
     await engine.handle(inbound(2, "Новая асинхронная игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:schedule:no", callback=True))
     response = await engine.handle(inbound(50, "create:confirmation:no", callback=True))
@@ -3810,6 +3819,7 @@ async def test_admin_creates_game_without_masters_and_assigns_one_later(
     await engine.handle(inbound(2, "Игра без мастеров"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     master_question = await engine.handle(inbound(4, "20"))
     schedule_question = await engine.handle(inbound(5, "create:master-later", callback=True))
     await engine.handle(inbound(6, "create:schedule:no", callback=True))
@@ -3857,6 +3867,7 @@ async def test_admin_created_game_can_pick_another_moderator_or_admin_as_its_fir
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     first_page = await engine.handle(inbound(5, "create:master-pick", callback=True))
     second_page = await engine.handle(inbound(6, "create:master-page:5", callback=True))
@@ -3926,6 +3937,7 @@ async def test_admin_created_game_master_notification_retry_does_not_create_a_se
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:master-pick", callback=True))
     await engine.handle(inbound(6, "create:master:t:2", callback=True))
@@ -3967,6 +3979,7 @@ async def test_admin_can_promote_profile_link_while_selecting_the_first_master(
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     picker = await engine.handle(inbound(5, "create:master-pick", callback=True))
     platform = await engine.handle(inbound(6, "create:master-direct", callback=True))
@@ -4033,6 +4046,7 @@ async def test_admin_declines_profile_promotion_and_is_prompted_to_choose_anothe
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
     await engine.handle(inbound(5, "create:master-pick", callback=True))
     await engine.handle(inbound(6, "create:master-direct", callback=True))
@@ -4058,6 +4072,7 @@ async def test_admin_creation_master_picker_returns_to_question_and_rechecks_adm
     await engine.handle(inbound(2, "Новая игра"))
     await engine.handle(inbound(3, "15.11.26"))
     await engine.handle(inbound(30, "create:close:cancel", callback=True))
+    await engine.handle(inbound(3001, "rq:create:no", callback=True))
     await engine.handle(inbound(4, "20"))
 
     empty = await engine.handle(inbound(5, "create:master-pick", callback=True))

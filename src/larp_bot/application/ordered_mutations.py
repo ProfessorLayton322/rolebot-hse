@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from typing import cast
 
 from larp_bot.domain.models import (
+    AnswerPayload,
     AttendanceStatus,
     BotIdentity,
     CharacterWishPayload,
@@ -21,10 +23,18 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     Platform,
     PlayerAmountPayload,
+    QuestionPayload,
     Registration,
     TelegramUser,
     event_reference,
     surname_and_name,
+)
+from larp_bot.domain.registration_queues import (
+    active_queue,
+    answer_capacity,
+    main_roster,
+    queue_key,
+    queue_position,
 )
 from larp_bot.domain.security import participant_key
 
@@ -41,7 +51,13 @@ from .notification_services import (
     enlistment_success_text,
     event_master_records,
 )
-from .ports import AdminConfigProvider, EventRepository, UserRepository
+from .ports import (
+    AdminConfigProvider,
+    EventRepository,
+    QuestionEventRepository,
+    QuestionRegistrationRepository,
+    UserRepository,
+)
 from .registration_services import (
     RegistrationCatalog,
     _daily_pass_profiles,
@@ -237,7 +253,10 @@ class OrderedMutationService:
                 for row in await self.catalog.registrations.list_for_event(event.event_id)
                 if row.attendance_status is not AttendanceStatus.CANCELLED
             ]
-            active.sort(key=lambda row: (row.created_at, row.participant_key))
+            active.sort(key=queue_key)
+        if registration is not None and event.registration_question is not None:
+            active = active_queue(active, registration.answer_id)
+            event = event.model_copy(update={"player_amount": answer_capacity(event, registration.answer_id)})
         await self._record_reserve_promotion(event, command, registration, active)
         await self._record_confirmed_link_promotion(event, command, registration, active)
 
@@ -310,6 +329,7 @@ class OrderedMutationService:
                 Operation.CONFIRM,
                 Operation.UPDATE_CHARACTER_WISH,
                 Operation.UPDATE_CO_PLAYER_WISH,
+                Operation.UPDATE_ANSWER,
                 Operation.CANCEL,
             }:
                 raise OperationNotAllowed("Игра больше не активна; запись и изменение данных недоступны.")
@@ -322,6 +342,7 @@ class OrderedMutationService:
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.SEND_ALL_PLAYERS_NOTIFICATION,
             Operation.UPDATE_EVENT_DETAILS,
+            Operation.UPDATE_QUESTION,
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,
@@ -381,7 +402,23 @@ class OrderedMutationService:
             return MutationResult(
                 f"Название и дата игры изменены: {event_reference(command.payload.name, command.payload.game_date)}"
             )
+        if command.operation is Operation.UPDATE_QUESTION:
+            assert isinstance(command.payload, QuestionPayload)
+            current = event.registration_question
+            question = command.payload.question
+            if current is None:
+                raise OperationNotAllowed("В этой игре нет дополнительного вопроса")
+            if [(o.option_id, o.player_amount) for o in current.options] != [
+                (o.option_id, o.player_amount) for o in question.options
+            ]:
+                raise OperationNotAllowed("Можно изменить только текст вопроса и названия ответов")
+            await cast(QuestionEventRepository, self.events).set_registration_question(event.event_id, question)
+            event.registration_question = question
+            await self.catalog.refresh(event)
+            return MutationResult("Дополнительный вопрос и названия ответов обновлены")
         if command.operation is Operation.UPDATE_PLAYER_AMOUNT:
+            if event.registration_question is not None:
+                raise OperationNotAllowed("Для этой игры лимиты мест заданы отдельно для ответов")
             assert isinstance(command.payload, PlayerAmountPayload)
             event = await self.catalog.ensure_migrated(event)
             if event.last_participant_removal_operation_id != command.operation_id:
@@ -392,7 +429,7 @@ class OrderedMutationService:
                         for registration in await self.catalog.registrations.list_for_event(event.event_id)
                         if registration.attendance_status is not AttendanceStatus.CANCELLED
                     ]
-                    registrations.sort(key=lambda row: (row.created_at, row.participant_key))
+                    registrations.sort(key=queue_key)
                     promoted_keys = [
                         registration.participant_key
                         for registration in registrations[event.player_amount : command.payload.player_amount]
@@ -425,18 +462,24 @@ class OrderedMutationService:
                 for registration in await self.catalog.registrations.list_for_event(event.event_id)
                 if registration.attendance_status is not AttendanceStatus.CANCELLED
             ]
-            registrations.sort(key=lambda row: (row.created_at, row.participant_key))
+            registrations.sort(key=queue_key)
             reordered = sorted(
                 registrations,
                 key=lambda row: (
                     row.attendance_status is not AttendanceStatus.CONFIRMED,
-                    row.created_at,
-                    row.participant_key,
+                    *queue_key(row),
                 ),
             )
             if [row.participant_key for row in registrations] != [row.participant_key for row in reordered]:
-                before_main = {row.participant_key for row in registrations[: event.player_amount]}
-                after_main = {row.participant_key for row in reordered[: event.player_amount]}
+                before_main = {row.participant_key for row in main_roster(event, registrations)}
+                if event.registration_question is None:
+                    after_main = {row.participant_key for row in reordered[: event.player_amount]}
+                else:
+                    after_main = {
+                        row.participant_key
+                        for option in event.registration_question.options
+                        for row in [r for r in reordered if r.answer_id == option.option_id][: option.player_amount]
+                    }
                 moves = [
                     *(
                         _sift_snapshot_entry(SIFT_PROMOTED_PREFIX, row.participant_key)
@@ -465,7 +508,7 @@ class OrderedMutationService:
             current_entries = _current_sift_entries(
                 stored_event.participant_removal_keys if stored_event is not None else [],
                 registration_rows,
-                event.player_amount,
+                event,
             )
             promoted_count = sum(entry.startswith(SIFT_PROMOTED_PREFIX) for entry in current_entries)
             demoted_count = sum(entry.startswith(SIFT_DEMOTED_PREFIX) for entry in current_entries)
@@ -480,7 +523,13 @@ class OrderedMutationService:
                 for registration in await self.catalog.registrations.list_for_event(event.event_id)
                 if registration.attendance_status is not AttendanceStatus.CANCELLED
             ]
-            registrations.sort(key=lambda row: (row.created_at, row.participant_key))
+            registrations.sort(key=queue_key)
+            selected = next((row for row in registrations if row.participant_key == command.participant_key), None)
+            if selected is None:
+                raise OperationNotAllowed("Выбранный игрок уже не находится в запасе")
+            if event.registration_question is not None:
+                registrations = active_queue(registrations, selected.answer_id)
+            capacity = answer_capacity(event, selected.answer_id)
             promoted_entry = _sift_snapshot_entry(SIFT_PROMOTED_PREFIX, command.participant_key)
             if (
                 event.last_participant_removal_operation_id == command.operation_id
@@ -488,7 +537,7 @@ class OrderedMutationService:
                 in _current_sift_entries(
                     event.participant_removal_keys,
                     registrations,
-                    event.player_amount,
+                    event,
                 )
             ):
                 await self.catalog.refresh(event)
@@ -502,7 +551,7 @@ class OrderedMutationService:
                 ),
                 None,
             )
-            if selected_index is None or selected_index < event.player_amount:
+            if selected_index is None or selected_index < capacity:
                 raise OperationNotAllowed("Выбранный игрок уже не находится в запасе")
             promoted = registrations[selected_index]
             if promoted.attendance_status is not AttendanceStatus.CONFIRMED:
@@ -510,7 +559,7 @@ class OrderedMutationService:
             demoted = next(
                 (
                     registration
-                    for registration in reversed(registrations[: event.player_amount])
+                    for registration in reversed(registrations[:capacity])
                     if registration.attendance_status is AttendanceStatus.WAITING
                 ),
                 None,
@@ -532,9 +581,9 @@ class OrderedMutationService:
                 event.event_id,
                 operation_id=command.operation_id,
                 promoted_participant_key=promoted.participant_key,
-                promoted_created_at=promoted.created_at,
+                promoted_created_at=queue_key(promoted)[0],
                 demoted_participant_key=demoted.participant_key,
-                demoted_created_at=demoted.created_at,
+                demoted_created_at=queue_key(demoted)[0],
             )
             await self.catalog.refresh(event)
             return MutationResult(
@@ -605,6 +654,11 @@ class OrderedMutationService:
                 and existing.last_operation_id != command.operation_id
             ):
                 raise OperationNotAllowed(f"Вы уже записаны на игру {event_reference(event.name, event.game_date)}")
+            if event.registration_question is not None:
+                if event.registration_question.option(command.payload.answer_id) is None:
+                    raise OperationNotAllowed("Выберите ответ на дополнительный вопрос")
+            elif command.payload.answer_id is not None:
+                raise OperationNotAllowed("В этой игре нет дополнительного вопроса")
             larp_experience = command.payload.larp_experience
             crossplay = command.payload.crossplay
             nickname = command.payload.nickname
@@ -624,7 +678,7 @@ class OrderedMutationService:
                         vk_profile = f"https://vk.com/id{user.vk_id}"
                         if telegram_profile is None and user.telegram_handle is not None:
                             telegram_profile = f"https://t.me/{user.telegram_handle.removeprefix('@')}"
-            await self.catalog.registrations.enlist(
+            await cast(QuestionRegistrationRepository, self.catalog.registrations).enlist(
                 event.event_id,
                 operation_id=command.operation_id,
                 participant_key=command.participant_key,
@@ -635,12 +689,12 @@ class OrderedMutationService:
                 crossplay=crossplay,
                 vk_profile=vk_profile,
                 telegram_profile=telegram_profile,
+                **({"answer_id": command.payload.answer_id} if event.registration_question else {}),
             )
             event, registration_rows = await self.catalog.refresh_with_rows(event)
             await self._refresh_pass_table(event, registration_rows)
-            active = [row for row in registration_rows if row.attendance_status is not AttendanceStatus.CANCELLED]
-            active.sort(key=lambda row: (row.created_at, row.participant_key))
-            queue_position = next(
+            active = active_queue(registration_rows, command.payload.answer_id if event.registration_question else None)
+            enlisted_position = next(
                 index for index, row in enumerate(active, start=1) if row.participant_key == command.participant_key
             )
             same_day_warning = False
@@ -665,9 +719,10 @@ class OrderedMutationService:
             return MutationResult(
                 enlistment_success_text(
                     event,
-                    queue_position,
+                    enlisted_position,
                     masters=await event_master_records(self.events, self.users, event.event_id),
                     same_day_warning=same_day_warning,
+                    answer_id=command.payload.answer_id,
                 ),
                 buttons=buttons,
             )
@@ -827,7 +882,7 @@ class OrderedMutationService:
                 row.participant_key
                 for row in _active_main_roster(
                     registration_rows,
-                    event.player_amount,
+                    event,
                 )
             }
             return MutationResult(
@@ -861,6 +916,32 @@ class OrderedMutationService:
                 )
             await self.catalog.refresh(event)
             return MutationResult("Пожелания по персонажу обновлены")
+        if command.operation is Operation.UPDATE_ANSWER:
+            assert isinstance(command.payload, AnswerPayload)
+            answer_question = event.registration_question
+            option = answer_question.option(command.payload.answer_id) if answer_question else None
+            if option is None:
+                raise OperationNotAllowed("Этот вариант ответа недоступен")
+            if event.status is EventStatus.CLOSED:
+                raise OperationNotAllowed("Регистрация на эту игру уже закрыта")
+            if registration.attendance_status is AttendanceStatus.CANCELLED:
+                raise OperationNotAllowed("Сначала снова запишитесь на эту игру")
+            if registration.answer_id == option.option_id and registration.last_operation_id != command.operation_id:
+                return MutationResult(f"Ваш ответ уже выбран: {option.name}", notifications_enabled=False)
+            await self._record_promotions(event, command, registration)
+            await cast(QuestionRegistrationRepository, self.catalog.registrations).update_answer(
+                event.event_id,
+                operation_id=command.operation_id,
+                participant_keys=actor_keys,
+                answer_id=option.option_id,
+            )
+            event, rows = await self.catalog.refresh_with_rows(event)
+            current_row = next(row for row in rows if row.participant_key == registration.participant_key)
+            position = queue_position(event, rows, current_row)
+            roster = "основной состав" if position <= option.player_amount else "запас"
+            return MutationResult(
+                f"Ответ изменён: {option.name}. Вы в конце очереди этого ответа: {roster}, место {position}."
+            )
         if command.operation is Operation.UPDATE_CO_PLAYER_WISH:
             if registration.attendance_status is AttendanceStatus.CANCELLED:
                 raise OperationNotAllowed("Сначала снова запишитесь на эту игру")

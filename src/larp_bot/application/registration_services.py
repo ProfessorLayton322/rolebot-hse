@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from larp_bot.domain.models import (
     MAX_EVENT_PAGE_SIZE,
+    AnswerPayload,
     AttendanceStatus,
     BotIdentity,
     CharacterWishPayload,
@@ -27,6 +28,7 @@ from larp_bot.domain.models import (
     Platform,
     PlayerAmountPayload,
     ProfileSyncPayload,
+    QuestionPayload,
     Registration,
     ReplyContext,
     TelegramUser,
@@ -133,6 +135,7 @@ class RegistrationCatalog:
             disk_path,
             rows,
             player_amount=event.player_amount,
+            question=event.registration_question,
             callback=callback,
             before_invoke=before_invoke,
         )
@@ -704,9 +707,9 @@ class RegistrationService:
         receives_chat_links = False
         if registration is not None:
             registrations = list(await self.catalog.registrations.list_for_event(event.event_id))
-            main_roster = _active_main_roster(registrations, event.player_amount)
+            main_roster = _active_main_roster(registrations, event)
             in_main_roster = any(active.participant_key == registration.participant_key for active in main_roster)
-            link_recipients = _chat_link_recipient_keys(registrations, event.player_amount)
+            link_recipients = _chat_link_recipient_keys(registrations, event)
             receives_chat_links = registration.participant_key in link_recipients
         # Stored chat links are shown only to the players they are sent to and to the game's masters.
         chat_links = (
@@ -932,6 +935,8 @@ class RegistrationService:
         platform: Platform,
         user_id: int,
         payload: EnlistPayload
+        | AnswerPayload
+        | QuestionPayload
         | CoPlayerWishPayload
         | CharacterWishPayload
         | ConfirmationDeadlinePayload
@@ -957,6 +962,7 @@ class RegistrationService:
             Operation.SEND_CONFIRMED_NOTIFICATION,
             Operation.SEND_ALL_PLAYERS_NOTIFICATION,
             Operation.UPDATE_EVENT_DETAILS,
+            Operation.UPDATE_QUESTION,
             Operation.UPDATE_PLAYER_AMOUNT,
             Operation.REMOVE_PARTICIPANT,
             Operation.REMOVE_WAITING_PARTICIPANTS,

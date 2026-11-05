@@ -229,6 +229,8 @@ class ProfileConversationMixin(ConversationContext):
             return await self._profile_step(user, message, value)
         if state.startswith("ENLIST_"):
             return await self._enlist_step(user, message, value)
+        if state == "ANSWER_EDIT":
+            return await self._answer_step(user, message, value)
         if state == "CONFIRM_REPLACE":
             return await self._confirm_replacement_step(user, message, value)
         if state == "CONFIRM_WISH":

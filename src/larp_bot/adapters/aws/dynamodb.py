@@ -715,6 +715,7 @@ class DynamoRegistrationRepository(_DynamoMemoryRepository[MemoryRegistrationRep
             "list_for_event",
             "list_page_for_event",
             "enlist",
+            "update_answer",
             "sift_waiting_to_end",
             "delete_for_event",
         }:
