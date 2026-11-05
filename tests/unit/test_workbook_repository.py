@@ -315,12 +315,22 @@ def test_co_player_wishes_color_only_matching_player_names_in_both_showcases() -
         ("Фёдор Professor", "Professor Layton", False),
         ("Без пожеланий", "Professor Layton", False),
         ("Фёдор, Быков", "Professor Layton", True),
-        ("Хочу играть с фЁдОром Быковым", "Professor Layton", True),
+        ("Хочу играть с фЁдОром Быковым", "Professor Layton", False),
         ("БЫКОВ\nФЁДОР", None, True),
+        ("ФЁДОР,,БЫКОВ", None, True),
+        ("LAYTON,,PROFESSOR", "Professor Layton", True),
+        ("Professor Layton", "Professor,Layton", True),
+        ("Professor Layton", "Professor,Layton Holmes", False),
         ("Play with LAYTON please; professor", "Professor Layton", True),
         ("кен eyep", "Канеки Кен/Eyepatch", False),
         ("Хочу с КЕН/EYEPATCH или кем-то ещё; Канеки", "Канеки Кен/Eyepatch", True),
         ("КЕН, Быков", "Кен", True),
+        ("Ионова Эсфирь", "Фир", False),
+        ("Фирма", "Фир", False),
+        ("ФИР", "Фир", True),
+        (",, ФИР,,,", "Фир", True),
+        ("Фир-Фир", "Фир", False),
+        ("Без пожеланий", ",,,", False),
     ],
 )
 def test_co_player_wishes_require_all_words_of_real_name_or_nickname(
@@ -360,14 +370,14 @@ def test_co_player_wishes_require_all_words_of_real_name_or_nickname(
             workbook.close()
 
 
-def test_first_name_only_wish_does_not_join_separate_player_groups() -> None:
+def test_partial_name_and_nickname_wishes_do_not_join_separate_player_groups() -> None:
     registrations = [
         Registration(
             event_id="event-a1",
             participant_key="a" * 43,
             display_name="Быков Фёдор",
             nickname="Professor Layton",
-            wish_play="Владимир Ткаченко",
+            wish_play="Владимир Ткаченко, Ионова Эсфирь",
         ),
         Registration(
             event_id="event-a1",
@@ -395,6 +405,13 @@ def test_first_name_only_wish_does_not_join_separate_player_groups() -> None:
             wish_play="Без пожеланий",
             attendance_status=AttendanceStatus.CANCELLED,
         ),
+        Registration(
+            event_id="event-a1",
+            participant_key="f" * 43,
+            display_name="Тищенко Глафира",
+            nickname="Фир",
+            wish_play="Без пожеланий",
+        ),
     ]
 
     for content in (showcase_workbook_bytes(registrations), public_showcase_workbook_bytes(registrations)):
@@ -405,6 +422,7 @@ def test_first_name_only_wish_does_not_join_separate_player_groups() -> None:
             assert sheet["B3"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[0]}"
             assert sheet["B4"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
             assert sheet["B5"].fill.fgColor.rgb == f"FF{TABLEAU_10_COLORS[1]}"
+            assert sheet["B6"].fill.fill_type is None
         finally:
             workbook.close()
 

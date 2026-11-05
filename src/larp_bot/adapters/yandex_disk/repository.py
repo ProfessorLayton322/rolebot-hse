@@ -195,26 +195,28 @@ def _ordered_active_registrations(registrations: Sequence[Registration]) -> list
     return sorted(active, key=lambda row: (row.created_at, row.participant_key))
 
 
+def _co_player_words(value: str) -> set[str]:
+    return set(value.casefold().replace(",", " ").split())
+
+
 def _player_component_colors(registrations: Sequence[Registration]) -> dict[str, str]:
     identifiers = [
         tuple(
-            identifier.casefold().split()
+            _co_player_words(identifier)
             for identifier in (surname_and_name(registration.display_name), registration.nickname)
             if identifier
         )
         for registration in registrations
     ]
-    wishes = [registration.wish_play.casefold() for registration in registrations]
+    wishes = [_co_player_words(registration.wish_play) for registration in registrations]
 
     adjacency = [set[int]() for _ in registrations]
     for first_index, first_identifiers in enumerate(identifiers):
         for second_index in range(first_index + 1, len(registrations)):
             first_mentions_second = any(
-                all(word in wishes[first_index] for word in words) for words in identifiers[second_index]
+                words.issubset(wishes[first_index]) for words in identifiers[second_index] if words
             )
-            second_mentions_first = any(
-                all(word in wishes[second_index] for word in words) for words in first_identifiers
-            )
+            second_mentions_first = any(words.issubset(wishes[second_index]) for words in first_identifiers if words)
             if first_mentions_second or second_mentions_first:
                 adjacency[first_index].add(second_index)
                 adjacency[second_index].add(first_index)

@@ -140,7 +140,7 @@ Every new event owns `disk:/larp-bot/events/<uuid>/master_table_<game name>.xlsx
 
 Per-destination Object Storage locks serialize concurrent replacements before they reach Yandex Disk; stale locks are recoverable, and exact-version deletion prevents each normal acquire/release cycle from creating another delete marker.
 
-In both participant tables, each pair of players forms an undirected graph connection if either player's co-player wish text contains every whitespace-separated word of the other player's stored surname-and-name pair or every word of their nickname. Matching ignores case and word order, searches the entire wish text for each word as a substring, and does not require commas between players. A first name alone is insufficient unless it is the player's complete nickname. The names in the ten largest connected groups of two or more players receive the Tableau 10 background colors; no other cells, and no pass-table cells, receive those group colors.
+In both participant tables, names, nicknames, and co-player wishes are split into words on commas and whitespace; other punctuation stays part of the word. Each pair of players forms an undirected graph connection if either player's wish contains every word of the other player's stored surname-and-name pair or every word of their nickname as separate, complete words. Matching ignores case and word order, so `Фир` matches `ФИР` but does not match `Эсфирь`. A first name alone is insufficient unless it is the player's complete nickname. The names in the ten largest connected groups of two or more players receive the Tableau 10 background colors; no other cells, and no pass-table cells, receive those group colors.
 
 Master-table columns:
 
