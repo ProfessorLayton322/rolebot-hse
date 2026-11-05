@@ -13,6 +13,7 @@ from .conversation_admin_rosters import AdministrationRostersMixin
 from .conversation_core import ConversationCoreMixin
 from .conversation_players import PlayerConversationMixin
 from .conversation_profiles import ProfileConversationMixin
+from .conversation_questions import QuestionConversationMixin
 from .conversation_support import *  # noqa: F403
 from .navigation import ADMIN_MENU as ADMIN_MENU
 from .navigation import MAIN_MENU as MAIN_MENU
@@ -22,6 +23,7 @@ class ConversationEngine(
     ConversationCoreMixin,
     ProfileConversationMixin,
     PlayerConversationMixin,
+    QuestionConversationMixin,
     AdministrationAccessMixin,
     AdministrationCreationMixin,
     AdministrationDialogMixin,

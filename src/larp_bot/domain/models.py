@@ -189,6 +189,8 @@ class Operation(StrEnum):
     CONFIRM = "CONFIRM"
     UPDATE_CHARACTER_WISH = "UPDATE_CHARACTER_WISH"
     UPDATE_CO_PLAYER_WISH = "UPDATE_CO_PLAYER_WISH"
+    UPDATE_ANSWER = "UPDATE_ANSWER"
+    UPDATE_QUESTION = "UPDATE_QUESTION"
     CANCEL = "CANCEL"
     OPEN_REGISTRATION = "OPEN_REGISTRATION"
     OPEN_CONFIRMATION = "OPEN_CONFIRMATION"
@@ -485,6 +487,49 @@ class VkUser(UserBase):
 User = TelegramUser | VkUser
 
 
+class AnswerOption(StrictModel):
+    option_id: str = Field(min_length=1, max_length=16, pattern=r"^[a-z0-9-]+$")
+    name: str = Field(min_length=1, max_length=31)
+    player_amount: int = Field(ge=1, le=MAX_PLAYER_AMOUNT)
+
+    @field_validator("name")
+    @classmethod
+    def valid_sheet_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value or re.search(r"[\\/*?:\[\]\x00-\x1f]", value) or value.startswith("'") or value.endswith("'"):
+            raise ValueError("Название ответа: 1–31 символ, без \\ / * ? : [ ] и крайних апострофов")
+        if value.casefold() == "history":
+            raise ValueError("Название History зарезервировано Excel")
+        return value
+
+
+class RegistrationQuestion(StrictModel):
+    text: str = Field(min_length=1, max_length=500)
+    # Storage and queue logic support a list; the initial creation UI collects two.
+    options: list[AnswerOption] = Field(min_length=2)
+
+    @field_validator("text")
+    @classmethod
+    def nonempty_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Текст вопроса не может быть пустым")
+        return value
+
+    @model_validator(mode="after")
+    def distinct_options(self) -> RegistrationQuestion:
+        if len({option.option_id for option in self.options}) != len(self.options):
+            raise ValueError("Идентификаторы ответов должны различаться")
+        if len({option.name.casefold() for option in self.options}) != len(self.options):
+            raise ValueError("Названия ответов должны различаться")
+        if sum(option.player_amount for option in self.options) > MAX_PLAYER_AMOUNT:
+            raise ValueError(f"Общее количество мест не должно превышать {MAX_PLAYER_AMOUNT}")
+        return self
+
+    def option(self, option_id: str | None) -> AnswerOption | None:
+        return next((option for option in self.options if option.option_id == option_id), None)
+
+
 class Event(StrictModel):
     event_id: str = Field(min_length=8, max_length=80, pattern=r"^[a-z0-9-]+$")
     name: str = Field(min_length=1, max_length=200)
@@ -495,6 +540,7 @@ class Event(StrictModel):
     # Existing events predate the capacity field. They retain a conservative
     # default while every newly created game must collect an explicit value.
     player_amount: int = Field(default=DEFAULT_PLAYER_AMOUNT, ge=1, le=MAX_PLAYER_AMOUNT)
+    registration_question: RegistrationQuestion | None = None
     disk_resource_path: str = Field(pattern=r"^disk:/larp-bot/events/.+\.xlsx$")
     public_registration_url: str
     master_table_google_url: str | None = None
@@ -659,6 +705,8 @@ class Registration(StrictModel):
     vk_profile: str = ""
     telegram_profile: str | None = None
     wish_play: str
+    answer_id: str | None = None
+    answer_queue_at: datetime | None = None
     larp_experience: bool | None = None
     crossplay: bool | None = None
     character_wish: str = ""
@@ -669,6 +717,7 @@ class Registration(StrictModel):
 
 
 class EnlistPayload(StrictModel):
+    answer_id: str | None = None
     display_name: str = Field(min_length=2, max_length=300)
     nickname: Nickname | None = None
     wish_play: str = Field(min_length=1, max_length=2000)
@@ -679,6 +728,14 @@ class EnlistPayload(StrictModel):
     vk_profile: str = ""
     telegram_profile: str | None = None
     same_day_warning_shown: bool = False
+
+
+class AnswerPayload(StrictModel):
+    answer_id: str = Field(min_length=1, max_length=16, pattern=r"^[a-z0-9-]+$")
+
+
+class QuestionPayload(StrictModel):
+    question: RegistrationQuestion
 
 
 class CoPlayerWishPayload(StrictModel):
@@ -782,6 +839,8 @@ class StatisticsPayload(StrictModel):
 
 CommandPayload = (
     EnlistPayload
+    | AnswerPayload
+    | QuestionPayload
     | CoPlayerWishPayload
     | CharacterWishPayload
     | ConfirmationDeadlinePayload
@@ -851,12 +910,17 @@ class OrderedRegistrationCommand(StrictModel):
             Operation.CONFIRM,
             Operation.UPDATE_CHARACTER_WISH,
             Operation.UPDATE_CO_PLAYER_WISH,
+            Operation.UPDATE_ANSWER,
             Operation.CANCEL,
             Operation.REMOVE_PARTICIPANT,
             Operation.PROMOTE_RESERVE_PARTICIPANT,
         }
         if self.operation in participant_ops and not self.participant_key:
             raise ValueError("participant_key is required")
+        if self.operation is Operation.UPDATE_ANSWER and not isinstance(self.payload, AnswerPayload):
+            raise ValueError("UPDATE_ANSWER requires AnswerPayload")
+        if self.operation is Operation.UPDATE_QUESTION and not isinstance(self.payload, QuestionPayload):
+            raise ValueError("UPDATE_QUESTION requires QuestionPayload")
         if self.operation is Operation.ENLIST and not isinstance(self.payload, EnlistPayload):
             raise ValueError("ENLIST requires EnlistPayload")
         if self.operation in {Operation.CONFIRM, Operation.UPDATE_CHARACTER_WISH} and not isinstance(

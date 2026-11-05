@@ -516,6 +516,10 @@ class AdministrationDialogMixin(ConversationContext):
             return await self._admin_reserve_promotion_pick(user, value)
         if user.dialog_state == "ADMIN_RESERVE_PROMOTION_CONFIRM":
             return await self._admin_reserve_promotion_confirm(user, message, value)
+        if user.dialog_state.startswith("ADMIN_QUESTION_CREATE_"):
+            return await self._question_creation_step(user, value)
+        if user.dialog_state.startswith("ADMIN_QUESTION_EDIT_"):
+            return await self._question_edit_step(user, message, value)
         if user.dialog_state in {
             "ADMIN_CREATE_MASTER_CHOICE",
             "ADMIN_CREATE_MASTER_PICK",
@@ -571,8 +575,7 @@ class AdministrationDialogMixin(ConversationContext):
                 user.dialog_context.pop("scheduled_close_at", None)
             else:
                 user.dialog_context["scheduled_close_at"] = scheduled_close_at.isoformat()
-            user.dialog_state = "ADMIN_CREATE_PLAYER_AMOUNT"
-            return BotResponse(text=f"Введите количество игроков (от 1 до {MAX_PLAYER_AMOUNT}):")
+            return self._creation_question_prompt(user)
         if user.dialog_state == "ADMIN_CREATE_PLAYER_AMOUNT":
             raw_amount = value.strip()
             if not raw_amount.isdecimal():

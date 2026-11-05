@@ -11,6 +11,7 @@ from larp_bot.domain.models import (
     Event,
     InboundMessage,
     Platform,
+    RegistrationQuestion,
     User,
     event_reference,
     format_game_date,
@@ -518,6 +519,11 @@ class AdministrationCreationMixin(ConversationContext):
             scheduled_close_at=(
                 datetime.fromisoformat(str(context["scheduled_close_at"]))
                 if context.get("scheduled_close_at") is not None
+                else None
+            ),
+            question=(
+                RegistrationQuestion.model_validate(context["registration_question"])
+                if context.get("registration_question")
                 else None
             ),
             requester=requester,
