@@ -171,6 +171,7 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         telegram,
         users,
         config,
+        member_tags_enabled=True,
     )
     statistics = StatisticsService(
         player_statistics,

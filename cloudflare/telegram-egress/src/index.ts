@@ -40,6 +40,7 @@ const ALLOWED_METHODS = new Set([
   "exportChatInviteLink",
   "promoteChatMember",
   "setChatAdministratorCustomTitle",
+  "setChatMemberTag",
   "banChatMember",
   "unbanChatMember",
 ]);

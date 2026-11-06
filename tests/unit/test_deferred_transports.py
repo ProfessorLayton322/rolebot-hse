@@ -459,6 +459,52 @@ async def test_telegram_egress_promotes_title_only_admin_with_no_explicit_rights
 
 
 @pytest.mark.asyncio
+async def test_telegram_egress_labels_regular_members_without_promotion() -> None:
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        await egress.set_member_tag(chat_id=-5404460137, user_id=5647623989, tag="Анастасия С.", request_id="join:tag")
+
+    assert requests == [
+        {
+            "request_id": "join:tag",
+            "method": "setChatMemberTag",
+            "payload": {"chat_id": -5404460137, "user_id": 5647623989, "tag": "Анастасия С."},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "description", "permission_error"),
+    [
+        (400, "Bad Request: not enough rights to manage tags", True),
+        (403, "Forbidden: bot is not an administrator of the chat", True),
+        (400, "Bad Request: CHAT_ADMIN_REQUIRED", True),
+        (400, "Bad Request: invalid tag", False),
+        (429, "Too Many Requests: retry later", False),
+        (503, "Service Unavailable", False),
+    ],
+)
+async def test_member_tag_permission_failures_are_distinct_from_retryable_errors(
+    status: int, description: str, permission_error: bool
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"ok": False, "error_code": status, "description": description})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        expected = TelegramBotPermissionError if permission_error else httpx.HTTPStatusError
+        with pytest.raises(expected):
+            await egress.set_member_tag(chat_id=-5404460137, user_id=77, tag="Иван И.", request_id="join:tag")
+
+
+@pytest.mark.asyncio
 async def test_telegram_egress_kick_demotes_bans_and_unbans_bot_promoted_admin() -> None:
     methods: list[str] = []
 

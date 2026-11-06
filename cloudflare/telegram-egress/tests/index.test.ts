@@ -67,9 +67,10 @@ async function signedRequest(
   method = "sendMessage",
   offsetSeconds = 0,
   secret = env.YANDEX_TO_CF_EGRESS_HMAC_SECRET,
+  payload: Record<string, unknown> = { chat_id: 1, text: "hello" },
 ): Promise<Request> {
   const requestId = "operation-id";
-  const body = JSON.stringify({ request_id: requestId, method, payload: { chat_id: 1, text: "hello" } });
+  const body = JSON.stringify({ request_id: requestId, method, payload });
   const bytes = new TextEncoder().encode(body);
   const hashBuffer = await crypto.subtle.digest("SHA-256", bytes);
   const hash = [...new Uint8Array(hashBuffer)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -104,6 +105,20 @@ describe("telegram egress", () => {
     const response = await handle(await signedRequest("getMe"), env);
     expect(response.status).toBe(200);
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain("api.telegram.org/bot123:token/getMe");
+  });
+
+  it("forwards AWS member tags without administrator promotion", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true, result: true })));
+    const payload = { chat_id: -5404460137, user_id: 5647623989, tag: "Анастасия С." };
+    const response = await handle(
+      await signedRequest("setChatMemberTag", 0, env.AWS_TO_CF_EGRESS_HMAC_SECRET, payload),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, request] = vi.mocked(fetch).mock.calls[0]!;
+    expect(String(url)).toContain("api.telegram.org/bot123:token/setChatMemberTag");
+    expect(JSON.parse(String(request?.body))).toEqual(payload);
   });
 
   it("accepts the AWS egress signature during migration", async () => {

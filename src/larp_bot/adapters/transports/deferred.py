@@ -36,6 +36,12 @@ TELEGRAM_INVITE_PERMISSION_DESCRIPTIONS = (
     "need administrator rights",
     "chat_admin_required",
 )
+TELEGRAM_TAG_PERMISSION_DESCRIPTIONS = (
+    "not enough rights",
+    "need administrator rights",
+    "chat_admin_required",
+    "bot is not an administrator",
+)
 TELEGRAM_ADMINISTRATOR_PERMISSION_FIELDS = (
     "can_manage_chat",
     "can_delete_messages",
@@ -130,6 +136,12 @@ class CloudflareTelegramEgress:
                 method == "exportChatInviteLink"
                 and description is not None
                 and any(marker in description.casefold() for marker in TELEGRAM_INVITE_PERMISSION_DESCRIPTIONS)
+            ):
+                raise TelegramBotPermissionError(f"telegram {payload.get('chat_id')}: {description}")
+            if (
+                method == "setChatMemberTag"
+                and description is not None
+                and any(marker in description.casefold() for marker in TELEGRAM_TAG_PERMISSION_DESCRIPTIONS)
             ):
                 raise TelegramBotPermissionError(f"telegram {payload.get('chat_id')}: {description}")
         response.raise_for_status()
@@ -283,6 +295,13 @@ class CloudflareTelegramEgress:
         await self._call(
             method="setChatAdministratorCustomTitle",
             payload={"chat_id": chat_id, "user_id": user_id, "custom_title": title},
+            request_id=request_id,
+        )
+
+    async def set_member_tag(self, *, chat_id: int, user_id: int, tag: str, request_id: str) -> None:
+        await self._call(
+            method="setChatMemberTag",
+            payload={"chat_id": chat_id, "user_id": user_id, "tag": tag},
             request_id=request_id,
         )
 
