@@ -1265,6 +1265,7 @@ class MemoryTelegramChatGateway:
         self.answered: list[tuple[str, str, str]] = []
         self.promoted: list[tuple[int, int, str]] = []
         self.titles: list[tuple[int, int, str, str]] = []
+        self.tags: list[tuple[int, int, str, str]] = []
         self.kicked: list[tuple[int, int, str]] = []
         self.export_count = 0
 
@@ -1335,6 +1336,10 @@ class MemoryTelegramChatGateway:
     ) -> None:
         self.titles.append((chat_id, user_id, title, request_id))
         self.members.setdefault((chat_id, user_id), {})["custom_title"] = title
+
+    async def set_member_tag(self, *, chat_id: int, user_id: int, tag: str, request_id: str) -> None:
+        self.tags.append((chat_id, user_id, tag, request_id))
+        self.members.setdefault((chat_id, user_id), {})["tag"] = tag
 
     async def kick_member(self, *, chat_id: int, user_id: int, request_id: str) -> bool:
         member = self.members.get((chat_id, user_id))

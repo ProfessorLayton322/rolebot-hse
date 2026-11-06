@@ -604,6 +604,8 @@ class TelegramChatGateway(Protocol):
 
     async def promote_title_only_admin(self, *, chat_id: int, user_id: int, request_id: str) -> None: ...
 
+    async def set_member_tag(self, *, chat_id: int, user_id: int, tag: str, request_id: str) -> None: ...
+
     async def set_administrator_title(
         self,
         *,

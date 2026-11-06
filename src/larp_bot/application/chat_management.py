@@ -99,12 +99,15 @@ class TelegramChatManagementService:
         telegram: TelegramChatGateway,
         users: UserRepository,
         admins: AdminConfigProvider,
+        *,
+        member_tags_enabled: bool = False,
     ) -> None:
         self.events = events
         self.registrations = registrations
         self.telegram = telegram
         self.users = users
         self.admins = admins
+        self.member_tags_enabled = member_tags_enabled
 
     async def _unarchived_events(self) -> list[Event]:
         events: list[Event] = []
@@ -383,6 +386,22 @@ class TelegramChatManagementService:
         if registration is None or registration.attendance_status is AttendanceStatus.CANCELLED:
             return
         title = telegram_administrator_title(registration.display_name)
+        if self.member_tags_enabled:
+            # Native tags work in ordinary groups too and keep players regular
+            # members. Only AWS enables this; preserve the frozen legacy path.
+            try:
+                await self.telegram.set_member_tag(
+                    chat_id=update.chat_id,
+                    user_id=update.member_user_id,
+                    tag=title,
+                    request_id=f"telegram-chat:{update.update_id}:tag",
+                )
+            except TelegramBotPermissionError as exc:
+                LOGGER.warning(
+                    "telegram_member_tag_permission_missing",
+                    extra={"event_id": event.event_id, "chat_id": update.chat_id, "error": str(exc)},
+                )
+            return
         await self.telegram.promote_title_only_admin(
             chat_id=update.chat_id,
             user_id=update.member_user_id,

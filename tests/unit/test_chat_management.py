@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from larp_bot.adapters.memory import (
@@ -56,6 +58,8 @@ def chat_service(
     users: MemoryUserRepository | None = None,
     admins: StaticAdminProvider | None = None,
     gateway: MemoryTelegramChatGateway | None = None,
+    *,
+    member_tags_enabled: bool = False,
 ) -> tuple[TelegramChatManagementService, MemoryTelegramChatGateway, RegistrationService]:
     tables = tables or MemoryRegistrationRepository()
     users = users or MemoryUserRepository()
@@ -75,6 +79,7 @@ def chat_service(
             gateway,
             users,
             admins or StaticAdminProvider(),
+            member_tags_enabled=member_tags_enabled,
         ),
         gateway,
         registrations,
@@ -430,6 +435,54 @@ async def test_joined_registration_is_promoted_by_stored_telegram_handle(
 
     assert gateway.promoted[-1][:2] == (-1001, 77)
     assert gateway.titles[-1][:3] == (-1001, 77, expected_title)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type", ["group", "supergroup"])
+async def test_aws_join_labels_regular_members_without_promoting_them(chat_type: str) -> None:
+    event = make_event(1)
+    event.event_id = "ff2d6c6f-c765-4dc9-88b3-873cbf2d58b5"
+    event.telegram_chat_id = -5404460137
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    await tables.enlist(
+        event.event_id,
+        operation_id="enlist",
+        participant_key="v" * 43,
+        display_name="Смирнова Анастасия",
+        wish_play="A",
+        telegram_profile="@player",
+    )
+    service, gateway, _ = chat_service(events, tables, member_tags_enabled=True)
+    gateway.members[(event.telegram_chat_id, 5647623989)] = {"status": "member"}
+    update = parse_telegram_group_update(
+        {
+            "update_id": 859152412,
+            "chat_member": {
+                "chat": {"id": event.telegram_chat_id, "type": chat_type},
+                "old_chat_member": {"status": "left"},
+                "new_chat_member": {
+                    "status": "member",
+                    "user": {"id": 5647623989, "username": "player"},
+                },
+            },
+        }
+    )
+    assert update is not None
+
+    await service.handle(update)
+
+    assert gateway.tags == [(-5404460137, 5647623989, "Анастасия С.", "telegram-chat:859152412:tag")]
+    assert gateway.members[(-5404460137, 5647623989)]["status"] == "member"
+    assert gateway.promoted == gateway.titles == []
+
+    gateway.set_member_tag = AsyncMock(side_effect=TelegramBotPermissionError("not enough rights"))  # type: ignore[method-assign]
+    await service.handle(update)
+    gateway.set_member_tag.assert_awaited_once()
+
+    gateway.set_member_tag = AsyncMock(side_effect=httpx.ReadTimeout("temporary failure"))  # type: ignore[method-assign]
+    with pytest.raises(httpx.ReadTimeout):
+        await service.handle(update)
 
 
 @pytest.mark.asyncio
