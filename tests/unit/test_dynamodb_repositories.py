@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -13,7 +13,16 @@ from larp_bot.adapters.aws.dynamodb import (
     DynamoRegistrationRepository,
     DynamoUserRepository,
 )
-from larp_bot.domain.models import AttendanceStatus, BotIdentity, Event, Platform, Registration, TelegramUser, VkUser
+from larp_bot.domain.models import (
+    AttendanceStatus,
+    BotIdentity,
+    Event,
+    EventStatus,
+    Platform,
+    Registration,
+    TelegramUser,
+    VkUser,
+)
 
 _DESERIALIZER = TypeDeserializer()
 
@@ -238,6 +247,75 @@ async def test_event_and_leaders_are_created_with_unique_signup_and_chat_locks(e
         BotIdentity(platform=Platform.TELEGRAM, platform_user_id=42)
     ]
     assert client.scans == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", list(EventStatus))
+@pytest.mark.parametrize("retry", [False, True])
+async def test_manual_registration_opening_overrides_future_schedule_atomically(
+    event: Event, status: EventStatus, retry: bool
+) -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoEventRepository(client, events_table="events", leaders_table="leaders")
+    now = datetime.now(UTC)
+    event.event_id = "26460eaf-24da-4431-a5ed-1655904b6903"
+    event.status = status
+    event.registration_open_at = now + timedelta(hours=11)
+    event.registration_open_notified_recipients = ["telegram:1"]
+    event.confirmation_open_at = now + timedelta(days=4)
+    event.confirmation_deadline = now + timedelta(days=6)
+    event.scheduled_close_at = now + timedelta(days=9)
+    await repository.create(event)
+    before = len(client.transactions)
+    client.fail_next_transaction = retry
+
+    assert await repository.set_status(event.event_id, EventStatus.CREATED)
+
+    stored = await repository.get(event.event_id)
+    assert stored is not None and stored.registration_is_open()
+    assert stored.registration_open_at is None
+    assert stored.registration_open_notified_recipients == []
+    assert stored.registration_open_notification_completed_at is None
+    assert stored.confirmation_open_at == event.confirmation_open_at
+    assert stored.confirmation_deadline == event.confirmation_deadline
+    assert stored.scheduled_close_at == event.scheduled_close_at
+    assert len(client.transactions) == before + 1
+    assert len(client.transactions[-1]) == 1
+    assert client.scans == []
+    assert not await repository.set_status(event.event_id, EventStatus.CREATED)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [EventStatus.CLOSED, EventStatus.CONFIRMATION_OPEN])
+async def test_other_status_changes_preserve_future_registration_schedule(event: Event, status: EventStatus) -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoEventRepository(client, events_table="events", leaders_table="leaders")
+    event.status = EventStatus.CREATED
+    event.registration_open_at = datetime.now(UTC) + timedelta(days=1)
+    await repository.create(event)
+
+    assert await repository.set_status(event.event_id, status)
+
+    stored = await repository.get(event.event_id)
+    assert stored is not None and stored.registration_open_at == event.registration_open_at
+
+
+@pytest.mark.asyncio
+async def test_manual_registration_opening_preserves_completed_opening_history(event: Event) -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoEventRepository(client, events_table="events", leaders_table="leaders")
+    event.registration_open_at = datetime.now(UTC) - timedelta(days=1)
+    event.registration_open_notified_recipients = ["telegram:1"]
+    event.registration_open_notification_completed_at = event.registration_open_at
+    await repository.create(event)
+
+    assert await repository.set_status(event.event_id, EventStatus.CREATED)
+
+    stored = await repository.get(event.event_id)
+    assert stored is not None and stored.registration_is_open()
+    assert stored.registration_open_at == event.registration_open_at
+    assert stored.registration_open_notified_recipients == event.registration_open_notified_recipients
+    assert stored.registration_open_notification_completed_at == event.registration_open_notification_completed_at
 
 
 @pytest.mark.asyncio

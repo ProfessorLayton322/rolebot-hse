@@ -294,7 +294,14 @@ class OrderedWorker:
                             await self.notifications.notify_masters_of_participation(command)
                     except DomainError as exc:
                         text = command.reply_context.text_failure or f"❌ {exc}"
-                    if notifications_enabled and not command_response_delivered:
+                    # Suppressing repeated broadcasts must still acknowledge
+                    # an explicit status request, even if it changed nothing.
+                    status_request = command.operation in {
+                        Operation.OPEN_REGISTRATION,
+                        Operation.OPEN_CONFIRMATION,
+                        Operation.CLOSE_EVENT,
+                    }
+                    if (notifications_enabled or status_request) and not command_response_delivered:
                         await self._deliver_once(raw, text, buttons)
                     await self.consumer.delete(raw.receipt_handle)
                     pending_receipts.discard(raw.receipt_handle)

@@ -1453,7 +1453,7 @@ async def test_confirmation_notifications_go_to_waiting_players_before_master_ac
         (EventStatus.CLOSED, Operation.CLOSE_EVENT, EmptyPayload()),
     ],
 )
-async def test_unchanged_game_status_sends_no_notifications(
+async def test_unchanged_game_status_acknowledges_request_without_broadcasting(
     status: EventStatus,
     operation: Operation,
     payload: ConfirmationDeadlinePayload | EmptyPayload,
@@ -1479,7 +1479,8 @@ async def test_unchanged_game_status_sends_no_notifications(
         display_name="Player",
         wish_play="A",
     )
-    consumer = FakeConsumer([queued(event, operation, payload, 1)])
+    envelope = queued(event, operation, payload, 1)
+    consumer = FakeConsumer([envelope])
     transport = MemoryDeferredTransport()
     worker = OrderedWorker(
         consumer,
@@ -1491,8 +1492,13 @@ async def test_unchanged_game_status_sends_no_notifications(
     )
 
     assert await worker.run() == 1
-    assert transport.sent == []
+    assert len(transport.sent) == 1
+    assert transport.sent[0][:3] == (Platform.TELEGRAM, 1, envelope.command.operation_id)
     assert consumer.deleted == ["receipt-1"]
+
+    consumer.envelopes = [envelope]
+    assert await worker.run() == 1
+    assert len(transport.sent) == 1
 
 
 @pytest.mark.parametrize(

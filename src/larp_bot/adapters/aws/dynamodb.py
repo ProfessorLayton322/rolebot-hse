@@ -12,7 +12,7 @@ from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
 
 from larp_bot.adapters.memory import MemoryEventRepository, MemoryRegistrationRepository, MemoryUserRepository
-from larp_bot.domain.models import Event, Platform, Registration, TelegramUser, User, VkUser
+from larp_bot.domain.models import Event, EventStatus, Platform, Registration, TelegramUser, User, VkUser
 
 Key = tuple[str, ...]
 
@@ -397,6 +397,23 @@ class _DynamoMemoryEventRepository(MemoryEventRepository):
     def __init__(self, events: list[Event]) -> None:
         super().__init__(events)
         self.leader_created_at: dict[tuple[str, Platform, int], datetime] = {}
+
+    async def set_status(self, event_id: str, status: EventStatus) -> bool:
+        event = self.rows.get(event_id)
+        if event is None:
+            return False
+        override_schedule = (
+            status is EventStatus.CREATED
+            and event.registration_open_at is not None
+            and event.registration_open_at > datetime.now(UTC)
+        )
+        changed = await super().set_status(event_id, status)
+        if override_schedule:
+            # A manual opening overrides the time gate, including when CREATED
+            # is already stored. Both changes commit in one revision-checked
+            # DynamoDB transaction so a retry cannot leave registration gated.
+            await self.set_registration_open_at(event_id, None)
+        return changed or override_schedule
 
 
 class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
