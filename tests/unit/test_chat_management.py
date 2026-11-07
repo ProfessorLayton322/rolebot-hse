@@ -16,7 +16,9 @@ from larp_bot.adapters.memory import (
     StaticAdminProvider,
 )
 from larp_bot.adapters.telegram import TelegramGroupUpdate, parse_telegram_group_update
+from larp_bot.adapters.telegram.adapter import InvalidTelegramUpdate
 from larp_bot.application.chat_management import TelegramChatManagementService, telegram_administrator_title
+from larp_bot.application.ports import TelegramChatMigrationRepository
 from larp_bot.application.services import (
     CANCELLED_CONFIRMED_PREFIX,
     CANCELLED_WAITING_PREFIX,
@@ -33,6 +35,7 @@ from larp_bot.domain.models import (
     OrderedRegistrationCommand,
     Platform,
     TelegramBotPermissionError,
+    TelegramChatMigrated,
     TelegramUser,
     VkUser,
 )
@@ -60,6 +63,7 @@ def chat_service(
     gateway: MemoryTelegramChatGateway | None = None,
     *,
     member_tags_enabled: bool = False,
+    chat_migrations: TelegramChatMigrationRepository | None = None,
 ) -> tuple[TelegramChatManagementService, MemoryTelegramChatGateway, RegistrationService]:
     tables = tables or MemoryRegistrationRepository()
     users = users or MemoryUserRepository()
@@ -80,6 +84,7 @@ def chat_service(
             users,
             admins or StaticAdminProvider(),
             member_tags_enabled=member_tags_enabled,
+            chat_migrations=chat_migrations,
         ),
         gateway,
         registrations,
@@ -483,6 +488,111 @@ async def test_aws_join_labels_regular_members_without_promoting_them(chat_type:
     gateway.set_member_tag = AsyncMock(side_effect=httpx.ReadTimeout("temporary failure"))  # type: ignore[method-assign]
     with pytest.raises(httpx.ReadTimeout):
         await service.handle(update)
+
+
+@pytest.mark.parametrize("from_new_chat", [False, True])
+def test_group_migration_parser_normalizes_both_service_messages(from_new_chat: bool) -> None:
+    old_chat_id, new_chat_id = -5404460137, -1003931461623
+    message: dict[str, object] = {
+        "chat": {
+            "id": new_chat_id if from_new_chat else old_chat_id,
+            "type": "supergroup" if from_new_chat else "group",
+        },
+        "migrate_from_chat_id" if from_new_chat else "migrate_to_chat_id": old_chat_id
+        if from_new_chat
+        else new_chat_id,
+    }
+
+    update = parse_telegram_group_update({"update_id": 859152412, "message": message})
+
+    assert update == TelegramGroupUpdate("859152412", "chat_migrated", old_chat_id, migrate_to_chat_id=new_chat_id)
+
+
+@pytest.mark.parametrize("migrated_id", [True, "-1003931461623", 42, -5404460137])
+def test_group_migration_parser_rejects_invalid_ids(migrated_id: object) -> None:
+    with pytest.raises(InvalidTelegramUpdate):
+        parse_telegram_group_update(
+            {
+                "update_id": 1,
+                "message": {"chat": {"id": -5404460137, "type": "group"}, "migrate_to_chat_id": migrated_id},
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_aws_chat_migration_dispatches_without_republishing_invites() -> None:
+    event = make_event(1)
+    event.telegram_chat_id = -5404460137
+    events = MemoryEventRepository([event])
+    migrations = AsyncMock(spec=TelegramChatMigrationRepository)
+    migrations.migrate_telegram_chat.return_value = True
+    service, gateway, _ = chat_service(events, chat_migrations=migrations)
+
+    await service.handle(TelegramGroupUpdate("1", "chat_migrated", -5404460137, migrate_to_chat_id=-1003931461623))
+
+    migrations.migrate_telegram_chat.assert_awaited_once_with(event.event_id, -5404460137, -1003931461623)
+    assert gateway.sent == []
+    assert gateway.export_count == 0
+
+
+@pytest.mark.asyncio
+async def test_aws_chat_migration_conflict_is_not_acknowledged() -> None:
+    event = make_event(1)
+    event.telegram_chat_id = -5404460137
+    migrations = AsyncMock(spec=TelegramChatMigrationRepository)
+    migrations.migrate_telegram_chat.return_value = False
+    service, _, _ = chat_service(MemoryEventRepository([event]), chat_migrations=migrations)
+
+    with pytest.raises(RuntimeError, match="conflicts"):
+        await service.handle(TelegramGroupUpdate("1", "chat_migrated", -5404460137, migrate_to_chat_id=-1003931461623))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tag_error", [None, TelegramBotPermissionError("not enough rights"), httpx.ReadTimeout("timeout")]
+)
+async def test_aws_join_uses_migration_response_without_losing_a_failed_tag_retry(tag_error: Exception | None) -> None:
+    event = make_event(1)
+    event.telegram_chat_id = -5404460137
+    events = MemoryEventRepository([event])
+    tables = MemoryRegistrationRepository()
+    await tables.enlist(
+        event.event_id,
+        operation_id="enlist",
+        participant_key="v" * 43,
+        display_name="Иванов Иван",
+        wish_play="A",
+        telegram_profile="@player",
+    )
+    migrations = AsyncMock(spec=TelegramChatMigrationRepository)
+    migrations.migrate_telegram_chat.return_value = True
+    service, gateway, _ = chat_service(events, tables, member_tags_enabled=True, chat_migrations=migrations)
+    gateway.set_member_tag = AsyncMock(side_effect=[TelegramChatMigrated(-1003931461623), tag_error])  # type: ignore[method-assign]
+    update = TelegramGroupUpdate("1", "member_joined", -5404460137, member_user_id=77, member_username="player")
+
+    if isinstance(tag_error, httpx.ReadTimeout):
+        with pytest.raises(httpx.ReadTimeout):
+            await service.handle(update)
+        migrations.migrate_telegram_chat.assert_not_awaited()
+    else:
+        await service.handle(update)
+        migrations.migrate_telegram_chat.assert_awaited_once_with(event.event_id, -5404460137, -1003931461623)
+
+    calls = gateway.set_member_tag.await_args_list
+    assert [call.kwargs["chat_id"] for call in calls] == [-5404460137, -1003931461623]
+    assert all(call.kwargs["tag"] == "Иван Иванов" for call in calls)
+    assert gateway.promoted == gateway.titles == []
+
+
+@pytest.mark.asyncio
+async def test_frozen_chat_service_does_not_apply_aws_chat_migrations() -> None:
+    event = make_event(1)
+    event.telegram_chat_id = -5404460137
+    service, _, _ = chat_service(MemoryEventRepository([event]))
+
+    await service.handle(TelegramGroupUpdate("1", "chat_migrated", -5404460137, migrate_to_chat_id=-1003931461623))
+
+    assert event.telegram_chat_id == -5404460137
 
 
 @pytest.mark.asyncio

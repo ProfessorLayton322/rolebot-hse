@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress, VkApiTransport
-from larp_bot.domain.models import Button, TelegramBotPermissionError, UnreachableRecipient
+from larp_bot.domain.models import Button, TelegramBotPermissionError, TelegramChatMigrated, UnreachableRecipient
 
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError])
@@ -477,6 +477,49 @@ async def test_telegram_egress_labels_regular_members_without_promotion() -> Non
             "payload": {"chat_id": -5404460137, "user_id": 5647623989, "tag": "Анастасия С."},
         }
     ]
+
+
+async def test_telegram_egress_exposes_migrated_chat_and_logs_api_reason(caplog: pytest.LogCaptureFixture) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "error_code": 400,
+                "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                "parameters": {"migrate_to_chat_id": -1003931461623},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        with pytest.raises(TelegramChatMigrated) as failure:
+            await egress.set_member_tag(chat_id=-5404460137, user_id=77, tag="Иван И.", request_id="join:tag")
+
+    assert failure.value.chat_id == -1003931461623
+    record = next(record for record in caplog.records if record.message == "telegram_api_rejected")
+    assert record.telegram_method == "setChatMemberTag"
+    assert record.request_id == "join:tag"
+    assert record.error_description == "Bad Request: group chat was upgraded to a supergroup chat"
+    assert not hasattr(record, "payload")
+
+
+@pytest.mark.parametrize("migrated_id", [True, "-1003931461623", 1234, -5404460137, None])
+async def test_telegram_egress_rejects_invalid_migration_parameters(migrated_id: object) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "ok": False,
+                "description": "Bad Request: invalid tag",
+                "parameters": {"migrate_to_chat_id": migrated_id},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        egress = CloudflareTelegramEgress("https://egress.example", "hmac", client=client)
+        with pytest.raises(httpx.HTTPStatusError):
+            await egress.set_member_tag(chat_id=-5404460137, user_id=77, tag="Иван И.", request_id="join:tag")
 
 
 @pytest.mark.asyncio

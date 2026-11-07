@@ -25,6 +25,7 @@ class TelegramGroupUpdate:
     member_user_id: int | None = None
     member_is_bot: bool = False
     member_username: str | None = None
+    migrate_to_chat_id: int | None = None
 
 
 def _chat_id(value: object) -> int | None:
@@ -127,6 +128,25 @@ def parse_telegram_group_update(update: dict[str, Any]) -> TelegramGroupUpdate |
         chat_id = _chat_id(message.get("chat"))
         if chat_id is None:
             return None
+        migrate_to = message.get("migrate_to_chat_id")
+        migrate_from = message.get("migrate_from_chat_id")
+        if migrate_to is not None or migrate_from is not None:
+            old_chat_id = migrate_from if migrate_from is not None else chat_id
+            new_chat_id = migrate_to if migrate_to is not None else chat_id
+            if (
+                type(old_chat_id) is not int
+                or type(new_chat_id) is not int
+                or old_chat_id >= 0
+                or new_chat_id >= 0
+                or old_chat_id == new_chat_id
+            ):
+                raise InvalidTelegramUpdate("invalid Telegram chat migration")
+            return TelegramGroupUpdate(
+                serialized_update_id,
+                "chat_migrated",
+                old_chat_id,
+                migrate_to_chat_id=new_chat_id,
+            )
         sender = message.get("from")
         user_id = sender.get("id") if isinstance(sender, dict) else None
         text = message.get("text")

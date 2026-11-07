@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -281,6 +282,43 @@ async def test_group_admin_update_is_dispatched_to_chat_management() -> None:
     assert json.loads(result["body"])["delivery"] == "deferred"
     assert len(app.telegram_chat_management.updates) == 1
     assert app.telegram_chat_management.updates[0].action == "bot_admin_granted"
+    assert app.conversation.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_aws_group_update_logs_update_and_chat_ids(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fails: bool
+) -> None:
+    monkeypatch.setenv("CLOUD_PROVIDER", "aws")
+    caplog.set_level(logging.INFO, logger="larp_bot.gateway")
+    body = json.dumps(
+        {
+            "update_id": 859152412,
+            "message": {
+                "chat": {"id": -5404460137, "type": "group"},
+                "migrate_to_chat_id": -1003931461623,
+            },
+        }
+    ).encode()
+    app = fake_app(BotResponse(text="unused"))
+    app.telegram_chat_management.handle = AsyncMock(side_effect=RuntimeError("migration conflict") if fails else None)
+    event = signed_event(body, deadline_ms=int(time.time() * 1000) + 10_000, secret="aws-transport-secret")
+
+    if fails:
+        with pytest.raises(RuntimeError, match="migration conflict"):
+            await _telegram(event, body, app)
+    else:
+        response = await _telegram(event, body, app)
+        assert response["statusCode"] == 200
+        assert json.loads(response["body"])["delivery"] == "deferred"
+
+    record = next(record for record in caplog.records if record.message.startswith("telegram_group_update_"))
+    assert record.message == ("telegram_group_update_failed" if fails else "telegram_group_update_handled")
+    assert record.platform_update_id == "859152412"
+    assert record.chat_id == -5404460137
+    assert record.action == "chat_migrated"
+    assert record.request_id == "request-1"
     assert app.conversation.calls == 0
 
 

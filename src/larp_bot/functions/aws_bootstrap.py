@@ -26,7 +26,12 @@ from larp_bot.adapters.yandex_disk.repository import YandexDiskRestClient, Yande
 from larp_bot.application.chat_management import TelegramChatManagementService
 from larp_bot.application.conversation import ConversationEngine
 from larp_bot.application.game_closings import ScheduledGameClosingService
-from larp_bot.application.ports import EventRepository, RegistrationRepository, UserRepository
+from larp_bot.application.ports import (
+    EventRepository,
+    RegistrationRepository,
+    TelegramChatMigrationRepository,
+    UserRepository,
+)
 from larp_bot.application.services import (
     ConfirmationNotificationService,
     EventAdministrationService,
@@ -172,6 +177,7 @@ async def build_aws_container(*, consumer: LambdaBatchConsumer | None = None) ->
         users,
         config,
         member_tags_enabled=True,
+        chat_migrations=cast(TelegramChatMigrationRepository, events),
     )
     statistics = StatisticsService(
         player_statistics,

@@ -167,6 +167,14 @@ class TelegramBotPermissionError(RuntimeError):
     """The bot needs additional Telegram chat administrator permissions."""
 
 
+class TelegramChatMigrated(RuntimeError):
+    """Telegram rejected the old group ID and supplied its supergroup ID."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.chat_id = chat_id
+        super().__init__(f"Telegram chat migrated to {chat_id}")
+
+
 class EventStatus(StrEnum):
     CREATED = "CREATED"
     CONFIRMATION_OPEN = "CONFIRMATION_OPEN"

@@ -394,6 +394,17 @@ class DynamoUserRepository(_DynamoMemoryRepository[MemoryUserRepository]):
 
 
 class _DynamoMemoryEventRepository(MemoryEventRepository):
+    async def migrate_telegram_chat(self, event_id: str, old_chat_id: int, new_chat_id: int) -> bool:
+        event = self.rows.get(event_id)
+        if event is None or event.telegram_chat_id not in {old_chat_id, new_chat_id}:
+            return False
+        if any(other.event_id != event_id and other.telegram_chat_id == new_chat_id for other in self.rows.values()):
+            return False
+        if event.telegram_chat_id != new_chat_id:
+            event.telegram_chat_id = new_chat_id
+            event.updated_at = datetime.now(UTC)
+        return True
+
     def __init__(self, events: list[Event]) -> None:
         super().__init__(events)
         self.leader_created_at: dict[tuple[str, Platform, int], datetime] = {}
@@ -584,12 +595,13 @@ class DynamoEventRepository(_DynamoMemoryRepository[MemoryEventRepository]):
             return event_rows, leader_rows
         event_id = str(args[0])
         await add_event(event_id)
-        if method_name == "bind_telegram_chat":
+        if method_name in {"bind_telegram_chat", "migrate_telegram_chat"}:
+            target_chat_id = args[2] if method_name == "migrate_telegram_chat" else args[1]
             matches = await self._query(
                 self.events_table,
                 key_condition="#chat = :chat",
                 names={"#chat": "telegram_chat_id"},
-                values={":chat": str(args[1])},
+                values={":chat": str(target_chat_id)},
                 index_name="telegram-chat",
             )
             known_ids = {str(row["event_id"]) for row in event_rows}
