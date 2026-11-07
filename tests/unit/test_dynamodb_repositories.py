@@ -331,6 +331,59 @@ async def test_telegram_chat_binding_is_one_to_one(event: Event) -> None:
     assert (await repository.get(other.event_id)).telegram_chat_id is None  # type: ignore[union-attr]
 
 
+@pytest.mark.parametrize("archived", [False, True])
+async def test_telegram_chat_migration_moves_unique_lock_atomically_and_preserves_game(
+    event: Event, archived: bool
+) -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoEventRepository(client, events_table="events", leaders_table="leaders")
+    old_chat_id, new_chat_id = -5404460137, -1003931461623
+    event.telegram_chat_id = old_chat_id
+    event.telegram_chat_invite_link = "https://t.me/+original-invite"
+    event.confirmed_notifications = ["Stored information", "https://t.me/+original-invite"]
+    event.archived_at = datetime.now(UTC) if archived else None
+    await repository.create(event)
+    client.fail_next_transaction = True
+
+    assert await repository.migrate_telegram_chat(event.event_id, old_chat_id, new_chat_id)
+
+    migrated = await repository.get(event.event_id)
+    assert migrated is not None
+    assert migrated.telegram_chat_id == new_chat_id
+    assert migrated.model_dump(exclude={"telegram_chat_id", "updated_at"}) == event.model_dump(
+        exclude={"telegram_chat_id", "updated_at"}
+    )
+    transaction = client.transactions[-1]
+    assert len(transaction) == 3
+    rows = [_plain(row) for row in client.tables["events"]]
+    assert not any(row["event_id"] == f"lock:telegram-chat:{old_chat_id}" for row in rows)
+    assert any(
+        row["event_id"] == f"lock:telegram-chat:{new_chat_id}" and row["owner_event_id"] == event.event_id
+        for row in rows
+    )
+    transactions = len(client.transactions)
+    assert await repository.migrate_telegram_chat(event.event_id, old_chat_id, new_chat_id)
+    assert len(client.transactions) == transactions
+    assert (await repository.get_by_telegram_chat_id(new_chat_id)).event_id == event.event_id  # type: ignore[union-attr]
+    assert await repository.get_by_telegram_chat_id(old_chat_id) is None
+    assert client.scans == []
+
+
+async def test_telegram_chat_migration_cannot_steal_or_replace_another_binding(event: Event) -> None:
+    client = MemoryDynamoClient()
+    repository = DynamoEventRepository(client, events_table="events", leaders_table="leaders")
+    event.telegram_chat_id = -5404460137
+    other = event.model_copy(update={"event_id": "event-b1", "signup_token": None, "telegram_chat_id": -1003931461623})
+    await repository.create(event)
+    await repository.create(other)
+    before = deepcopy(client.tables)
+
+    assert not await repository.migrate_telegram_chat(event.event_id, -5404460137, -1003931461623)
+    assert not await repository.migrate_telegram_chat(event.event_id, -1234, -1009876543210)
+    assert not await repository.migrate_telegram_chat("missing", -5404460137, -1009876543210)
+    assert client.tables == before
+
+
 @pytest.mark.asyncio
 async def test_late_yandex_links_are_persisted_without_replacing_google_links(event: Event) -> None:
     client = MemoryDynamoClient()

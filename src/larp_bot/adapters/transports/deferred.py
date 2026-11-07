@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from collections.abc import Sequence
 from typing import cast
@@ -16,10 +17,13 @@ from larp_bot.domain.models import (
     Button,
     Platform,
     TelegramBotPermissionError,
+    TelegramChatMigrated,
     UnreachableRecipient,
     normalize_vk_url,
 )
 from larp_bot.domain.security import sign_request
+
+LOGGER = logging.getLogger(__name__)
 
 # Telegram reports a permanently undeliverable chat with these texts. Any other
 # rejection stays an error so a real defect, a throttle, or an outage is retried
@@ -124,6 +128,23 @@ class CloudflareTelegramEgress:
                 "X-Signature": signature,
             },
         )
+        if response.is_error:
+            description = _telegram_error_description(response)
+            LOGGER.warning(
+                "telegram_api_rejected",
+                extra={
+                    "telegram_method": method,
+                    "request_id": request_id,
+                    "chat_id": payload.get("chat_id"),
+                    "status_code": response.status_code,
+                    "error_description": description[:500] if description else None,
+                },
+            )
+            if response.status_code == 400 and description is not None:
+                parameters = response.json().get("parameters")
+                migrated_id = parameters.get("migrate_to_chat_id") if isinstance(parameters, dict) else None
+                if type(migrated_id) is int and migrated_id < 0 and migrated_id != payload.get("chat_id"):
+                    raise TelegramChatMigrated(migrated_id)
         if response.status_code in {400, 403}:
             description = _telegram_error_description(response)
             if (

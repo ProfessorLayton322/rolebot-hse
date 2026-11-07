@@ -17,11 +17,18 @@ from larp_bot.domain.models import (
     Platform,
     ReplyContext,
     TelegramBotPermissionError,
+    TelegramChatMigrated,
     event_name_with_date,
 )
 
 from .identity import identities_for_local_user
-from .ports import AdminConfigProvider, EventRepository, TelegramChatGateway, UserRepository
+from .ports import (
+    AdminConfigProvider,
+    EventRepository,
+    TelegramChatGateway,
+    TelegramChatMigrationRepository,
+    UserRepository,
+)
 from .services import RegistrationService
 
 LOGGER = logging.getLogger("larp_bot.application.chat_management")
@@ -101,6 +108,7 @@ class TelegramChatManagementService:
         admins: AdminConfigProvider,
         *,
         member_tags_enabled: bool = False,
+        chat_migrations: TelegramChatMigrationRepository | None = None,
     ) -> None:
         self.events = events
         self.registrations = registrations
@@ -108,6 +116,7 @@ class TelegramChatManagementService:
         self.users = users
         self.admins = admins
         self.member_tags_enabled = member_tags_enabled
+        self.chat_migrations = chat_migrations
 
     async def _unarchived_events(self) -> list[Event]:
         events: list[Event] = []
@@ -372,6 +381,24 @@ class TelegramChatManagementService:
                 return
             await self._tie(update, event)
 
+    async def _migrate_chat(self, old_chat_id: int, new_chat_id: int, update_id: str) -> None:
+        if self.chat_migrations is None:
+            return
+        event = await self.events.get_by_telegram_chat_id(old_chat_id)
+        if event is None:
+            return
+        if not await self.chat_migrations.migrate_telegram_chat(event.event_id, old_chat_id, new_chat_id):
+            raise RuntimeError("Telegram chat migration conflicts with an existing game binding")
+        LOGGER.info(
+            "telegram_chat_migrated",
+            extra={
+                "event_id": event.event_id,
+                "old_chat_id": old_chat_id,
+                "chat_id": new_chat_id,
+                "platform_update_id": update_id,
+            },
+        )
+
     async def _handle_join(self, update: TelegramGroupUpdate) -> None:
         if update.member_is_bot or update.member_user_id is None:
             return
@@ -390,12 +417,29 @@ class TelegramChatManagementService:
             # Native tags work in ordinary groups too and keep players regular
             # members. Only AWS enables this; preserve the frozen legacy path.
             try:
-                await self.telegram.set_member_tag(
-                    chat_id=update.chat_id,
-                    user_id=update.member_user_id,
-                    tag=title,
-                    request_id=f"telegram-chat:{update.update_id}:tag",
-                )
+                try:
+                    await self.telegram.set_member_tag(
+                        chat_id=update.chat_id,
+                        user_id=update.member_user_id,
+                        tag=title,
+                        request_id=f"telegram-chat:{update.update_id}:tag",
+                    )
+                except TelegramChatMigrated as exc:
+                    if self.chat_migrations is None:
+                        raise
+                    try:
+                        await self.telegram.set_member_tag(
+                            chat_id=exc.chat_id,
+                            user_id=update.member_user_id,
+                            tag=title,
+                            request_id=f"telegram-chat:{update.update_id}:migrated-tag",
+                        )
+                    except TelegramBotPermissionError:
+                        await self._migrate_chat(update.chat_id, exc.chat_id, update.update_id)
+                        raise
+                    # Keep the old binding until the idempotent tag succeeds:
+                    # a transport failure must leave this old join retryable.
+                    await self._migrate_chat(update.chat_id, exc.chat_id, update.update_id)
             except TelegramBotPermissionError as exc:
                 LOGGER.warning(
                     "telegram_member_tag_permission_missing",
@@ -415,7 +459,9 @@ class TelegramChatManagementService:
         )
 
     async def handle(self, update: TelegramGroupUpdate) -> None:
-        if update.action == "bot_admin_granted":
+        if update.action == "chat_migrated" and update.migrate_to_chat_id is not None:
+            await self._migrate_chat(update.chat_id, update.migrate_to_chat_id, update.update_id)
+        elif update.action == "bot_admin_granted":
             await self._show_picker(update)
         elif update.action == "tie_command":
             privileged, events = await self._tieable_events(update)

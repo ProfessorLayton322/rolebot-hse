@@ -70,6 +70,10 @@ class UserRepository(Protocol):
     ) -> bool: ...
 
 
+class TelegramChatMigrationRepository(Protocol):
+    async def migrate_telegram_chat(self, event_id: str, old_chat_id: int, new_chat_id: int) -> bool: ...
+
+
 class EventRepository(Protocol):
     async def get(self, event_id: str) -> Event | None: ...
 

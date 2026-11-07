@@ -114,7 +114,30 @@ async def _telegram(event: dict[str, Any], body: bytes, app: AppContainer) -> di
         return _response(400, {"error": "invalid update"})
     group_update = parse_telegram_group_update(update)
     if group_update is not None:
-        await app.telegram_chat_management.handle(group_update)
+        try:
+            await app.telegram_chat_management.handle(group_update)
+        except Exception:
+            if os.getenv("CLOUD_PROVIDER") == "aws":
+                LOGGER.exception(
+                    "telegram_group_update_failed",
+                    extra={
+                        "request_id": request_id,
+                        "platform_update_id": group_update.update_id,
+                        "action": group_update.action,
+                        "chat_id": group_update.chat_id,
+                    },
+                )
+            raise
+        if os.getenv("CLOUD_PROVIDER") == "aws":
+            LOGGER.info(
+                "telegram_group_update_handled",
+                extra={
+                    "request_id": request_id,
+                    "platform_update_id": group_update.update_id,
+                    "action": group_update.action,
+                    "chat_id": group_update.chat_id,
+                },
+            )
         return _response(200, {"delivery": "deferred", "request_id": request_id})
     inbound = parse_telegram_update(update)
     result = await app.conversation.handle(inbound)
