@@ -30,6 +30,7 @@ from larp_bot.application.conversation import (
     ARCHIVE_GAME,
     ARCHIVED_GAMES,
     BACK,
+    BUTTON_DIALOG_STATES,
     CANCEL,
     CHANGE_GAME_DETAILS,
     CHANGE_PLAYER_AMOUNT,
@@ -52,7 +53,6 @@ from larp_bot.application.conversation import (
     ENLIST,
     EVENT_TABLES,
     EXPORT_ACHIEVEMENTS,
-    FREE_TEXT_DIALOG_STATES,
     GAME_FILES,
     GAME_WISHES,
     GAMEMASTER_NOTIFICATION,
@@ -101,6 +101,7 @@ from larp_bot.application.conversation import (
     STATUS_CLOSED,
     STATUS_CONFIRMATION,
     STATUS_REGISTRATION,
+    TEXT_DIALOG_FIELDS,
     UNARCHIVE_GAME,
     UNSUPPORTED_CONTENT_RESPONSE,
     VENUE_ADDRESS,
@@ -556,9 +557,8 @@ async def test_enlist_rejects_stale_game_button_and_offers_explicit_skip(
     assert 1 <= len(prompt.buttons[0].value.encode("utf-8")) <= 64
 
     stale = await engine.handle(inbound(3, f"select:enlist:{event.event_id}", callback=True))
-    assert "текущую клавиатуру" in stale.text
+    assert stale.text == "Произошла ошибка, введите пожелания по соигрокам ещё раз:"
     assert stale.buttons[0].label == "Пропустить и записаться"
-    assert "Если вы увидели это сообщение, попробуйте написать боту /start" in stale.text
     assert not publisher.commands
 
     response = await engine.handle(inbound(4, "enlist:wish-play:skip", callback=True))
@@ -770,7 +770,7 @@ async def test_confirmation_is_first_character_wish_prompt(disk_store: MemoryDis
     selection = await engine.handle(inbound(2, f"select:confirm:{event.event_id}", callback=True))
     assert "пожелания" in selection.text.casefold()
     stale = await engine.handle(inbound(3, f"select:confirm:{event.event_id}", callback=True))
-    assert "кнопка устарела" in stale.text.casefold()
+    assert stale.text == "Произошла ошибка, введите пожелания по персонажу ещё раз:"
     assert stale.buttons == selection.buttons
     assert not publisher.commands
     await engine.handle(inbound(4, "Doctor"))
@@ -963,7 +963,7 @@ async def test_start_always_resets_dialog_and_returns_main_menu(disk_store: Memo
     engine, users, publisher, _ = await engine_setup(disk_store, event)
     stale_button = Button(label="Устаревшая кнопка", value="stale:button")
 
-    for update, state in enumerate(sorted(FREE_TEXT_DIALOG_STATES), start=1):
+    for update, state in enumerate(sorted(TEXT_DIALOG_FIELDS.keys() | BUTTON_DIALOG_STATES), start=1):
         user = await users.get(Platform.TELEGRAM, 1)
         assert user is not None
         user.dialog_state = state
@@ -1050,13 +1050,13 @@ async def test_vk_start_messages_do_not_accept_game_parameters(
 
 
 @pytest.mark.asyncio
-async def test_every_free_text_state_rejects_a_button_absent_from_the_last_bot_message(
+async def test_button_dialog_states_reject_a_button_absent_from_the_last_bot_message(
     disk_store: MemoryDiskStore, event: Event
 ) -> None:
     engine, users, publisher, _ = await engine_setup(disk_store, event, admin=True)
     current_button = Button(label="Текущая кнопка", value="current:button")
 
-    for update, state in enumerate(sorted(FREE_TEXT_DIALOG_STATES), start=1):
+    for update, state in enumerate(sorted(BUTTON_DIALOG_STATES), start=1):
         user = await users.get(Platform.TELEGRAM, 1)
         assert user is not None
         user.dialog_state = state
@@ -1071,6 +1071,33 @@ async def test_every_free_text_state_rejects_a_button_absent_from_the_last_bot_m
         assert response.buttons == [current_button]
         assert saved is not None and saved.dialog_state == state
         assert saved.dialog_context == {"sentinel": state}
+
+    assert not publisher.commands
+
+
+@pytest.mark.parametrize("callback", [True, False])
+async def test_text_dialog_fields_reject_confirmation_value_even_after_notification(
+    disk_store: MemoryDiskStore, event: Event, callback: bool
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event, admin=True)
+    event_id = "12345678-abcd-4321-abcd-123456789012"
+    confirmation = Button(label="✅ Подтвердить участие", value=f"select:confirm:{event_id}")
+
+    for update, (state, field) in enumerate(TEXT_DIALOG_FIELDS.items(), start=1):
+        user = await users.get(Platform.TELEGRAM, 1)
+        assert user is not None
+        user.dialog_state = state
+        user.dialog_context = {"event_id": event_id, "question_field": "text"}
+        user.last_bot_buttons = [confirmation]
+        await users.save(user)
+
+        response = await engine.handle(inbound(update, confirmation.value, callback=callback))
+        saved = await users.get(Platform.TELEGRAM, 1)
+
+        assert response.text == f"Произошла ошибка, введите {field.name} ещё раз:"
+        assert confirmation not in response.buttons
+        assert saved is not None and saved.dialog_state == state
+        assert saved.dialog_context == user.dialog_context
 
     assert not publisher.commands
 
@@ -1416,7 +1443,7 @@ async def test_vk_uses_same_profile_and_registration_engine(disk_store: MemoryDi
     assert "пожелания" in prompt.text.casefold()
     assert "символ" not in prompt.text.casefold()
     stale = await engine.handle(vk(16, f"select:confirm:{event.event_id}", callback=True))
-    assert "кнопка устарела" in stale.text.casefold()
+    assert stale.text == "Произошла ошибка, введите пожелания по персонажу ещё раз:"
     assert stale.buttons == prompt.buttons
     assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE, Operation.ENLIST]
     await engine.handle(vk(17, "Doctor"))
@@ -1829,6 +1856,27 @@ async def test_nickname_is_a_separate_one_step_profile_edit_and_can_be_removed(
     assert saved is not None and saved.nickname is None
     assert "Никнейм: не указан" in removed.text
     assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE, Operation.SYNC_PROFILE]
+
+
+async def test_confirmation_notification_during_nickname_edit_leaves_the_field_open(
+    disk_store: MemoryDiskStore, event: Event
+) -> None:
+    engine, users, publisher, _ = await engine_setup(disk_store, event)
+    await engine.handle(inbound(1, "profile:menu", callback=True))
+    prompt = await engine.handle(inbound(2, "profile:field:nickname", callback=True))
+    confirmation = Button(label="✅ Подтвердить участие", value="select:confirm:12345678-abcd-4321-abcd-123456789012")
+    await users.claim_delivery(Platform.TELEGRAM, 1, "notification", [confirmation])
+
+    response = await engine.handle(inbound(3, confirmation.value, callback=True))
+
+    assert response.text == "Произошла ошибка, введите никнейм ещё раз:"
+    assert response.buttons == prompt.buttons
+    assert not publisher.commands
+
+    await engine.handle(inbound(4, "Пётр: Странник"))
+    saved = await users.get(Platform.TELEGRAM, 1)
+    assert saved is not None and saved.nickname == "Пётр: Странник"
+    assert [command.operation for command in publisher.commands] == [Operation.SYNC_PROFILE]
 
 
 @pytest.mark.asyncio
@@ -4917,7 +4965,7 @@ async def test_admin_can_queue_message_for_confirmed_players(disk_store: MemoryD
     )
 
     stale_button = await engine.handle(inbound(5, CHANGE_STATUS, callback=True))
-    assert "кнопка устарела" in stale_button.text.casefold()
+    assert stale_button.text == "Произошла ошибка, введите текст сообщения ещё раз:"
     assert stale_button.buttons == prompt.buttons
     assert not publisher.commands
 
