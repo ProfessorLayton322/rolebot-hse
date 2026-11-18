@@ -832,11 +832,6 @@ class AdministrationDialogMixin(ConversationContext):
             )
         if user.dialog_state == "ADMIN_POST_LINK_TELEGRAM":
             event_id = str(user.dialog_context["event_id"])
-            if message.callback is not None:
-                return BotResponse(
-                    text="Отправьте ссылку на пост об игре в Telegram обычным текстовым сообщением:",
-                    buttons=[edit_game_button(event_id)],
-                )
             try:
                 telegram_post_url = normalize_telegram_post_url(value)
             except ValueError as exc:
@@ -852,11 +847,6 @@ class AdministrationDialogMixin(ConversationContext):
             )
         if user.dialog_state == "ADMIN_POST_LINK_VK":
             event_id = str(user.dialog_context["event_id"])
-            if message.callback is not None:
-                return BotResponse(
-                    text="Отправьте ссылку на пост об игре во VK обычным текстовым сообщением:",
-                    buttons=[edit_game_button(event_id)],
-                )
             try:
                 vk_post_url = normalize_vk_post_url(value)
             except ValueError as exc:
@@ -960,15 +950,6 @@ class AdministrationDialogMixin(ConversationContext):
             notification_game_date = date.fromisoformat(str(raw_game_date)) if raw_game_date is not None else None
             link = user.dialog_state == "ADMIN_NOTIFICATION_LINK_TEXT"
             all_players = user.dialog_state == "ADMIN_ALL_PLAYERS_NOTIFICATION_TEXT"
-            if message.callback is not None:
-                return _confirmed_notification_prompt(
-                    event_name,
-                    event_id,
-                    link=link,
-                    all_players=all_players,
-                    game_date=notification_game_date,
-                    invalid="Отправьте содержимое обычным текстовым сообщением.",
-                )
             if not value:
                 return _confirmed_notification_prompt(
                     event_name,

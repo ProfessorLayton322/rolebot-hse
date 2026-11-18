@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import date
 
 from larp_bot.domain.models import (
@@ -17,6 +18,7 @@ from larp_bot.domain.models import (
     PrivilegedRole,
     TelegramUser,
     User,
+    VkUser,
     event_name_with_date,
     event_reference,
     format_game_date,
@@ -32,7 +34,7 @@ from .deadlines import (
     NEXT_SATURDAY,
     TUESDAY_BEFORE_GAME_18,
 )
-from .navigation import MAIN_MENU_LABEL
+from .navigation import ADMIN_MENU, MAIN_MENU, MAIN_MENU_LABEL
 from .services import (
     GameOverview,
     confirmed_notification_text,
@@ -223,54 +225,94 @@ ADMIN_ACTIONS = frozenset(
         "📋 Список игр",
     }
 )
-FREE_TEXT_DIALOG_STATES = frozenset(
+
+
+@dataclass(frozen=True)
+class TextDialogField:
+    name: str
+    button_values: tuple[str, ...] = ()
+
+
+TEXT_DIALOG_FIELDS = {
+    "PROFILE_FULL_NAME_CYRILLIC": TextDialogField("ФИО кириллицей", (CANCEL_DIALOG,)),
+    "PROFILE_NICKNAME": TextDialogField("никнейм", ("profile:nickname:clear", CANCEL_DIALOG)),
+    "PROFILE_CONTACT": TextDialogField("ссылку на профиль VK", (SKIP, CANCEL_DIALOG)),
+    "PROFILE_PASS_FULL_NAME_LATIN": TextDialogField("ФИО латиницей", (CANCEL_DIALOG,)),
+    "PROFILE_PASS_PHONE": TextDialogField("номер телефона", (CANCEL_DIALOG,)),
+    "PROFILE_PASS_EMAIL_ADDRESS": TextDialogField("адрес электронной почты", (CANCEL_DIALOG,)),
+    "ENLIST_WISH_PLAY": TextDialogField("пожелания по соигрокам", ("enlist:wish-play:skip", CANCEL_DIALOG)),
+    "CONFIRM_WISH": TextDialogField("пожелания по персонажу", (KEEP, NO_WISHES, CANCEL_DIALOG)),
+    "CHARACTER_EDIT": TextDialogField("пожелания по персонажу", (NO_WISHES, CANCEL_DIALOG)),
+    "CO_PLAYER_EDIT": TextDialogField("пожелания по соигрокам", (CO_PLAYER_WISH_SKIP, CANCEL_DIALOG)),
+    "ADMIN_QUESTION_CREATE_TEXT": TextDialogField("текст вопроса"),
+    "ADMIN_QUESTION_CREATE_NAME": TextDialogField("название ответа"),
+    "ADMIN_QUESTION_CREATE_CAPACITY": TextDialogField("количество мест для ответа"),
+    "ADMIN_QUESTION_EDIT_VALUE": TextDialogField("текст вопроса", ("ag:edit:{event_id}",)),
+    "ADMIN_CREATE_NAME": TextDialogField("название игры"),
+    "ADMIN_CREATE_DATE": TextDialogField("дату игры", ("admin:date:next-saturday",)),
+    "ADMIN_CREATE_CLOSE_TIME": TextDialogField(
+        "время закрытия игры", ("create:close:next-night", "create:close:cancel")
+    ),
+    "ADMIN_CREATE_PLAYER_AMOUNT": TextDialogField("количество игроков"),
+    "ADMIN_CREATE_MASTER_PROFILE": TextDialogField("профиль мастера", ("create:master-pick",)),
+    "ADMIN_CREATE_SCHEDULE_TIME": TextDialogField(
+        "время открытия регистрации", ("create:schedule:nearest-friday", CANCEL_DIALOG)
+    ),
+    "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME": TextDialogField(
+        "время открытия подтверждения", ("create:confirmation:tuesday", "create:confirmation:no")
+    ),
+    "ADMIN_CREATE_CONFIRMATION_DEADLINE": TextDialogField("дедлайн подтверждения", ("create:confirmation:no",)),
+    "ADMIN_SCHEDULE_REGISTRATION_TIME": TextDialogField(
+        "время открытия регистрации", ("ag:schedule-clear-registration:{event_id}", "ag:schedule:{event_id}")
+    ),
+    "ADMIN_SCHEDULE_CONFIRMATION_TIME": TextDialogField(
+        "время открытия подтверждения",
+        (
+            "ag:schedule-confirmation-tuesday:{event_id}",
+            "ag:schedule-clear-confirmation:{event_id}",
+            "ag:schedule:{event_id}",
+        ),
+    ),
+    "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE": TextDialogField("дедлайн подтверждения", ("ag:schedule:{event_id}",)),
+    "ADMIN_SCHEDULE_CLOSE_TIME": TextDialogField(
+        "время закрытия игры",
+        ("ag:schedule-close-next-night:{event_id}", "ag:schedule-clear-close:{event_id}", "ag:schedule:{event_id}"),
+    ),
+    "ADMIN_UPDATE_PLAYER_AMOUNT": TextDialogField("количество игроков", ("ag:edit:{event_id}",)),
+    "ADMIN_UPDATE_GAME_NAME": TextDialogField("название игры", ("ag:edit:{event_id}",)),
+    "ADMIN_UPDATE_GAME_DATE": TextDialogField("дату игры", ("admin:details:next-saturday", "ag:edit:{event_id}")),
+    "ADMIN_POST_LINK_TELEGRAM": TextDialogField("ссылку на пост в Telegram", ("ag:edit:{event_id}",)),
+    "ADMIN_POST_LINK_VK": TextDialogField("ссылку на пост во VK", ("ag:edit:{event_id}",)),
+    "ADMIN_CONFIRMATION_DEADLINE": TextDialogField(
+        "дедлайн подтверждения", ("admin:deadline:nearest-thursday", "ag:edit:{event_id}")
+    ),
+    "ADMIN_NOTIFICATION_LINK_TEXT": TextDialogField("ссылку на чат игры", ("ag:notifications:{event_id}",)),
+    "ADMIN_NOTIFICATION_MESSAGE_TEXT": TextDialogField("текст сообщения", ("ag:notifications:{event_id}",)),
+    "ADMIN_NOTIFICATION_TEXT": TextDialogField("текст сообщения", ("ag:notifications:{event_id}",)),
+    "ADMIN_ALL_PLAYERS_NOTIFICATION_TEXT": TextDialogField("текст сообщения", ("ag:notifications:{event_id}",)),
+    "ADMIN_GAMEMASTER_PROFILE": TextDialogField("профиль пользователя", (MANAGE_MODERATORS, LEGACY_MANAGE_MODERATORS)),
+    "ADMIN_EVENT_LEADER_PROFILE": TextDialogField("профиль мастера", ("ag:masters:{event_id}",)),
+    "ADMIN_ARCHIVE_NAME": TextDialogField("название игры", ("ag:edit:{event_id}",)),
+    "ADMIN_DELETE_NAME": TextDialogField("название игры", ("ag:manage:{event_id}",)),
+}
+
+# Match an entire reserved payload so links, times, and prose containing a colon remain valid.
+_BUTTON_PAYLOAD = re.compile(
+    r"(?:admin|ag|cancel|confirm|create|enlist|master|mod|page|profile|rq|select|stats|wishes):[\w-]+(?::[\w-]+)*",
+    re.IGNORECASE,
+)
+
+BUTTON_DIALOG_STATES = frozenset(
     {
-        "PROFILE_FULL_NAME_CYRILLIC",
-        "PROFILE_NICKNAME",
-        "PROFILE_CONTACT",
-        "PROFILE_PASS_FULL_NAME_LATIN",
-        "PROFILE_PASS_PHONE",
-        "PROFILE_PASS_EMAIL_ADDRESS",
-        "ENLIST_WISH_PLAY",
         "ENLIST_ANSWER",
         "ANSWER_EDIT",
-        "ADMIN_QUESTION_CREATE_TEXT",
-        "ADMIN_QUESTION_CREATE_NAME",
-        "ADMIN_QUESTION_CREATE_CAPACITY",
-        "ADMIN_QUESTION_EDIT_VALUE",
-        "CONFIRM_WISH",
-        "CHARACTER_EDIT",
-        "CO_PLAYER_EDIT",
-        "ADMIN_CREATE_NAME",
-        "ADMIN_CREATE_DATE",
-        "ADMIN_CREATE_CLOSE_TIME",
-        "ADMIN_CREATE_PLAYER_AMOUNT",
         "ADMIN_CREATE_MASTER_CHOICE",
         "ADMIN_CREATE_MASTER_PICK",
         "ADMIN_CREATE_MASTER_PLATFORM",
-        "ADMIN_CREATE_MASTER_PROFILE",
         "ADMIN_CREATE_MASTER_PROMOTE_CONFIRM",
         "ADMIN_CREATE_SCHEDULE_CHOICE",
-        "ADMIN_CREATE_SCHEDULE_TIME",
         "ADMIN_CREATE_CONFIRMATION_SCHEDULE_CHOICE",
-        "ADMIN_CREATE_CONFIRMATION_SCHEDULE_TIME",
-        "ADMIN_CREATE_CONFIRMATION_DEADLINE",
-        "ADMIN_SCHEDULE_REGISTRATION_TIME",
-        "ADMIN_SCHEDULE_CONFIRMATION_TIME",
-        "ADMIN_SCHEDULE_CONFIRMATION_DEADLINE",
-        "ADMIN_SCHEDULE_CLOSE_TIME",
-        "ADMIN_UPDATE_PLAYER_AMOUNT",
-        "ADMIN_UPDATE_GAME_NAME",
-        "ADMIN_UPDATE_GAME_DATE",
-        "ADMIN_POST_LINK_TELEGRAM",
-        "ADMIN_POST_LINK_VK",
-        "ADMIN_CONFIRMATION_DEADLINE",
-        "ADMIN_NOTIFICATION_LINK_TEXT",
-        "ADMIN_NOTIFICATION_MESSAGE_TEXT",
         "ADMIN_NOTIFICATION_CONFIRM",
-        "ADMIN_NOTIFICATION_TEXT",
-        "ADMIN_GAMEMASTER_PROFILE",
-        "ADMIN_EVENT_LEADER_PROFILE",
         "ADMIN_MODERATOR_LIST",
         "ADMIN_MODERATOR_REMOVE",
         "ADMIN_MODERATOR_REMOVE_CONFIRM",
@@ -279,8 +321,6 @@ FREE_TEXT_DIALOG_STATES = frozenset(
         "ADMIN_EVENT_LEADER_REMOVE",
         "ADMIN_EVENT_LEADER_REMOVE_CONFIRM",
         "ADMIN_EVENT_LEADER_LIST",
-        "ADMIN_ARCHIVE_NAME",
-        "ADMIN_DELETE_NAME",
         "ADMIN_REMOVE_PICK",
         "ADMIN_REMOVE_CONFIRM",
         "ADMIN_REMOVE_WAITING_CONFIRM",
@@ -340,6 +380,29 @@ def nickname_buttons(user: User) -> list[Button]:
         buttons.append(Button(label=REMOVE_NICKNAME, value="profile:nickname:clear"))
     buttons.append(profile_dialog_exit_button(user))
     return buttons
+
+
+def text_field_retry(user: User, message: InboundMessage, value: str) -> BotResponse | None:
+    state = user.dialog_state
+    field = TEXT_DIALOG_FIELDS.get(state)
+    if field is None or value in {MAIN_MENU, ADMIN_MENU}:
+        return None
+    if message.callback is None and _BUTTON_PAYLOAD.fullmatch(value) is None:
+        return None
+
+    allowed_values = {action.format(event_id=user.dialog_context.get("event_id")) for action in field.button_values}
+    buttons = [button for button in user.last_bot_buttons if button.value in allowed_values]
+    if message.callback is not None and any(button.value == value for button in buttons):
+        return None
+
+    field_name = field.name
+    if state == "PROFILE_NICKNAME":
+        buttons = nickname_buttons(user)
+    elif state == "PROFILE_CONTACT" and isinstance(user, VkUser):
+        field_name = "профиль Telegram"
+    elif state == "ADMIN_QUESTION_EDIT_VALUE" and user.dialog_context.get("question_field") != "text":
+        field_name = "название ответа"
+    return BotResponse(text=f"Произошла ошибка, введите {field_name} ещё раз:", buttons=buttons)
 
 
 def main_buttons(has_admin_access: bool, *, has_registrations: bool, has_available_games: bool) -> list[Button]:

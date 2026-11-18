@@ -85,12 +85,15 @@ async def test_confirmation_schedule_with_real_uuid_has_deliverable_replies(
 
         prompt = await engine.handle(inbound(4, f"ag:schedule-confirmation:{scheduled.event_id}", callback=True))
         callbacks = await deliver(prompt)
-        cleared = await click(5, callbacks[0])
+        retry = await click(5, f"select:confirm:{scheduled.event_id}")
+        assert retry.text == "Произошла ошибка, введите время открытия подтверждения ещё раз:"
+        assert await deliver(retry) == callbacks
+        cleared = await click(6, callbacks[0])
         assert "открытие подтверждения отменено" in cleared.text
         await deliver(cleared)
 
-        registration = await engine.handle(inbound(6, f"ag:schedule-registration:{scheduled.event_id}", callback=True))
+        registration = await engine.handle(inbound(7, f"ag:schedule-registration:{scheduled.event_id}", callback=True))
         callbacks = await deliver(registration)
-        cleared_registration = await click(7, callbacks[0])
+        cleared_registration = await click(8, callbacks[0])
         assert "регистрация открыта" in cleared_registration.text
         await deliver(cleared_registration)

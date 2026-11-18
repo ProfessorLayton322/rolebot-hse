@@ -690,17 +690,6 @@ class PlayerConversationMixin(ConversationContext):
         if user.dialog_state == "ENLIST_ANSWER":
             return await self._answer_step(user, message, value)
         if user.dialog_state == "ENLIST_WISH_PLAY":
-            if message.callback is not None and value != "enlist:wish-play:skip":
-                return BotResponse(
-                    text=(
-                        f"Используйте текущую клавиатуру: нажмите «{ENLIST_SKIP}» или "
-                        "отправьте сообщением, с кем вы хотите играть."
-                    ),
-                    buttons=[
-                        Button(label=ENLIST_SKIP, value="enlist:wish-play:skip"),
-                        dialog_exit_button(),
-                    ],
-                )
             if value != "enlist:wish-play:skip" and len(value) > MAX_CO_PLAYER_WISH_LENGTH:
                 return BotResponse(
                     text=INVALID_INPUT_RESPONSE,

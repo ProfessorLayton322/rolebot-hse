@@ -21,12 +21,12 @@ from .conversation_support import (
     ADMIN,
     ADMIN_ACTIONS,
     BACK,
+    BUTTON_DIALOG_STATES,
     CANCEL,
     CANCEL_DIALOG,
     CHARACTER,
     CONFIRM,
     ENLIST,
-    FREE_TEXT_DIALOG_STATES,
     GAME_WISHES,
     LEGACY_MANAGE_MODERATORS,
     LEGACY_STATUS_ACTIONS,
@@ -40,6 +40,7 @@ from .conversation_support import (
     _start_command,
     is_profile_complete,
     main_buttons,
+    text_field_retry,
 )
 from .deadlines import format_confirmation_deadline
 from .navigation import ADMIN_MENU, MAIN_MENU, admin_menu_button, main_menu_button
@@ -155,8 +156,10 @@ class ConversationCoreMixin(ConversationContext):
                 text=UNSUPPORTED_CONTENT_RESPONSE,
                 buttons=user.last_bot_buttons.copy(),
             )
+        elif (retry := text_field_retry(user, message, value)) is not None:
+            response = retry
         elif (
-            user.dialog_state in FREE_TEXT_DIALOG_STATES
+            user.dialog_state in BUTTON_DIALOG_STATES
             and message.callback is not None
             and value not in current_button_values
             and value not in {MAIN_MENU, ADMIN_MENU}
