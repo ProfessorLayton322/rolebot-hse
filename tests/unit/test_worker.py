@@ -1417,26 +1417,25 @@ async def test_confirmation_notifications_go_to_waiting_players_before_master_ac
     )
 
     assert await worker.run() == 1
+    expected_text += "\n\nЕсли вы не сможете участвовать в игре - настоятельно вас просим отменить участие"
+    expected_buttons = [
+        Button(label=CONFIRM_PARTICIPATION, value=f"select:confirm:{event.event_id}"),
+        Button(label="Отменить участие", value=f"cancel:game:{event.event_id}"),
+    ]
     assert {(sent[0], sent[1], sent[3]) for sent in transport.sent[:-1]} == {
         (Platform.TELEGRAM, 2, expected_text),
         (Platform.VK, 3, expected_text),
     }
     assert transport.sent[-1][0:2] == (Platform.TELEGRAM, 1)
     assert transport.sent[-1][3] == expected_completion_text
-    assert all(
-        [(button.label, button.value) for button in sent[4]]
-        == [(CONFIRM_PARTICIPATION, f"select:confirm:{event.event_id}")]
-        for sent in transport.sent[:-1]
-    )
+    assert all(list(sent[4]) == expected_buttons for sent in transport.sent[:-1])
     assert transport.sent[-1][4] == ()
     for waiting_user in waiting_users:
         platform = Platform.TELEGRAM if isinstance(waiting_user, TelegramUser) else Platform.VK
         uid = waiting_user.tg_id if isinstance(waiting_user, TelegramUser) else waiting_user.vk_id
         saved_user = await users.get(platform, uid)
         assert saved_user is not None
-        assert saved_user.last_bot_buttons == [
-            Button(label=CONFIRM_PARTICIPATION, value=f"select:confirm:{event.event_id}")
-        ]
+        assert saved_user.last_bot_buttons == expected_buttons
     assert consumer.deleted == ["receipt-1"]
 
 

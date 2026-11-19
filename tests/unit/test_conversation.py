@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
@@ -20,6 +21,7 @@ from larp_bot.adapters.memory import (
 from larp_bot.adapters.telegram import telegram_inline_payload
 from larp_bot.adapters.telegram.callbacks import decode_callback, encode_callback
 from larp_bot.adapters.transports.deferred import CloudflareTelegramEgress
+from larp_bot.adapters.vk.adapter import parse_vk_event, vk_keyboard
 from larp_bot.adapters.yandex_disk.repository import DiskUpload, YandexDiskShowcaseRepository
 from larp_bot.application.conversation import (
     ADD_EVENT_LEADER,
@@ -109,6 +111,7 @@ from larp_bot.application.conversation import (
     ConversationEngine,
 )
 from larp_bot.application.deadlines import MOSCOW_TIMEZONE, TUESDAY_BEFORE_GAME_18
+from larp_bot.application.navigation import cancellation_button, confirmation_button
 from larp_bot.application.services import (
     EventAdministrationService,
     RegistrationCatalog,
@@ -500,6 +503,67 @@ async def test_cancel_confirmation_warns_about_losing_queue_position(disk_store:
         "в конец очереди на основной состав."
     )
     assert [button.label for button in response.buttons] == ["Да, отменить", "Нет, оставить участие"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [Platform.TELEGRAM, Platform.VK])
+async def test_reminder_button_cancels_the_selected_game_in_one_click(
+    disk_store: MemoryDiskStore, event: Event, platform: Platform
+) -> None:
+    event = event.model_copy(update={"event_id": "12345678-abcd-4321-abcd-123456789012"})
+    engine, users, publisher, tables = await engine_setup(disk_store, event)
+    if platform is Platform.VK:
+        await users.save(VkUser(vk_id=1))
+    key = engine.registrations.key(platform, 1, event.event_id)
+    await tables.enlist(
+        event.event_id,
+        operation_id="existing-enlist",
+        participant_key=key,
+        display_name="Иван Иванов",
+        wish_play="Алиса",
+    )
+    cancel = cancellation_button(event.event_id)
+    buttons = [confirmation_button(event.event_id), cancel]
+
+    def click(update: int) -> InboundMessage:
+        if platform is Platform.VK:
+            keyboard = vk_keyboard(buttons)
+            assert keyboard is not None
+            action = json.loads(keyboard)["buttons"][1][0]["action"]
+            return parse_vk_event(
+                {
+                    "event_id": str(update),
+                    "object": {"from_id": 1, "text": action["label"], "payload": action["payload"]},
+                }
+            )
+        payload = CloudflareTelegramEgress._message_payload(1, "Напоминание", buttons)
+        inline = telegram_inline_payload(BotResponse(text="Напоминание", buttons=buttons), 1)
+        assert payload["reply_markup"] == inline["reply_markup"]
+        keyboard = inline["reply_markup"]["inline_keyboard"]
+        assert all(1 <= len(row[0]["callback_data"].encode("utf-8")) <= 64 for row in keyboard)
+        return inbound(update, decode_callback(keyboard[1][0]["callback_data"]), callback=True)
+
+    user = await users.get(platform, 1)
+    assert user is not None
+    user.dialog_state = "PROFILE_NICKNAME"
+    await users.save(user)
+    text_attempt = click(1).model_copy(update={"text": cancel.value, "callback": None})
+    assert "введите никнейм ещё раз" in (await engine.handle(text_attempt)).text
+    assert not publisher.commands
+
+    response = await engine.handle(click(2))
+    assert response.deferred and response.command_enqueued
+    (command,) = publisher.commands
+    assert command.operation is Operation.CANCEL
+    assert command.event_id == event.event_id
+    assert command.platform is platform
+    assert command.participant_key == key
+
+    await tables.cancel(event.event_id, operation_id=command.operation_id, participant_key=key)
+    assert (await engine.handle(click(3))).text == "Участие в этой игре уже отменено."
+    await engine.events.archive(event.event_id, datetime.now(UTC))
+    assert (await engine.handle(click(4))).text == INACTIVE_GAME_RESPONSE
+    assert len(publisher.commands) == 1
 
 
 @pytest.mark.asyncio

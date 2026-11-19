@@ -6,6 +6,7 @@ MAIN_MENU = "Главное меню"
 MAIN_MENU_LABEL = "В главное меню"
 ADMIN_MENU = "Администрирование"
 CONFIRM_PARTICIPATION = "✅ Подтвердить участие"
+CANCEL_FROM_NOTIFICATION_PREFIX = "cancel:game:"
 
 
 def main_menu_button() -> Button:
@@ -18,3 +19,7 @@ def admin_menu_button() -> Button:
 
 def confirmation_button(event_id: str) -> Button:
     return Button(label=CONFIRM_PARTICIPATION, value=f"select:confirm:{event_id}")
+
+
+def cancellation_button(event_id: str) -> Button:
+    return Button(label="Отменить участие", value=f"{CANCEL_FROM_NOTIFICATION_PREFIX}{event_id}")

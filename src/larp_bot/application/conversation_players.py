@@ -889,9 +889,28 @@ class PlayerConversationMixin(ConversationContext):
             return BotResponse(text="Игра не найдена.")
         if event.archived_at is not None:
             return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        return await self._enqueue_cancellation(message, event)
+
+    async def _cancel_from_notification(self, user: User, message: InboundMessage, event_id: str) -> BotResponse:
+        await self._clear(user)
+        event = await self.events.get(event_id)
+        if event is None:
+            return BotResponse(text="Игра не найдена.")
+        if event.archived_at is not None:
+            return BotResponse(text=INACTIVE_GAME_RESPONSE)
+        registration = await self.registrations.get_registration(
+            event_id, message.identity.platform, message.identity.platform_user_id
+        )
+        if registration is None:
+            return BotResponse(text="Вы не записаны на эту игру.")
+        if registration.attendance_status is AttendanceStatus.CANCELLED:
+            return BotResponse(text="Участие в этой игре уже отменено.")
+        return await self._enqueue_cancellation(message, event)
+
+    async def _enqueue_cancellation(self, message: InboundMessage, event: Event) -> BotResponse:
         await self.registrations.enqueue(
             operation=Operation.CANCEL,
-            event_id=str(context["event_id"]),
+            event_id=event.event_id,
             platform=message.identity.platform,
             user_id=message.identity.platform_user_id,
             payload=EmptyPayload(),
