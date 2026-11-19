@@ -43,7 +43,7 @@ from .conversation_support import (
     text_field_retry,
 )
 from .deadlines import format_confirmation_deadline
-from .navigation import ADMIN_MENU, MAIN_MENU, admin_menu_button, main_menu_button
+from .navigation import ADMIN_MENU, CANCEL_FROM_NOTIFICATION_PREFIX, MAIN_MENU, admin_menu_button, main_menu_button
 from .ports import AdminConfigProvider, DeferredTransport, EventRepository, UserRepository, VkUserIdResolver, new_user
 from .services import EventAdministrationService, RegistrationService
 
@@ -155,6 +155,10 @@ class ConversationCoreMixin(ConversationContext):
             return BotResponse(
                 text=UNSUPPORTED_CONTENT_RESPONSE,
                 buttons=user.last_bot_buttons.copy(),
+            )
+        elif message.callback is not None and value.startswith(CANCEL_FROM_NOTIFICATION_PREFIX):
+            response = await self._cancel_from_notification(
+                user, message, value.removeprefix(CANCEL_FROM_NOTIFICATION_PREFIX)
             )
         elif (retry := text_field_retry(user, message, value)) is not None:
             response = retry

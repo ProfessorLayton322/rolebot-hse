@@ -33,7 +33,7 @@ from larp_bot.domain.security import participant_key
 
 from .deadlines import format_confirmation_deadline
 from .identity import global_users, identities_for_local_user
-from .navigation import confirmation_button, main_menu_button
+from .navigation import cancellation_button, confirmation_button, main_menu_button
 from .notification_helpers import (
     _active_main_roster,
     _chat_link_recipient_keys,
@@ -407,9 +407,10 @@ class ConfirmationNotificationService:
                 text = f"Подтверждение участия в игре {reference} открыто! Подтвердите участие до {deadline} (мск)."
             else:
                 text = f"Напоминаем: подтвердите участие в игре {reference} до {deadline} (мск)."
+            text += "\n\nЕсли вы не сможете участвовать в игре - настоятельно вас просим отменить участие"
             attendance_statuses = {AttendanceStatus.WAITING}
             main_roster_only = False
-            buttons = [confirmation_button(event.event_id)]
+            buttons = [confirmation_button(event.event_id), cancellation_button(event.event_id)]
 
         delivered = 0
         for recipient in await self._recipients(

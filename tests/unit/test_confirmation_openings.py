@@ -94,6 +94,13 @@ async def test_scheduled_confirmation_opens_and_notifies_waiting_players(
     assert transport.sent[0][0:2] == (Platform.TELEGRAM, 2)
     assert "Подтверждение участия" in transport.sent[0][3]
     assert "12.11.26 19:00 (мск)" in transport.sent[0][3]
+    assert transport.sent[0][3].endswith(
+        "\n\nЕсли вы не сможете участвовать в игре - настоятельно вас просим отменить участие"
+    )
+    assert [(button.label, button.value) for button in transport.sent[0][4]] == [
+        ("✅ Подтвердить участие", f"select:confirm:{event.event_id}"),
+        ("Отменить участие", f"cancel:game:{event.event_id}"),
+    ]
 
 
 @pytest.mark.asyncio
