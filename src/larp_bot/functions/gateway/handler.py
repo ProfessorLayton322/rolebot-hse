@@ -12,7 +12,7 @@ from larp_bot.adapters.runtime_config import RuntimeConfigProvider
 from larp_bot.adapters.telegram import parse_telegram_group_update, parse_telegram_update, telegram_inline_payload
 from larp_bot.adapters.vk import parse_vk_event
 from larp_bot.application.ports import AdminConfigProvider
-from larp_bot.domain.models import Platform
+from larp_bot.domain.models import Platform, UnreachableRecipient
 from larp_bot.domain.security import constant_time_valid_signature, sign_request
 from larp_bot.functions.container import AppContainer, iam_token_from_context
 from larp_bot.functions.runtime_mode import RuntimeGate, runtime_controls_configured
@@ -167,13 +167,19 @@ async def _telegram(event: dict[str, Any], body: bytes, app: AppContainer) -> di
                 "telegram": telegram_inline_payload(result, inbound.chat_id or inbound.identity.platform_user_id),
             },
         )
-    await app.transport.send(
-        platform=Platform.TELEGRAM,
-        user_id=inbound.chat_id or inbound.identity.platform_user_id,
-        request_id=f"{request_id}:ack",
-        text=result.text,
-        buttons=result.buttons,
-    )
+    try:
+        await app.transport.send(
+            platform=Platform.TELEGRAM,
+            user_id=inbound.chat_id or inbound.identity.platform_user_id,
+            request_id=f"{request_id}:ack",
+            text=result.text,
+            buttons=result.buttons,
+        )
+    except UnreachableRecipient:
+        # The update has already been handled (and any command enqueued). A
+        # blocked or deleted account cannot receive this reply; acknowledge the
+        # webhook so Telegram does not retry the same update and raise alarms.
+        LOGGER.warning("telegram_response_recipient_unreachable", extra={"request_id": request_id})
     return _response(200, {"delivery": "deferred", "request_id": request_id})
 
 
